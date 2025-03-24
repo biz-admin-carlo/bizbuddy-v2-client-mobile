@@ -1,0 +1,64 @@
+{
+  "expo": {
+    "name": "BizBuddy",
+    "slug": "biz-buddy-slug",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "myapp",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bizsolutions.bizbuddy",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
+        "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.bizsolutions.bizbuddy",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "45eef022-cbe4-482f-9b4b-8ab4d83697f3"
+      }
+    },
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "url": "https://u.expo.dev/45eef022-cbe4-482f-9b4b-8ab4d83697f3"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  .dark {
+    background-color: #000; /* Example of dark background */
+    color: #fff; /* Example of light text color in dark mode */
+  }
+}
