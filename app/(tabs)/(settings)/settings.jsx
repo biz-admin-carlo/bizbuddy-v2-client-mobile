@@ -513,10 +513,10 @@ const Settings = () => {
               <View className="p-3 rounded-[8px] bg-orange-100 flex-row items-center">
                 <Ionicons name="star" size={18} color="#f97316" style={{ marginRight: 8 }} />
                 <Text className="text-orange-700 text-[14px] flex-1">
-                  Subscription: <Text className="font-bold">{subscriptionPlan}</Text>
+                  <Text className="font-bold">{subscriptionPlan}</Text>
                 </Text>
                 <TouchableOpacity onPress={() => Linking.openURL(WEBSITE_URL)}>
-                  <Text className="text-[12px] text-orange-700 font-bold">Website</Text>
+                  <Text className="text-[12px] text-orange-700 font-bold">Web</Text>
                 </TouchableOpacity>
               </View>
             </View>
