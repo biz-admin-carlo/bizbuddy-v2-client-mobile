@@ -19,29 +19,17 @@
     "@react-native-async-storage/async-storage": "1.23.1",
     "@react-native-community/datetimepicker": "8.2.0",
     "@react-native-community/netinfo": "^11.4.1",
-    "@react-navigation/native": "^7.0.0",
     "axios": "^1.7.8",
-    "date-fns": "^4.1.0",
     "expo": "~52.0.26",
     "expo-constants": "~17.0.5",
     "expo-device": "^7.0.1",
-    "expo-linear-gradient": "~14.0.2",
     "expo-linking": "~7.0.5",
     "expo-local-authentication": "^15.0.2",
     "expo-location": "^18.0.2",
     "expo-notifications": "^0.29.14",
-    "expo-print": "~14.0.2",
     "expo-router": "~4.0.17",
     "expo-secure-store": "~14.0.0",
-    "expo-sharing": "~13.0.0",
-    "expo-splash-screen": "^0.29.22",
-    "expo-status-bar": "^2.0.1",
-    "formik": "^2.4.6",
-    "jwt-decode": "^4.0.0",
-    "lucide-react": "^0.479.0",
-    "lucide-react-native": "^0.483.0",
     "nativewind": "^4.1.23",
-    "radio-buttons-react-native": "^1.0.4",
     "react": "18.3.1",
     "react-native": "^0.76.3",
     "react-native-calendars": "^1.1310.0",
@@ -55,8 +43,12 @@
     "react-native-webview": "13.12.5",
     "socket.io-client": "^4.8.1",
     "tailwindcss": "^3.4.15",
-    "yup": "^1.4.0",
     "zustand": "^4.4.0"
+  },
+  "overrides": {
+    "react-native-user-inactivity": {
+      "react": "18.3.1"
+    }
   },
   "devDependencies": {
     "jest": "^29.2.1",
