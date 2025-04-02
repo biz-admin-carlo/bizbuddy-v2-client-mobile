@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.bizsolutions.bizbuddy",
+      "bundleIdentifier": "com.bizsolutions.mybizbuddy",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
         "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active."
@@ -21,7 +21,7 @@
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.bizsolutions.bizbuddy",
+      "package": "com.bizsolutions.mybizbuddy",
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
