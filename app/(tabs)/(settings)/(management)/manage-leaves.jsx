@@ -56,7 +56,12 @@ const LeaveStatusBadge = ({ status }) => {
   }
   return (
     <View className={`flex-row items-center rounded-full px-3 py-1 ${bgColor}`}>
-      <Ionicons name={icon} size={14} color={textColor.replace("text-", "")} style={{ marginRight: 4 }} />
+      <Ionicons
+        name={icon}
+        size={14}
+        color={textColor.replace("text-", "")}
+        style={{ marginRight: 4 }}
+      />
       <Text className={`text-xs font-medium ${textColor}`}>{status}</Text>
     </View>
   );
@@ -78,8 +83,17 @@ const FilterOption = ({ label, isActive, onPress }) => {
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const animatePress = () => {
     Animated.sequence([
-      Animated.timing(scaleAnim, { toValue: 0.92, duration: 70, useNativeDriver: true }),
-      Animated.spring(scaleAnim, { toValue: 1, friction: 3, tension: 40, useNativeDriver: true }),
+      Animated.timing(scaleAnim, {
+        toValue: 0.92,
+        duration: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 3,
+        tension: 40,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
   const handlePress = () => {
@@ -88,8 +102,20 @@ const FilterOption = ({ label, isActive, onPress }) => {
   };
   return (
     <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
-      <TouchableOpacity onPress={handlePress} activeOpacity={0.8} className={`px-4 py-2 rounded-full mr-2 ${isActive ? "bg-orange-400" : "bg-gray-100"}`}>
-        <Text className={`text-sm font-medium ${isActive ? "text-white" : "text-gray-700"}`}>{label}</Text>
+      <TouchableOpacity
+        onPress={handlePress}
+        activeOpacity={0.8}
+        className={`px-4 py-2 rounded-full mr-2 ${
+          isActive ? "bg-orange-400" : "bg-gray-100"
+        }`}
+      >
+        <Text
+          className={`text-sm font-medium ${
+            isActive ? "text-white" : "text-gray-700"
+          }`}
+        >
+          {label}
+        </Text>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -99,8 +125,17 @@ const SortOption = ({ label, icon, onPress, isActive }) => {
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const animatePress = () => {
     Animated.sequence([
-      Animated.timing(scaleAnim, { toValue: 0.95, duration: 70, useNativeDriver: true }),
-      Animated.spring(scaleAnim, { toValue: 1, friction: 3, tension: 40, useNativeDriver: true }),
+      Animated.timing(scaleAnim, {
+        toValue: 0.95,
+        duration: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 3,
+        tension: 40,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
   const handlePress = () => {
@@ -109,10 +144,34 @@ const SortOption = ({ label, icon, onPress, isActive }) => {
   };
   return (
     <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
-      <TouchableOpacity onPress={handlePress} activeOpacity={0.8} className={`flex-row items-center p-4 ${isActive ? "bg-orange-50" : ""}`}>
-        <Ionicons name={icon} size={20} color={isActive ? "#f97316" : "#6B7280"} style={{ marginRight: 12 }} />
-        <Text className={`text-base ${isActive ? "text-orange-400 font-medium" : "text-gray-700"}`}>{label}</Text>
-        {isActive && <Ionicons name="checkmark" size={20} color="#f97316" style={{ marginLeft: "auto" }} />}
+      <TouchableOpacity
+        onPress={handlePress}
+        activeOpacity={0.8}
+        className={`flex-row items-center p-4 ${
+          isActive ? "bg-orange-50" : ""
+        }`}
+      >
+        <Ionicons
+          name={icon}
+          size={20}
+          color={isActive ? "#f97316" : "#6B7280"}
+          style={{ marginRight: 12 }}
+        />
+        <Text
+          className={`text-base ${
+            isActive ? "text-orange-400 font-medium" : "text-gray-700"
+          }`}
+        >
+          {label}
+        </Text>
+        {isActive && (
+          <Ionicons
+            name="checkmark"
+            size={20}
+            color="#f97316"
+            style={{ marginLeft: "auto" }}
+          />
+        )}
       </TouchableOpacity>
     </Animated.View>
   );
@@ -123,9 +182,13 @@ const EmptyListComponent = ({ activeFilter }) => (
     <View className="w-16 h-16 rounded-full bg-gray-100 items-center justify-center mb-4">
       <Ionicons name="document-text-outline" size={28} color="#9CA3AF" />
     </View>
-    <Text className="text-gray-500 text-lg font-medium mb-1">No leave requests</Text>
+    <Text className="text-gray-500 text-lg font-medium mb-1">
+      No leave requests
+    </Text>
     <Text className="text-gray-400 text-center px-10">
-      {activeFilter === "all" ? "You don't have any leave requests to manage at the moment." : `No ${activeFilter} leave requests found.`}
+      {activeFilter === "all"
+        ? "You don't have any leave requests to manage at the moment."
+        : `No ${activeFilter} leave requests found.`}
     </Text>
   </View>
 );
@@ -183,7 +246,8 @@ export default function ManageLeaves() {
   const actionsPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
       onPanResponderMove: (_, gestureState) => {
         if (gestureState.dy > 0) {
           actionsModalY.setValue(gestureState.dy);
@@ -193,7 +257,10 @@ export default function ManageLeaves() {
         if (gestureState.dy > 100) {
           closeActionsModal();
         } else {
-          Animated.spring(actionsModalY, { toValue: 0, useNativeDriver: true }).start();
+          Animated.spring(actionsModalY, {
+            toValue: 0,
+            useNativeDriver: true,
+          }).start();
         }
       },
     })
@@ -208,9 +275,11 @@ export default function ManageLeaves() {
     try {
       const token = await SecureStore.getItemAsync("token");
       if (!token) {
-        RNAlert.alert("Authentication Error", "You are not logged in. Please sign in again.", [
-          { text: "OK", onPress: () => router.replace("(auth)/login-user") },
-        ]);
+        RNAlert.alert(
+          "Authentication Error",
+          "You are not logged in. Please sign in again.",
+          [{ text: "OK", onPress: () => router.replace("(auth)/login-user") }]
+        );
         return;
       }
       const res = await fetch(`${API_BASE_URL}/api/leaves/`, {
@@ -234,8 +303,18 @@ export default function ManageLeaves() {
 
   const applyFiltersAndSort = useCallback((data, filter, sort) => {
     let result = [...data];
+
     if (filter !== "all") {
-      result = result.filter((item) => item.status.toLowerCase() === filter.toLowerCase());
+      const target = filter.toLowerCase();
+      result = result.filter((item) => {
+        const status = (item.status || "").toLowerCase();
+        // Allow "Pending" filter to also match values like "pending_approval"
+        // that may come from the backend.
+        if (target === "pending") {
+          return status.includes("pending");
+        }
+        return status === target;
+      });
     }
     switch (sort) {
       case "newest":
@@ -265,8 +344,16 @@ export default function ManageLeaves() {
 
   useEffect(() => {
     Animated.parallel([
-      Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
-      Animated.timing(slideAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 500,
+        useNativeDriver: true,
+      }),
     ]).start();
     fetchApproverLeaves();
   }, []);
@@ -287,15 +374,32 @@ export default function ManageLeaves() {
   const openSortModal = () => {
     setSortModalVisible(true);
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.spring(sortModalAnim, { toValue: 0, tension: 70, friction: 12, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.spring(sortModalAnim, {
+        toValue: 0,
+        tension: 70,
+        friction: 12,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
 
   const closeSortModal = () => {
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
-      Animated.timing(sortModalAnim, { toValue: height, duration: 300, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(sortModalAnim, {
+        toValue: height,
+        duration: 300,
+        useNativeDriver: true,
+      }),
     ]).start(() => {
       setSortModalVisible(false);
     });
@@ -313,15 +417,32 @@ export default function ManageLeaves() {
     setActionsModalVisible(true);
     actionsModalY.setValue(height);
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.spring(actionsModalY, { toValue: 0, tension: 60, friction: 12, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.spring(actionsModalY, {
+        toValue: 0,
+        tension: 60,
+        friction: 12,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
 
   const closeActionsModal = () => {
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
-      Animated.timing(actionsModalY, { toValue: height, duration: 300, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(actionsModalY, {
+        toValue: height,
+        duration: 300,
+        useNativeDriver: true,
+      }),
     ]).start(() => {
       setActionsModalVisible(false);
       setActionsLeave(null);
@@ -338,17 +459,23 @@ export default function ManageLeaves() {
       closeActionsModal();
       return;
     }
-    setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: "approving" }));
+    setProcessingLeaves((prev) => ({
+      ...prev,
+      [actionsLeave.id]: "approving",
+    }));
     try {
       const token = await SecureStore.getItemAsync("token");
-      const res = await fetch(`${API_BASE_URL}/api/leaves/${actionsLeave.id}/approve`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ approverComments: approveComments }),
-      });
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${actionsLeave.id}/approve`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ approverComments: approveComments }),
+        }
+      );
       const data = await res.json();
       if (res.ok) {
         RNAlert.alert("Success", "Leave approved successfully.");
@@ -370,17 +497,23 @@ export default function ManageLeaves() {
       closeActionsModal();
       return;
     }
-    setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: "rejecting" }));
+    setProcessingLeaves((prev) => ({
+      ...prev,
+      [actionsLeave.id]: "rejecting",
+    }));
     try {
       const token = await SecureStore.getItemAsync("token");
-      const res = await fetch(`${API_BASE_URL}/api/leaves/${actionsLeave.id}/reject`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ approverComments: rejectComments }),
-      });
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${actionsLeave.id}/reject`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ approverComments: rejectComments }),
+        }
+      );
       const data = await res.json();
       if (res.ok) {
         RNAlert.alert("Success", "Leave rejected successfully.");
@@ -433,8 +566,17 @@ export default function ManageLeaves() {
     const cardScale = new Animated.Value(1);
     const animatePress = () => {
       Animated.sequence([
-        Animated.timing(cardScale, { toValue: 0.97, duration: 70, useNativeDriver: true }),
-        Animated.spring(cardScale, { toValue: 1, friction: 3, tension: 40, useNativeDriver: true }),
+        Animated.timing(cardScale, {
+          toValue: 0.97,
+          duration: 70,
+          useNativeDriver: true,
+        }),
+        Animated.spring(cardScale, {
+          toValue: 1,
+          friction: 3,
+          tension: 40,
+          useNativeDriver: true,
+        }),
       ]).start();
     };
     return (
@@ -453,9 +595,15 @@ export default function ManageLeaves() {
             <View className="flex-row justify-between items-center pb-4 border-b border-slate-200">
               <View className="flex-row items-center">
                 <View className="w-7 h-7 rounded-full bg-orange-100 items-center justify-center mr-1">
-                  <Ionicons name={getLeaveTypeIcon(item.leaveType)} size={20} color="#f97316" />
+                  <Ionicons
+                    name={getLeaveTypeIcon(item.leaveType)}
+                    size={20}
+                    color="#f97316"
+                  />
                 </View>
-                <Text className="text-base font-semibold text-slate-700">{item.leaveType}</Text>
+                <Text className="text-base font-semibold text-slate-700">
+                  {item.leaveType}
+                </Text>
               </View>
               <LeaveStatusBadge status={item.status} />
             </View>
@@ -463,29 +611,41 @@ export default function ManageLeaves() {
             <View className="rounded-lg p-3 border-b border-slate-200 ">
               <View className="flex-row items-center mb-1 ">
                 <Ionicons name="person-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">Requester: {item.User.email}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  Requester: {item.User.email}
+                </Text>
               </View>
               <View className="flex-row items-center mb-1">
                 <Ionicons name="time-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">Submitted: {formatDateTime(item.createdAt)}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  Submitted: {formatDateTime(item.createdAt)}
+                </Text>
               </View>
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">Start: {formatDateTime(item.startDate)}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  Start: {formatDateTime(item.startDate)}
+                </Text>
               </View>
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">End: {formatDateTime(item.endDate)}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  End: {formatDateTime(item.endDate)}
+                </Text>
               </View>
               <View className="flex-row items-center">
                 <Ionicons name="pencil-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">Reason: {item.leaveReason || "No reason"}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  Reason: {item.leaveReason || "No reason"}
+                </Text>
               </View>
             </View>
             <View className="rounded-lg p-3 ">
               <View className="flex-row items-center mb-1">
                 <Ionicons name="pencil-outline" size={16} color="#6B7280" />
-                <Text className="text-gray-600 text-sm ml-2">Comments: {item.approverComments}</Text>
+                <Text className="text-gray-600 text-sm ml-2">
+                  Comments: {item.approverComments}
+                </Text>
               </View>
             </View>
           </View>
@@ -499,11 +659,16 @@ export default function ManageLeaves() {
   // ---------------------------------------------------------------------
 
   const renderApproveSection = () => {
-    const isProcessing = actionsLeave && processingLeaves[actionsLeave.id] === "approving";
+    const isProcessing =
+      actionsLeave && processingLeaves[actionsLeave.id] === "approving";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4 ">
-        <Text className="text-lg font-bold text-slate-700 mb-3">Approve Leave</Text>
-        <Text className="text-slate-600 mb-4">Optionally provide comments for approving this leave:</Text>
+        <Text className="text-lg font-bold text-slate-700 mb-3">
+          Approve Leave
+        </Text>
+        <Text className="text-slate-600 mb-4">
+          Optionally provide comments for approving this leave:
+        </Text>
         <View className="bg-white rounded-lg px-3 py-2 mb-4">
           <TextInput
             value={approveComments}
@@ -515,15 +680,28 @@ export default function ManageLeaves() {
           />
         </View>
         <View className="w-full flex-col gap-2 p-1">
-          <TouchableOpacity onPress={confirmApprove} activeOpacity={0.8} className="bg-orange-500 py-3 px-5 rounded-lg" disabled={isProcessing}>
+          <TouchableOpacity
+            onPress={confirmApprove}
+            activeOpacity={0.8}
+            className="bg-orange-500 py-3 px-5 rounded-lg"
+            disabled={isProcessing}
+          >
             {isProcessing ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Text className="text-white font-semibold text-center text-lg ">Approve</Text>
+              <Text className="text-white font-semibold text-center text-lg ">
+                Approve
+              </Text>
             )}
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setExpandedSection(null)} activeOpacity={0.8} className="border border-slate-200 py-3 px-5 rounded-lg">
-            <Text className="text-slate-700  text-center text-lg font-semibold ">Cancel</Text>
+          <TouchableOpacity
+            onPress={() => setExpandedSection(null)}
+            activeOpacity={0.8}
+            className="border border-slate-200 py-3 px-5 rounded-lg"
+          >
+            <Text className="text-slate-700  text-center text-lg font-semibold ">
+              Cancel
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -531,11 +709,16 @@ export default function ManageLeaves() {
   };
 
   const renderRejectSection = () => {
-    const isProcessing = actionsLeave && processingLeaves[actionsLeave.id] === "rejecting";
+    const isProcessing =
+      actionsLeave && processingLeaves[actionsLeave.id] === "rejecting";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4">
-        <Text className="text-lg font-bold text-slate-700 mb-3">Reject Leave</Text>
-        <Text className="text-slate-600 mb-4">Optionally provide comments for rejecting this leave:</Text>
+        <Text className="text-lg font-bold text-slate-700 mb-3">
+          Reject Leave
+        </Text>
+        <Text className="text-slate-600 mb-4">
+          Optionally provide comments for rejecting this leave:
+        </Text>
         <View className="bg-white rounded-lg px-3 py-2 mb-4">
           <TextInput
             value={rejectComments}
@@ -547,15 +730,28 @@ export default function ManageLeaves() {
           />
         </View>
         <View className="w-full flex-col gap-2 p-1">
-          <TouchableOpacity onPress={confirmReject} activeOpacity={0.8} className="bg-orange-500 py-3 px-5 rounded-lg" disabled={isProcessing}>
+          <TouchableOpacity
+            onPress={confirmReject}
+            activeOpacity={0.8}
+            className="bg-orange-500 py-3 px-5 rounded-lg"
+            disabled={isProcessing}
+          >
             {isProcessing ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Text className="text-white font-semibold text-center text-lg ">Reject</Text>
+              <Text className="text-white font-semibold text-center text-lg ">
+                Reject
+              </Text>
             )}
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setExpandedSection(null)} activeOpacity={0.8} className="border border-slate-200 py-3 px-5 rounded-lg">
-            <Text className="text-slate-700  text-center text-lg font-semibold">Cancel</Text>
+          <TouchableOpacity
+            onPress={() => setExpandedSection(null)}
+            activeOpacity={0.8}
+            className="border border-slate-200 py-3 px-5 rounded-lg"
+          >
+            <Text className="text-slate-700  text-center text-lg font-semibold">
+              Cancel
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -563,21 +759,40 @@ export default function ManageLeaves() {
   };
 
   const renderDeleteSection = () => {
-    const isProcessing = actionsLeave && processingLeaves[actionsLeave.id] === "deleting";
+    const isProcessing =
+      actionsLeave && processingLeaves[actionsLeave.id] === "deleting";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4">
-        <Text className="text-lg font-bold text-slate-700 mb-3">Delete Leave</Text>
-        <Text className="text-slate-600 mb-4">Are you sure you want to delete this leave request? This action cannot be undone.</Text>
+        <Text className="text-lg font-bold text-slate-700 mb-3">
+          Delete Leave
+        </Text>
+        <Text className="text-slate-600 mb-4">
+          Are you sure you want to delete this leave request? This action cannot
+          be undone.
+        </Text>
         <View className="w-full flex-col gap-2 p-1">
-          <TouchableOpacity onPress={confirmDelete} activeOpacity={0.8} className="bg-orange-500 py-3 px-5 rounded-lg" disabled={isProcessing}>
+          <TouchableOpacity
+            onPress={confirmDelete}
+            activeOpacity={0.8}
+            className="bg-orange-500 py-3 px-5 rounded-lg"
+            disabled={isProcessing}
+          >
             {isProcessing ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Text className="text-white font-semibold text-center text-lg ">Delete</Text>
+              <Text className="text-white font-semibold text-center text-lg ">
+                Delete
+              </Text>
             )}
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => setExpandedSection(null)} activeOpacity={0.8} className="border border-slate-200 py-3 px-5 rounded-lg">
-            <Text className="text-slate-700  text-center text-lg font-semibold">Cancel</Text>
+          <TouchableOpacity
+            onPress={() => setExpandedSection(null)}
+            activeOpacity={0.8}
+            className="border border-slate-200 py-3 px-5 rounded-lg"
+          >
+            <Text className="text-slate-700  text-center text-lg font-semibold">
+              Cancel
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -598,16 +813,60 @@ export default function ManageLeaves() {
         <Text className="text-xl font-bold text-slate-800">Settings</Text>
       </View>
 
-      <Animated.View style={{ flex: 1, opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
+      <Animated.View
+        style={{
+          flex: 1,
+          opacity: fadeAnim,
+          transform: [{ translateY: slideAnim }],
+        }}
+      >
         <View className="px-4 pb-2">
-          <Text className="text-2xl font-bold text-gray-800">Manage Leaves</Text>
-          <Text className="text-gray-500 mb-4">Review and manage leave requests from your team</Text>
+          <Text className="text-2xl font-bold text-gray-800">
+            Manage Leaves
+          </Text>
+          <Text className="text-gray-500 mb-4">
+            Review and manage leave requests from your team
+          </Text>
+          {/* New Leave Request Button */}
+          <View className="mb-4">
+            <TouchableOpacity
+              onPress={() => router.push("/(tabs)/(leaves)/leaves-request")}
+              activeOpacity={0.85}
+              className="self-start flex-row items-center bg-orange-400 px-4 py-3 rounded-lg"
+            >
+              <Ionicons
+                name="add-circle-outline"
+                size={18}
+                color="#FFFFFF"
+                style={{ marginRight: 6 }}
+              />
+              <Text className="text-white font-semibold">
+                New Leave Request
+              </Text>
+            </TouchableOpacity>
+          </View>
           {/* Filter row */}
           <View className="flex-row mb-4">
-            <FilterOption label="All" isActive={activeFilter === "all"} onPress={() => setActiveFilter("all")} />
-            <FilterOption label="Pending" isActive={activeFilter === "pending"} onPress={() => setActiveFilter("pending")} />
-            <FilterOption label="Approved" isActive={activeFilter === "approved"} onPress={() => setActiveFilter("approved")} />
-            <FilterOption label="Rejected" isActive={activeFilter === "rejected"} onPress={() => setActiveFilter("rejected")} />
+            <FilterOption
+              label="All"
+              isActive={activeFilter === "all"}
+              onPress={() => setActiveFilter("all")}
+            />
+            <FilterOption
+              label="Pending"
+              isActive={activeFilter === "pending"}
+              onPress={() => setActiveFilter("pending")}
+            />
+            <FilterOption
+              label="Approved"
+              isActive={activeFilter === "approved"}
+              onPress={() => setActiveFilter("approved")}
+            />
+            <FilterOption
+              label="Rejected"
+              isActive={activeFilter === "rejected"}
+              onPress={() => setActiveFilter("rejected")}
+            />
           </View>
         </View>
 
@@ -620,9 +879,21 @@ export default function ManageLeaves() {
             data={filteredLeaves}
             keyExtractor={(item) => item.id.toString()}
             renderItem={renderItem}
-            contentContainerStyle={[{ paddingHorizontal: 16, paddingBottom: 20 }, filteredLeaves.length === 0 && { flex: 1 }]}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={["#cbd5e1"]} tintColor="#cbd5e1" />}
-            ListEmptyComponent={<EmptyListComponent activeFilter={activeFilter} />}
+            contentContainerStyle={[
+              { paddingHorizontal: 16, paddingBottom: 20 },
+              filteredLeaves.length === 0 && { flex: 1 },
+            ]}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                colors={["#cbd5e1"]}
+                tintColor="#cbd5e1"
+              />
+            }
+            ListEmptyComponent={
+              <EmptyListComponent activeFilter={activeFilter} />
+            }
             showsVerticalScrollIndicator={false}
           />
         )}
@@ -630,18 +901,32 @@ export default function ManageLeaves() {
         {/* Sort Modal (unchanged) */}
         {sortModalVisible && (
           <View style={StyleSheet.absoluteFill}>
-            <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim }]}>
-              <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeSortModal} />
+            <Animated.View
+              style={[
+                StyleSheet.absoluteFill,
+                { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
+              ]}
+            >
+              <TouchableOpacity
+                style={{ flex: 1 }}
+                activeOpacity={1}
+                onPress={closeSortModal}
+              />
             </Animated.View>
             <Animated.View
               className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl"
-              style={{ transform: [{ translateY: sortModalAnim }], paddingBottom: Platform.OS === "ios" ? 30 : 20 }}
+              style={{
+                transform: [{ translateY: sortModalAnim }],
+                paddingBottom: Platform.OS === "ios" ? 30 : 20,
+              }}
             >
               <View className="items-center py-3">
                 <View className="w-10 h-1 bg-slate-200 rounded-full" />
               </View>
               <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-                <Text className="text-lg font-bold text-slate-800">Sort By</Text>
+                <Text className="text-lg font-bold text-slate-800">
+                  Sort By
+                </Text>
                 <TouchableOpacity onPress={closeSortModal}>
                   <Ionicons name="close" size={24} color="#64748b" />
                 </TouchableOpacity>
@@ -699,7 +984,13 @@ export default function ManageLeaves() {
       {/* ACTIONS MODAL – mimicking the Departments modal style */}
       {actionsModalVisible && actionsLeave && (
         <View style={StyleSheet.absoluteFill}>
-          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.5)", opacity: modalBgAnim }]} onTouchEnd={closeActionsModal} />
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: "rgba(0,0,0,0.5)", opacity: modalBgAnim },
+            ]}
+            onTouchEnd={closeActionsModal}
+          />
           <Animated.View
             style={{
               transform: [{ translateY: actionsModalY }],
@@ -715,11 +1006,16 @@ export default function ManageLeaves() {
               paddingBottom: Platform.OS === "ios" ? 0 : 20,
             }}
           >
-            <View className="items-center py-3" {...actionsPanResponder.panHandlers}>
+            <View
+              className="items-center py-3"
+              {...actionsPanResponder.panHandlers}
+            >
               <View className="w-10 h-1 bg-slate-200 rounded-lg" />
             </View>
             <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100 mb-4">
-              <Text className="text-lg font-bold text-slate-700">Leave Actions</Text>
+              <Text className="text-lg font-bold text-slate-700">
+                Leave Actions
+              </Text>
               <TouchableOpacity onPress={closeActionsModal}>
                 <Ionicons name="close" size={24} color="#64748b" />
               </TouchableOpacity>
@@ -736,11 +1032,21 @@ export default function ManageLeaves() {
                       >
                         <View className="flex-row items-center">
                           <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
-                            <Ionicons name="checkmark-circle" size={18} color="#fff" />
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={18}
+                              color="#fff"
+                            />
                           </View>
-                          <Text className="text-slate-700 font-medium">Approve Leave</Text>
+                          <Text className="text-slate-700 font-medium">
+                            Approve Leave
+                          </Text>
                         </View>
-                        <Ionicons name="chevron-forward" size={24} color="#64748b" />
+                        <Ionicons
+                          name="chevron-forward"
+                          size={24}
+                          color="#64748b"
+                        />
                       </TouchableOpacity>
                       <TouchableOpacity
                         onPress={() => setExpandedSection("reject")}
@@ -748,11 +1054,21 @@ export default function ManageLeaves() {
                       >
                         <View className="flex-row items-center">
                           <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
-                            <Ionicons name="close-circle" size={18} color="#fff" />
+                            <Ionicons
+                              name="close-circle"
+                              size={18}
+                              color="#fff"
+                            />
                           </View>
-                          <Text className="text-slate-700 font-medium">Reject Leave</Text>
+                          <Text className="text-slate-700 font-medium">
+                            Reject Leave
+                          </Text>
                         </View>
-                        <Ionicons name="chevron-forward" size={24} color="#64748b" />
+                        <Ionicons
+                          name="chevron-forward"
+                          size={24}
+                          color="#64748b"
+                        />
                       </TouchableOpacity>
                     </>
                   )}
@@ -764,9 +1080,15 @@ export default function ManageLeaves() {
                       <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
                         <Ionicons name="trash-bin" size={18} color="#fff" />
                       </View>
-                      <Text className="text-slate-700 font-medium">Delete Leave</Text>
+                      <Text className="text-slate-700 font-medium">
+                        Delete Leave
+                      </Text>
                     </View>
-                    <Ionicons name="chevron-forward" size={24} color="#64748b" />
+                    <Ionicons
+                      name="chevron-forward"
+                      size={24}
+                      color="#64748b"
+                    />
                   </TouchableOpacity>
                 </>
               )}

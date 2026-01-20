@@ -9,22 +9,30 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": true,
       "bundleIdentifier": "com.bizsolutions.bizbuddy",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
-        "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active."
+        "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active.",
+        "NSUserNotificationsUsageDescription": "BizBuddy sends notifications to remind you about work schedules, break times, and important updates."
       }
     },
     "android": {
+      "googleServicesFile": "./serviceKey.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#ffffff"
       },
       "package": "com.bizsolutions.bizbuddy",
+      "versionCode": 5,
       "permissions": [
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "WAKE_LOCK",
+        "POST_NOTIFICATIONS"
       ]
     },
     "web": {
@@ -34,7 +42,16 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#ffffff",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-font"
     ],
     "experiments": {
       "typedRoutes": true
@@ -44,12 +61,10 @@
         "origin": false
       },
       "eas": {
-        "projectId": "45eef022-cbe4-482f-9b4b-8ab4d83697f3"
+        "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
     "runtimeVersion": "1.0.0",
-    "updates": {
-      "url": "https://u.expo.dev/45eef022-cbe4-482f-9b4b-8ab4d83697f3"
-    }
+    "owner": "miguelalviar"
   }
 }

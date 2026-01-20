@@ -23,7 +23,15 @@ import * as SecureStore from "expo-secure-store";
 import useAuthStore from "../../store/useAuthStore";
 import usePresenceStore from "../../store/presenceStore";
 import { API_BASE_URL } from "../../config/constant";
-import { Ionicons, MaterialCommunityIcons, FontAwesome5, Feather } from "@expo/vector-icons";
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+  FontAwesome5,
+  Feather,
+} from "@expo/vector-icons";
+import { NotificationService } from "../../utils/notificationService";
+import NotificationPermissionModal from "../../components/NotificationPermissionModal";
+import { useNotificationPermission } from "../../hooks/useNotificationPermission";
 
 const { height } = Dimensions.get("window");
 
@@ -60,6 +68,7 @@ const Profile = () => {
   const { token, logout } = useAuthStore();
   const { presenceStatus, lastActiveAt } = usePresenceStore();
   const router = useRouter();
+  const { showModal, closeModal, openModal } = useNotificationPermission();
 
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState(null);
@@ -93,6 +102,7 @@ const Profile = () => {
   // Individual button animations
   const editButtonScale = useRef(new Animated.Value(1)).current;
   const passButtonScale = useRef(new Animated.Value(1)).current;
+
   const signOutButtonScale = useRef(new Animated.Value(1)).current;
   const saveButtonScale = useRef(new Animated.Value(1)).current;
   const updatePassButtonScale = useRef(new Animated.Value(1)).current;
@@ -183,6 +193,46 @@ const Profile = () => {
     ]).start();
     fetchProfile();
   }, []);
+
+  // Show notification modal when profile loads (after login)
+  useEffect(() => {
+    const showNotificationModal = async () => {
+      try {
+        console.log(
+          "🔔 Profile: Checking if we should show notification modal..."
+        );
+        const shouldRequest =
+          await NotificationService.shouldRequestPermissions();
+        console.log("🔔 Profile: Should request permissions:", shouldRequest);
+
+        if (shouldRequest) {
+          console.log("🔔 Profile: Showing notification permission modal...");
+          openModal();
+        } else {
+          console.log(
+            "✅ Profile: Notification permissions already granted, syncing token..."
+          );
+          // Try to sync existing FCM token to backend
+          const result = await NotificationService.handlePostLoginTokenSync(
+            token
+          );
+          if (result.success) {
+            console.log("✅ Profile: FCM token synced successfully");
+          } else {
+            console.log("ℹ️ Profile: FCM token not synced:", result.reason);
+          }
+        }
+      } catch (error) {
+        console.error(
+          "❌ Profile: Error checking notification permissions:",
+          error
+        );
+      }
+    };
+
+    // Small delay to ensure profile is loaded
+    setTimeout(showNotificationModal, 1000);
+  }, [token]);
 
   const openEditModal = () => {
     // Prefill data
@@ -337,7 +387,10 @@ const Profile = () => {
       }
     } catch (error) {
       console.error("Error fetching profile:", error);
-      Alert.alert("Error", "An unexpected error occurred while fetching your profile.");
+      Alert.alert(
+        "Error",
+        "An unexpected error occurred while fetching your profile."
+      );
     } finally {
       setLoading(false);
     }
@@ -417,14 +470,17 @@ const Profile = () => {
         return;
       }
       const payload = { oldPassword, newPassword, confirmPassword };
-      const response = await fetch(`${API_BASE_URL}/api/account/change-password`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentToken}`,
-        },
-        body: JSON.stringify(payload),
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/api/account/change-password`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${currentToken}`,
+          },
+          body: JSON.stringify(payload),
+        }
+      );
       const data = await response.json();
       if (response.ok) {
         Alert.alert("Success", "Password changed successfully.", [
@@ -479,8 +535,12 @@ const Profile = () => {
 
   const getInitials = () => {
     if (!profile || !profile.profile) return "?";
-    const first = profile.profile.firstName ? profile.profile.firstName.charAt(0) : "";
-    const last = profile.profile.lastName ? profile.profile.lastName.charAt(0) : "";
+    const first = profile.profile.firstName
+      ? profile.profile.firstName.charAt(0)
+      : "";
+    const last = profile.profile.lastName
+      ? profile.profile.lastName.charAt(0)
+      : "";
     return (first + last).toUpperCase();
   };
 
@@ -489,7 +549,9 @@ const Profile = () => {
       <SafeAreaView className="flex-1 bg-white">
         <View className="flex-1 justify-center items-center">
           <ActivityIndicator size="large" color="#f97316" />
-          <Text className="mt-3 text-slate-600 font-medium">Loading profile...</Text>
+          <Text className="mt-3 text-slate-600 font-medium">
+            Loading profile...
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -508,7 +570,9 @@ const Profile = () => {
           <View className="px-5 py-6">
             {/* Header */}
             <View className="flex-row justify-between items-center mb-6">
-              <Text className="text-2xl font-bold text-slate-700">My Profile</Text>
+              <Text className="text-2xl font-bold text-slate-700">
+                My Profile
+              </Text>
               <TouchableOpacity
                 onPress={fetchProfile}
                 className="w-10 h-10 rounded-full items-center justify-center"
@@ -539,27 +603,48 @@ const Profile = () => {
                 >
                   <View className="flex-row items-center mb-1">
                     <View className="w-[70px] h-[70px] rounded-full bg-orange-400 items-center justify-center mr-4">
-                      <Text className="text-white text-2xl font-bold">{getInitials()}</Text>
+                      <Text className="text-white text-2xl font-bold">
+                        {getInitials()}
+                      </Text>
                     </View>
                     <View className="flex-1">
                       <Text className="text-xl font-bold text-slate-700">
                         {profile.profile.firstName} {profile.profile.lastName}
                       </Text>
-                      <Text className="text-slate-600 text-base">@{profile.user.username}</Text>
+                      <Text className="text-slate-600 text-base">
+                        @{profile.user.username}
+                      </Text>
 
                       <View className="flex-row items-center mt-2">
                         <View
                           className={`px-3 py-1 rounded-full flex-row items-center ${
-                            presenceStatus === "available" ? "bg-teal-500/20" : "bg-orange-400/20"
+                            presenceStatus === "available"
+                              ? "bg-teal-500/20"
+                              : "bg-orange-400/20"
                           }`}
                         >
-                          <View className="w-2 h-2 rounded-full mr-2" style={{ backgroundColor: getStatusColor(presenceStatus) }} />
-                          <Text className={`${presenceStatus === "available" ? "text-teal-500" : "text-orange-400"} text-xs font-bold`}>
-                            {presenceStatus ? presenceStatus.toUpperCase() : "Offline"}
+                          <View
+                            className="w-2 h-2 rounded-full mr-2"
+                            style={{
+                              backgroundColor: getStatusColor(presenceStatus),
+                            }}
+                          />
+                          <Text
+                            className={`${
+                              presenceStatus === "available"
+                                ? "text-teal-500"
+                                : "text-orange-400"
+                            } text-xs font-bold`}
+                          >
+                            {presenceStatus
+                              ? presenceStatus.toUpperCase()
+                              : "Offline"}
                           </Text>
                         </View>
                         {presenceStatus === "away" && lastActiveAt && (
-                          <Text className="text-slate-600 text-sm italic ml-2">{formatAwayDuration(lastActiveAt, presenceStatus)}</Text>
+                          <Text className="text-slate-600 text-sm italic ml-2">
+                            {formatAwayDuration(lastActiveAt, presenceStatus)}
+                          </Text>
                         )}
                       </View>
                     </View>
@@ -571,32 +656,56 @@ const Profile = () => {
                   <View>
                     <View className="flex-row items-center mb-4">
                       <View className="w-10 h-10 rounded-md bg-orange-50 items-center justify-center mr-3">
-                        <MaterialCommunityIcons name="email-outline" size={20} color="#f97316" />
+                        <MaterialCommunityIcons
+                          name="email-outline"
+                          size={20}
+                          color="#f97316"
+                        />
                       </View>
                       <View>
-                        <Text className="text-slate-600 text-xs font-medium mb-1">Email</Text>
-                        <Text className="text-slate-600 font-medium">{profile.user.email}</Text>
+                        <Text className="text-slate-600 text-xs font-medium mb-1">
+                          Email
+                        </Text>
+                        <Text className="text-slate-600 font-medium">
+                          {profile.user.email}
+                        </Text>
                       </View>
                     </View>
 
                     <View className="flex-row items-center mb-4">
                       <View className="w-10 h-10 rounded-md bg-orange-50 items-center justify-center mr-3">
-                        <MaterialCommunityIcons name="phone-outline" size={20} color="#f97316" />
+                        <MaterialCommunityIcons
+                          name="phone-outline"
+                          size={20}
+                          color="#f97316"
+                        />
                       </View>
                       <View>
-                        <Text className="text-slate-600 text-xs font-medium mb-1">Phone</Text>
-                        <Text className="text-slate-600 font-medium">{profile.profile.phoneNumber || "Not provided"}</Text>
+                        <Text className="text-slate-600 text-xs font-medium mb-1">
+                          Phone
+                        </Text>
+                        <Text className="text-slate-600 font-medium">
+                          {profile.profile.phoneNumber || "Not provided"}
+                        </Text>
                       </View>
                     </View>
 
                     <View className="flex-row items-center">
                       <View className="w-10 h-10 rounded-md bg-orange-50 items-center justify-center mr-3">
-                        <FontAwesome5 name="building" size={18} color="#f97316" />
+                        <FontAwesome5
+                          name="building"
+                          size={18}
+                          color="#f97316"
+                        />
                       </View>
                       <View>
-                        <Text className="text-slate-600 text-xs font-medium mb-1">Company</Text>
+                        <Text className="text-slate-600 text-xs font-medium mb-1">
+                          Company
+                        </Text>
                         <Text className="text-slate-600 font-medium">
-                          {profile.company && profile.company.name ? profile.company.name : "Not assigned"}
+                          {profile.company && profile.company.name
+                            ? profile.company.name
+                            : "Not assigned"}
                         </Text>
                       </View>
                     </View>
@@ -605,7 +714,9 @@ const Profile = () => {
 
                 {/* Action Buttons */}
                 <View className="mt-4">
-                  <Animated.View style={{ transform: [{ scale: editButtonScale }] }}>
+                  <Animated.View
+                    style={{ transform: [{ scale: editButtonScale }] }}
+                  >
                     <TouchableOpacity
                       onPress={() => {
                         animateButtonPress(editButtonScale);
@@ -624,12 +735,20 @@ const Profile = () => {
                       <View className="w-10 h-10 rounded-lg bg-orange-400 items-center justify-center mr-3">
                         <Feather name="edit-2" size={18} color="#ffff" />
                       </View>
-                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">Update Profile</Text>
-                      <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">
+                        Update Profile
+                      </Text>
+                      <Ionicons
+                        name="chevron-forward"
+                        size={20}
+                        color="#9ca3af"
+                      />
                     </TouchableOpacity>
                   </Animated.View>
 
-                  <Animated.View style={{ transform: [{ scale: passButtonScale }] }}>
+                  <Animated.View
+                    style={{ transform: [{ scale: passButtonScale }] }}
+                  >
                     <TouchableOpacity
                       onPress={() => {
                         animateButtonPress(passButtonScale);
@@ -648,12 +767,20 @@ const Profile = () => {
                       <View className="w-10 h-10 rounded-lg bg-orange-400 items-center justify-center mr-3">
                         <Feather name="lock" size={18} color="#ffff" />
                       </View>
-                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">Change Password</Text>
-                      <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">
+                        Change Password
+                      </Text>
+                      <Ionicons
+                        name="chevron-forward"
+                        size={20}
+                        color="#9ca3af"
+                      />
                     </TouchableOpacity>
                   </Animated.View>
 
-                  <Animated.View style={{ transform: [{ scale: signOutButtonScale }] }}>
+                  <Animated.View
+                    style={{ transform: [{ scale: signOutButtonScale }] }}
+                  >
                     <TouchableOpacity
                       onPress={() => {
                         animateButtonPress(signOutButtonScale);
@@ -672,8 +799,14 @@ const Profile = () => {
                       <View className="w-10 h-10 rounded-lg bg-orange-400 items-center justify-center mr-3">
                         <Feather name="log-out" size={18} color="#ffff" />
                       </View>
-                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">Sign Out</Text>
-                      <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
+                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">
+                        Sign Out
+                      </Text>
+                      <Ionicons
+                        name="chevron-forward"
+                        size={20}
+                        color="#9ca3af"
+                      />
                     </TouchableOpacity>
                   </Animated.View>
                 </View>
@@ -681,9 +814,17 @@ const Profile = () => {
             ) : (
               <View className="items-center justify-center py-10">
                 <Feather name="user-x" size={60} color="#d1d5db" />
-                <Text className="text-slate-700 text-lg font-bold mt-4">No profile data available</Text>
-                <Text className="text-slate-600 text-center mt-2">We couldn't load your profile information</Text>
-                <TouchableOpacity onPress={fetchProfile} className="bg-orange-400 py-3 px-6 rounded-lg mt-6" activeOpacity={0.8}>
+                <Text className="text-slate-700 text-lg font-bold mt-4">
+                  No profile data available
+                </Text>
+                <Text className="text-slate-600 text-center mt-2">
+                  We couldn't load your profile information
+                </Text>
+                <TouchableOpacity
+                  onPress={fetchProfile}
+                  className="bg-orange-400 py-3 px-6 rounded-lg mt-6"
+                  activeOpacity={0.8}
+                >
                   <Text className="text-white font-bold">Try Again</Text>
                 </TouchableOpacity>
               </View>
@@ -699,8 +840,17 @@ const Profile = () => {
       */}
       {isEditModalVisible && (
         <View style={StyleSheet.absoluteFill}>
-          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim }]}>
-            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeEditModal} />
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
+            ]}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={closeEditModal}
+            />
           </Animated.View>
 
           <Animated.View
@@ -718,30 +868,50 @@ const Profile = () => {
               paddingBottom: Platform.OS === "ios" ? 0 : 20,
             }}
           >
-            <View className="items-center py-3" {...editPanResponder.panHandlers}>
+            <View
+              className="items-center py-3"
+              {...editPanResponder.panHandlers}
+            >
               <View className="w-10 h-1 bg-slate-200 rounded-full" />
             </View>
 
             <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-              <Text className="text-lg font-bold text-slate-700">Update Profile</Text>
+              <Text className="text-lg font-bold text-slate-700">
+                Update Profile
+              </Text>
             </View>
 
             <ScrollView className="px-5 py-4">
               {updateError ? (
                 <View className="p-4 bg-red-50 border border-red-200 rounded-lg mb-5">
-                  <Text className="text-red-600 font-medium">{updateError}</Text>
+                  <Text className="text-red-600 font-medium">
+                    {updateError}
+                  </Text>
                 </View>
               ) : null}
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Username</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Username
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
                 <Feather name="user" size={18} color="#9ca3af" />
-                <TextInput className="flex-1 ml-2 text-slate-700" value={username} onChangeText={setUsername} placeholderTextColor="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={username}
+                  onChangeText={setUsername}
+                  placeholderTextColor="#9ca3af"
+                />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Email</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Email
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
-                <MaterialCommunityIcons name="email-outline" size={18} color="#9ca3af" />
+                <MaterialCommunityIcons
+                  name="email-outline"
+                  size={18}
+                  color="#9ca3af"
+                />
                 <TextInput
                   className="flex-1 ml-2 text-slate-700"
                   value={email}
@@ -752,21 +922,41 @@ const Profile = () => {
                 />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">First Name</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                First Name
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
                 <Feather name="user" size={18} color="#9ca3af" />
-                <TextInput className="flex-1 ml-2 text-slate-700" value={firstName} onChangeText={setFirstName} placeholderTextColor="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={firstName}
+                  onChangeText={setFirstName}
+                  placeholderTextColor="#9ca3af"
+                />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Last Name</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Last Name
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
                 <Feather name="user" size={18} color="#9ca3af" />
-                <TextInput className="flex-1 ml-2 text-slate-700" value={lastName} onChangeText={setLastName} placeholderTextColor="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={lastName}
+                  onChangeText={setLastName}
+                  placeholderTextColor="#9ca3af"
+                />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Phone Number</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Phone Number
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
-                <MaterialCommunityIcons name="phone-outline" size={18} color="#9ca3af" />
+                <MaterialCommunityIcons
+                  name="phone-outline"
+                  size={18}
+                  color="#9ca3af"
+                />
                 <TextInput
                   className="flex-1 ml-2 text-slate-700"
                   value={phoneNumber}
@@ -781,13 +971,17 @@ const Profile = () => {
                   <ActivityIndicator size="small" color="#f97316" />
                 ) : (
                   <View className="flex-col w-full ">
-                    <Animated.View style={{ transform: [{ scale: saveButtonScale }] }}>
+                    <Animated.View
+                      style={{ transform: [{ scale: saveButtonScale }] }}
+                    >
                       <TouchableOpacity
                         onPress={handleUpdateProfile}
                         className="bg-orange-400 py-4 rounded-lg w-full items-center mb-3"
                         activeOpacity={0.8}
                       >
-                        <Text className="text-white font-semibold text-center">Save Changes</Text>
+                        <Text className="text-white font-semibold text-center">
+                          Save Changes
+                        </Text>
                       </TouchableOpacity>
                     </Animated.View>
                     <TouchableOpacity
@@ -795,7 +989,9 @@ const Profile = () => {
                       className="border-slate-200 border py-3.5 rounded-lg w-full items-center mb-1 "
                       activeOpacity={0.8}
                     >
-                      <Text className="text-slate-700 font-semibold text-center">Cancel</Text>
+                      <Text className="text-slate-700 font-semibold text-center">
+                        Cancel
+                      </Text>
                     </TouchableOpacity>
                   </View>
                 )}
@@ -812,8 +1008,17 @@ const Profile = () => {
       */}
       {isPassModalVisible && (
         <View style={StyleSheet.absoluteFill}>
-          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim }]}>
-            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closePassModal} />
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
+            ]}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={closePassModal}
+            />
           </Animated.View>
 
           <Animated.View
@@ -831,12 +1036,17 @@ const Profile = () => {
               paddingBottom: Platform.OS === "ios" ? 0 : 20,
             }}
           >
-            <View className="items-center py-3" {...passPanResponder.panHandlers}>
+            <View
+              className="items-center py-3"
+              {...passPanResponder.panHandlers}
+            >
               <View className="w-10 h-1 bg-slate-200 rounded-full" />
             </View>
 
             <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-              <Text className="text-lg font-bold text-slate-700">Change Password</Text>
+              <Text className="text-lg font-bold text-slate-700">
+                Change Password
+              </Text>
             </View>
 
             <ScrollView className="px-5 py-4">
@@ -846,9 +1056,15 @@ const Profile = () => {
                 </View>
               ) : null}
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Current Password</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Current Password
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
-                <MaterialCommunityIcons name="lock-outline" size={18} color="#9ca3af" />
+                <MaterialCommunityIcons
+                  name="lock-outline"
+                  size={18}
+                  color="#9ca3af"
+                />
                 <TextInput
                   secureTextEntry
                   className="flex-1 ml-2 text-slate-700"
@@ -858,9 +1074,15 @@ const Profile = () => {
                 />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">New Password</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                New Password
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
-                <MaterialCommunityIcons name="lock-outline" size={18} color="#9ca3af" />
+                <MaterialCommunityIcons
+                  name="lock-outline"
+                  size={18}
+                  color="#9ca3af"
+                />
                 <TextInput
                   secureTextEntry
                   className="flex-1 ml-2 text-slate-700"
@@ -870,9 +1092,15 @@ const Profile = () => {
                 />
               </View>
 
-              <Text className="text-sm font-semibold text-slate-600 mb-2">Confirm New Password</Text>
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Confirm New Password
+              </Text>
               <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
-                <MaterialCommunityIcons name="lock-outline" size={18} color="#9ca3af" />
+                <MaterialCommunityIcons
+                  name="lock-outline"
+                  size={18}
+                  color="#9ca3af"
+                />
                 <TextInput
                   secureTextEntry
                   className="flex-1 ml-2 text-slate-700"
@@ -887,13 +1115,17 @@ const Profile = () => {
                   <ActivityIndicator size="small" color="#f97316" />
                 ) : (
                   <View className="w-full">
-                    <Animated.View style={{ transform: [{ scale: updatePassButtonScale }] }}>
+                    <Animated.View
+                      style={{ transform: [{ scale: updatePassButtonScale }] }}
+                    >
                       <TouchableOpacity
                         onPress={handleChangePassword}
                         className="bg-orange-400 py-4 rounded-lg w-full items-center mb-3"
                         activeOpacity={0.8}
                       >
-                        <Text className="text-white font-semibold">Change Password</Text>
+                        <Text className="text-white font-semibold">
+                          Change Password
+                        </Text>
                       </TouchableOpacity>
                     </Animated.View>
                     <TouchableOpacity
@@ -901,7 +1133,9 @@ const Profile = () => {
                       className="border-slate-200 border py-3.5 rounded-lg w-full items-center mb-3"
                       activeOpacity={0.8}
                     >
-                      <Text className="text-slate-600 font-semibold  text-lg">Cancel</Text>
+                      <Text className="text-slate-600 font-semibold  text-lg">
+                        Cancel
+                      </Text>
                     </TouchableOpacity>
                   </View>
                 )}
@@ -918,8 +1152,17 @@ const Profile = () => {
       */}
       {isSignOutModalVisible && (
         <View style={StyleSheet.absoluteFill}>
-          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim }]}>
-            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeSignOutModal} />
+          <Animated.View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
+            ]}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={closeSignOutModal}
+            />
           </Animated.View>
 
           <Animated.View
@@ -947,8 +1190,12 @@ const Profile = () => {
                 <Feather name="log-out" size={28} color="#f97316" />
               </View>
 
-              <Text className="text-xl font-bold text-slate-700 mb-2">Sign Out</Text>
-              <Text className="text-slate-600 text-center mb-6">Are you sure you want to sign out of your account?</Text>
+              <Text className="text-xl font-bold text-slate-700 mb-2">
+                Sign Out
+              </Text>
+              <Text className="text-slate-600 text-center mb-6">
+                Are you sure you want to sign out of your account?
+              </Text>
 
               <View className="w-full">
                 {signingOut ? (
@@ -958,9 +1205,19 @@ const Profile = () => {
                   </View>
                 ) : (
                   <>
-                    <Animated.View style={{ transform: [{ scale: confirmSignOutButtonScale }] }}>
-                      <TouchableOpacity onPress={handleSignOut} className="bg-orange-400 py-3.5 rounded-lg w-full items-center mb-3" activeOpacity={0.8}>
-                        <Text className="text-white font-bold text-base">Yes, Sign Out</Text>
+                    <Animated.View
+                      style={{
+                        transform: [{ scale: confirmSignOutButtonScale }],
+                      }}
+                    >
+                      <TouchableOpacity
+                        onPress={handleSignOut}
+                        className="bg-orange-400 py-3.5 rounded-lg w-full items-center mb-3"
+                        activeOpacity={0.8}
+                      >
+                        <Text className="text-white font-bold text-base">
+                          Yes, Sign Out
+                        </Text>
                       </TouchableOpacity>
                     </Animated.View>
 
@@ -969,7 +1226,9 @@ const Profile = () => {
                       className="py-3.5 rounded-lg w-full items-center border border-slate-200"
                       activeOpacity={0.8}
                     >
-                      <Text className="text-slate-700 font-bold text-center">Cancel</Text>
+                      <Text className="text-slate-700 font-bold text-center">
+                        Cancel
+                      </Text>
                     </TouchableOpacity>
                   </>
                 )}
@@ -978,6 +1237,16 @@ const Profile = () => {
           </Animated.View>
         </View>
       )}
+
+      {/* Notification Permission Modal */}
+      <NotificationPermissionModal
+        visible={showModal}
+        onClose={closeModal}
+        onPermissionGranted={(result) => {
+          console.log("✅ Profile: Notification permissions granted via modal");
+          closeModal();
+        }}
+      />
     </SafeAreaView>
   );
 };

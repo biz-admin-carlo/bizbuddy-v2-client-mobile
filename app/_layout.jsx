@@ -1,7 +1,10 @@
 // app/_layout.jsx
-import React from "react";
+import React, { useEffect } from "react";
 import { Stack } from "expo-router";
 import "../global.css";
+
+// Initialize Firebase
+import "../utils/firebaseConfig";
 
 export default function RootLayout() {
   return (

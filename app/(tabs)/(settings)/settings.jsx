@@ -23,7 +23,12 @@ import {
 import { useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL, WEBSITE_URL } from "../../../config/constant";
-import { MaterialIcons, Ionicons, Feather, FontAwesome5 } from "@expo/vector-icons";
+import {
+  MaterialIcons,
+  Ionicons,
+  Feather,
+  FontAwesome5,
+} from "@expo/vector-icons";
 import io from "socket.io-client";
 
 // Same as your department page, define a min and max offset
@@ -41,7 +46,9 @@ const Settings = () => {
   // Instead of starting from 'height', we'll start from a partial off-screen
   // position to allow partial expansions as in the department page.
   // (We keep modalOpacity for the background fade.)
-  const modalY = useRef(new Animated.Value(Platform.OS === "ios" ? 700 : 500)).current;
+  const modalY = useRef(
+    new Animated.Value(Platform.OS === "ios" ? 700 : 500)
+  ).current;
   const modalOpacity = useRef(new Animated.Value(0)).current;
 
   // Animation for option press
@@ -236,7 +243,8 @@ const Settings = () => {
   const lastName = profile?.profile?.lastName || "";
   const userRole = (profile?.user?.role || "").toLowerCase();
   const companyName = profile?.company?.name || "Unknown Company";
-  const subscriptionPlan = profile?.subscription?.plan?.name || "No Subscription";
+  const subscriptionPlan =
+    profile?.subscription?.plan?.name || "No Subscription";
   const planLower = subscriptionPlan.toLowerCase();
 
   // Improved option configuration with better grouping
@@ -285,6 +293,32 @@ const Settings = () => {
       iconType: "ionicons",
       group: "Schedule Management",
     },
+    // Employee-facing Leave Requests (submit/view own)
+    {
+      title: "Leave Requests",
+      route: "/(tabs)/(leaves)/leaves-request",
+      roles: ["employee"],
+      icon: "calendar-outline",
+      iconType: "ionicons",
+      group: "Schedule Management",
+    },
+    // Overtime Management / Requests
+    {
+      title: "Overtime Requests",
+      route: "/(tabs)/(overtime)",
+      roles: ["employee"],
+      icon: "stopwatch-outline",
+      iconType: "ionicons",
+      group: "Schedule Management",
+    },
+    {
+      title: "Overtime Requests",
+      route: "./(management)/manage-overtimes",
+      roles: ["admin", "superadmin"],
+      icon: "stopwatch-outline",
+      iconType: "ionicons",
+      group: "Schedule Management",
+    },
     {
       title: "Punch Locations",
       route: "./manage-locations",
@@ -295,51 +329,61 @@ const Settings = () => {
       group: "Schedule Management",
     },
 
-    // Payroll Group
-    {
-      title: "Payroll Settings",
-      route: "./payroll-payroll-settings",
-      roles: ["admin", "superadmin"],
-      icon: "settings",
-      iconType: "feather",
-      group: "Payroll",
-    },
-    {
-      title: "Payrate Settings",
-      route: "./payroll-payrate-settings",
-      roles: ["admin", "superadmin"],
-      icon: "dollar-sign",
-      iconType: "feather",
-      group: "Payroll",
-    },
-    {
-      title: "Payroll Records",
-      route: "./payroll-payroll-records",
-      roles: ["admin", "superadmin"],
-      icon: "file-text",
-      iconType: "feather",
-      group: "Payroll",
-    },
-    {
-      title: "Generate Payroll",
-      route: "./payroll-generate-payroll",
-      roles: ["admin", "superadmin"],
-      icon: "calculator",
-      iconType: "ionicons", // Changed from "feather" to "ionicons"
-      group: "Payroll",
-    },
+    // Payroll Group (admin/superadmin) temporarily disabled in UI
+    // {
+    //   title: "Payroll Settings",
+    //   route: "./payroll-payroll-settings",
+    //   roles: ["admin", "superadmin"],
+    //   icon: "settings",
+    //   iconType: "feather",
+    //   group: "Payroll",
+    // },
+    // {
+    //   title: "Payrate Settings",
+    //   route: "./payroll-payrate-settings",
+    //   roles: ["admin", "superadmin"],
+    //   icon: "dollar-sign",
+    //   iconType: "feather",
+    //   group: "Payroll",
+    // },
+    // {
+    //   title: "Payroll Records",
+    //   route: "./payroll-payroll-records",
+    //   roles: ["admin", "superadmin"],
+    //   icon: "file-text",
+    //   iconType: "feather",
+    //   group: "Payroll",
+    // },
+    // {
+    //   title: "Generate Payroll",
+    //   route: "./payroll-generate-payroll",
+    //   roles: ["admin", "superadmin"],
+    //   icon: "calculator",
+    //   iconType: "ionicons", // Changed from "feather" to "ionicons"
+    //   group: "Payroll",
+    // },
   ];
 
   // Filter options based on role
   let filteredOptions = [];
   if (userRole === "employee") {
-    filteredOptions = []; // Employees see no administrative options
+    filteredOptions = optionsConfig.filter((option) =>
+      option.roles.includes("employee")
+    );
   } else if (userRole === "supervisor") {
-    filteredOptions = optionsConfig.filter((option) => option.roles.includes("supervisor"));
+    filteredOptions = optionsConfig.filter((option) =>
+      option.roles.includes("supervisor")
+    );
   } else if (userRole === "admin") {
-    filteredOptions = optionsConfig.filter((option) => option.roles.includes("admin"));
+    filteredOptions = optionsConfig.filter((option) =>
+      option.roles.includes("admin")
+    );
   } else if (userRole === "superadmin") {
-    filteredOptions = optionsConfig;
+    // Superadmins should see only options explicitly assigned to them,
+    // not employee-only options like the second "Leave Requests" entry.
+    filteredOptions = optionsConfig.filter((option) =>
+      option.roles.includes("superadmin")
+    );
   }
 
   // Determine if an option should be locked based on subscription
@@ -422,8 +466,12 @@ const Settings = () => {
             }),
           }}
         >
-          <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">{getIconComponent(icon, iconType)}</View>
-          <Text className="text-medium font-semibold text-slate-700 flex-1">{title}</Text>
+          <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
+            {getIconComponent(icon, iconType)}
+          </View>
+          <Text className="text-medium font-semibold text-slate-700 flex-1">
+            {title}
+          </Text>
           {locked ? (
             <View className="bg-[#ffedd5] rounded-[16px] p-1.5">
               <MaterialIcons name="lock" size={16} color="#f97316" />
@@ -449,11 +497,18 @@ const Settings = () => {
           }}
         >
           {/* Header */}
-          <View className="px-5 py-6 border-b" style={{ borderBottomColor: "#e2e8f0", borderBottomWidth: 1 }}>
+          <View
+            className="px-5 py-6 border-b"
+            style={{ borderBottomColor: "#e2e8f0", borderBottomWidth: 1 }}
+          >
             <View className="flex-row items-center justify-between mb-4">
-              <Text className="text-[24px] font-bold text-[#1e293b]">Settings</Text>
+              <Text className="text-[24px] font-bold text-[#1e293b]">
+                Settings
+              </Text>
 
-              <Animated.View style={{ transform: [{ scale: refreshButtonScale }] }}>
+              <Animated.View
+                style={{ transform: [{ scale: refreshButtonScale }] }}
+              >
                 <TouchableOpacity
                   onPress={handleRefresh}
                   className="w-10 h-10 rounded-full items-center justify-center "
@@ -503,20 +558,31 @@ const Settings = () => {
                   </Text>
                   <View className="flex-row items-center mt-1">
                     <View className="bg-orange-400 rounded-[12px] px-2 py-0.5 mr-2">
-                      <Text className="text-[12px] text-white font-[500]">{userRole.charAt(0).toUpperCase() + userRole.slice(1)}</Text>
+                      <Text className="text-[12px] text-white font-[500]">
+                        {userRole.charAt(0).toUpperCase() + userRole.slice(1)}
+                      </Text>
                     </View>
-                    <Text className="text-[14px] text-[#64748b]">{companyName}</Text>
+                    <Text className="text-[14px] text-[#64748b]">
+                      {companyName}
+                    </Text>
                   </View>
                 </View>
               </View>
 
               <View className="p-3 rounded-[8px] bg-orange-100 flex-row items-center">
-                <Ionicons name="star" size={18} color="#f97316" style={{ marginRight: 8 }} />
+                <Ionicons
+                  name="star"
+                  size={18}
+                  color="#f97316"
+                  style={{ marginRight: 8 }}
+                />
                 <Text className="text-orange-700 text-[14px] flex-1">
                   <Text className="font-bold">{subscriptionPlan}</Text>
                 </Text>
                 <TouchableOpacity onPress={() => Linking.openURL(WEBSITE_URL)}>
-                  <Text className="text-[12px] text-orange-700 font-bold">Web</Text>
+                  <Text className="text-[12px] text-orange-700 font-bold">
+                    Web
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -531,8 +597,12 @@ const Settings = () => {
           ) : error ? (
             <View className="flex-1 justify-center items-center p-5">
               <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
-              <Text className="text-red-700 mt-4 mb-6 text-center">{error}</Text>
-              <Animated.View style={{ transform: [{ scale: retryButtonScale }] }}>
+              <Text className="text-red-700 mt-4 mb-6 text-center">
+                {error}
+              </Text>
+              <Animated.View
+                style={{ transform: [{ scale: retryButtonScale }] }}
+              >
                 <TouchableOpacity
                   onPress={() => {
                     animateButtonPress(retryButtonScale);
@@ -540,14 +610,22 @@ const Settings = () => {
                   }}
                   className="bg-[#f97316] px-6 py-3 rounded-[12px]"
                 >
-                  <Text className="text-[#ffffff] font-semibold text-[16px]">Try Again</Text>
+                  <Text className="text-[#ffffff] font-semibold text-[16px]">
+                    Try Again
+                  </Text>
                 </TouchableOpacity>
               </Animated.View>
             </View>
           ) : filteredOptions.length === 0 ? (
             <View className="flex-1 justify-center items-center p-5">
-              <Image source={require("../../../assets/images/icon.png")} className="w-20 h-20 rounded-[16px] mb-6" resizeMode="contain" />
-              <Text className="text-[18px] font-[500] mb-2 text-[#1e293b]">No Administrative Access</Text>
+              <Image
+                source={require("../../../assets/images/icon.png")}
+                className="w-20 h-20 rounded-[16px] mb-6"
+                resizeMode="contain"
+              />
+              <Text className="text-[18px] font-[500] mb-2 text-[#1e293b]">
+                No Administrative Access
+              </Text>
               <Text className="text-center text-[#64748b]">
                 {userRole === "employee"
                   ? "You don't have access to administrative features."
@@ -557,12 +635,22 @@ const Settings = () => {
               </Text>
             </View>
           ) : (
-            <ScrollView className="flex-1 px-5 pt-4" contentContainerStyle={{ paddingBottom: 30 }} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              className="flex-1 px-5 pt-4"
+              contentContainerStyle={{ paddingBottom: 30 }}
+              showsVerticalScrollIndicator={false}
+            >
               {Object.keys(groupedOptions).map((groupName, groupIndex) => (
                 <View key={groupIndex} className="mb-6">
-                  <Text className="text-sm font-medium mb-3 text-slate-500 uppercase">{groupName}</Text>
+                  <Text className="text-sm font-medium mb-3 text-slate-500 uppercase">
+                    {groupName}
+                  </Text>
                   {groupedOptions[groupName].map((option, index) => (
-                    <OptionRow key={index} option={option} index={`${groupName}-${index}`} />
+                    <OptionRow
+                      key={index}
+                      option={option}
+                      index={`${groupName}-${index}`}
+                    />
                   ))}
                 </View>
               ))}
@@ -572,9 +660,18 @@ const Settings = () => {
       </SafeAreaView>
 
       {/* Slide-up Modal for Locked Features */}
-      <Modal transparent visible={showLockedModal} onRequestClose={closeModal} animationType="none">
+      <Modal
+        transparent
+        visible={showLockedModal}
+        onRequestClose={closeModal}
+        animationType="none"
+      >
         {/* Fade the background according to modalOpacity */}
-        <Animated.View className="flex-1 bg-[rgba(0,0,0,0.5)] justify-end" style={{ opacity: modalOpacity }} onTouchEnd={closeModal}>
+        <Animated.View
+          className="flex-1 bg-[rgba(0,0,0,0.5)] justify-end"
+          style={{ opacity: modalOpacity }}
+          onTouchEnd={closeModal}
+        >
           <Animated.View
             className="bg-white rounded-t-[10px] px-5 pt-5"
             style={{
@@ -596,11 +693,17 @@ const Settings = () => {
                 <Ionicons name="lock-closed" size={32} color="#f97316" />
               </View>
 
-              <Text className="text-[20px] font-bold mb-2 text-[#1e293b]">Feature Locked</Text>
-              <Text className="text-center text-slate-500 px-4">This feature is not available for {subscriptionPlan} plan</Text>
+              <Text className="text-[20px] font-bold mb-2 text-[#1e293b]">
+                Feature Locked
+              </Text>
+              <Text className="text-center text-slate-500 px-4">
+                This feature is not available for {subscriptionPlan} plan
+              </Text>
             </View>
 
-            <Animated.View style={{ transform: [{ scale: primaryButtonScale }] }}>
+            <Animated.View
+              style={{ transform: [{ scale: primaryButtonScale }] }}
+            >
               <TouchableOpacity
                 className="bg-orange-400 py-4 rounded-lg w-full items-center mb-3 "
                 style={Platform.select({
@@ -622,7 +725,9 @@ const Settings = () => {
                   }, 100);
                 }}
               >
-                <Text className="text-white text-center font-semibold  text-lg">Visit Website</Text>
+                <Text className="text-white text-center font-semibold  text-lg">
+                  Visit Website
+                </Text>
               </TouchableOpacity>
             </Animated.View>
           </Animated.View>

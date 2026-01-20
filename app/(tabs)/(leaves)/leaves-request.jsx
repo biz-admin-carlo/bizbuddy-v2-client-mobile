@@ -54,13 +54,7 @@ const SubmitLeaves = () => {
   const [currentPicker, setCurrentPicker] = useState(null);
   const [tempPickerValue, setTempPickerValue] = useState(new Date());
   const [openLeaveType, setOpenLeaveType] = useState(false);
-  const [leaveTypeItems, setLeaveTypeItems] = useState([
-    { label: "Sick Leave", value: "Sick Leave" },
-    { label: "Vacation Leave", value: "Vacation Leave" },
-    { label: "Emergency Leave", value: "Emergency Leave" },
-    { label: "Maternity/Paternity Leave", value: "Maternity/Paternity Leave" },
-    { label: "Casual Leave", value: "Casual Leave" },
-  ]);
+  const [leaveTypeItems, setLeaveTypeItems] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [dateTimeModalVisible, setDateTimeModalVisible] = useState(false);
   const [pickerMode, setPickerMode] = useState("date");
@@ -117,12 +111,14 @@ const SubmitLeaves = () => {
     const initialize = async () => {
       const token = await SecureStore.getItemAsync("token");
       if (!token) {
-        RNAlert.alert("Authentication Error", "You are not logged in. Please sign in again.", [
-          { text: "OK", onPress: () => router.replace("(auth)/login-user") },
-        ]);
+        RNAlert.alert(
+          "Authentication Error",
+          "You are not logged in. Please sign in again.",
+          [{ text: "OK", onPress: () => router.replace("(auth)/login-user") }]
+        );
         return;
       }
-      await fetchApprovers(token);
+      await Promise.all([fetchApprovers(token), fetchLeavePolicies(token)]);
     };
     initialize();
   }, [router]);
@@ -148,17 +144,86 @@ const SubmitLeaves = () => {
     }
   };
 
+  const fetchLeavePolicies = async (token) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/leaves/policies`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      const data = await res.json();
+      console.log("[Policies] status:", res.status, "ok:", res.ok);
+      console.log("[Policies] response:", data);
+      if (res.ok) {
+        const list = Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data)
+          ? data
+          : [];
+
+        // IMPORTANT:
+        // Backend expects a "type" (e.g. SICK, VACATION) when submitting a leave.
+        // Previously we were sending the policy ID as `type`, which causes
+        // "leave policy not found for this type" errors.
+        //
+        // To fix this, we now use the policy's *type-like* field as the
+        // dropdown value so `payload.type` matches what the API expects.
+        const formatted = list.map((policy) => {
+          // This should line up with whatever the backend uses as its type key.
+          const typeKey =
+            policy?.leaveType ??
+            policy?.type ??
+            policy?.code ??
+            policy?.name ??
+            String(policy?.id ?? "");
+
+          const label =
+            policy?.displayName ??
+            policy?.leaveType ??
+            policy?.name ??
+            policy?.type ??
+            policy?.code ??
+            String(policy?.id ?? "");
+
+          return {
+            label,
+            value: String(typeKey),
+          };
+        });
+
+        setLeaveTypeItems(formatted);
+      } else {
+        RNAlert.alert(
+          "Error",
+          data?.message || "Failed to fetch leave policies."
+        );
+      }
+    } catch (error) {
+      console.error("Error fetching leave policies:", error);
+      RNAlert.alert(
+        "Error",
+        "An error occurred while fetching leave policies."
+      );
+    }
+  };
+
   const handleSubmit = async () => {
     animateButtonPress(submitButtonScale);
 
     if (!leaveType || !approverValue) {
-      RNAlert.alert("Incomplete Form", "Please fill in all required fields, including selecting an approver.");
+      RNAlert.alert(
+        "Incomplete Form",
+        "Please fill in all required fields, including selecting an approver."
+      );
       return;
     }
     const combinedStart = combineDateAndTime(leaveStartDate, leaveStartTime);
     const combinedEnd = combineDateAndTime(leaveEndDate, leaveEndTime);
     if (combinedStart > combinedEnd) {
-      RNAlert.alert("Invalid Dates", "Start Date and Time cannot be after End Date and Time.");
+      RNAlert.alert(
+        "Invalid Dates",
+        "Start Date and Time cannot be after End Date and Time."
+      );
       return;
     }
 
@@ -201,11 +266,17 @@ const SubmitLeaves = () => {
         setLeaveEndTime(new Date());
         setApproverValue("");
       } else {
-        RNAlert.alert("Error", data.message || "Failed to submit leave request.");
+        RNAlert.alert(
+          "Error",
+          data.message || "Failed to submit leave request."
+        );
       }
     } catch (error) {
       console.error("Error submitting leave request:", error);
-      RNAlert.alert("Error", "There was an issue submitting your leave request.");
+      RNAlert.alert(
+        "Error",
+        "There was an issue submitting your leave request."
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -343,7 +414,15 @@ const SubmitLeaves = () => {
 
     return (
       <DateTimePicker
-        value={isStartPicker ? (isDatePicker ? leaveStartDate : leaveStartTime) : isDatePicker ? leaveEndDate : leaveEndTime}
+        value={
+          isStartPicker
+            ? isDatePicker
+              ? leaveStartDate
+              : leaveStartTime
+            : isDatePicker
+            ? leaveEndDate
+            : leaveEndTime
+        }
         mode={isDatePicker ? "date" : "time"}
         is24Hour={true}
         display="default"
@@ -359,19 +438,46 @@ const SubmitLeaves = () => {
     </View>
   );
 
-  const DateTimeSelector = ({ label, date, time, onDatePress, onTimePress }) => (
+  const DateTimeSelector = ({
+    label,
+    date,
+    time,
+    onDatePress,
+    onTimePress,
+  }) => (
     <View className="mb-5">
       <FormLabel text={label} />
       <View className="flex-row justify-between">
-        <Animated.View style={{ flex: 1, marginRight: 8, transform: [{ scale: dateButtonScale }] }}>
-          <TouchableOpacity className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center" onPress={onDatePress} activeOpacity={0.8}>
+        <Animated.View
+          style={{
+            flex: 1,
+            marginRight: 8,
+            transform: [{ scale: dateButtonScale }],
+          }}
+        >
+          <TouchableOpacity
+            className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center"
+            onPress={onDatePress}
+            activeOpacity={0.8}
+          >
             <Text className="text-slate-800">{date.toLocaleDateString()}</Text>
             <Ionicons name="calendar-outline" size={18} color="#6B7280" />
           </TouchableOpacity>
         </Animated.View>
-        <Animated.View style={{ flex: 1, transform: [{ scale: timeButtonScale }] }}>
-          <TouchableOpacity className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center" onPress={onTimePress} activeOpacity={0.8}>
-            <Text className="text-slate-800">{time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
+        <Animated.View
+          style={{ flex: 1, transform: [{ scale: timeButtonScale }] }}
+        >
+          <TouchableOpacity
+            className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center"
+            onPress={onTimePress}
+            activeOpacity={0.8}
+          >
+            <Text className="text-slate-800">
+              {time.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </Text>
             <Ionicons name="time-outline" size={18} color="#6B7280" />
           </TouchableOpacity>
         </Animated.View>
@@ -387,7 +493,11 @@ const SubmitLeaves = () => {
         keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-          <ScrollView contentContainerStyle={{ paddingBottom: 80 }} keyboardShouldPersistTaps="handled" nestedScrollEnabled={true}>
+          <ScrollView
+            contentContainerStyle={{ paddingBottom: 80 }}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled={true}
+          >
             <Animated.View
               style={{
                 opacity: fadeAnim,
@@ -395,8 +505,27 @@ const SubmitLeaves = () => {
               }}
             >
               <View className="px-5 mb-6">
-                <Text className="text-2xl font-bold text-slate-800 mb-1">Request Leave</Text>
-                <Text className="text-slate-500">Fill in the details to submit your leave request</Text>
+                <View className="flex-row justify-between items-center mb-1">
+                  <View>
+                    <Text className="text-2xl font-bold text-slate-800">
+                      Request Leave
+                    </Text>
+                    <Text className="text-slate-500">
+                      Fill in the details to submit your leave request
+                    </Text>
+                  </View>
+                  {/* <TouchableOpacity
+                    onPress={() =>
+                      router.push("/(tabs)/(leaves)/leaves-approval")
+                    }
+                    activeOpacity={0.8}
+                    className="ml-3 px-3 py-2 rounded-full bg-slate-100"
+                  >
+                    <Text className="text-xs font-semibold text-slate-700">
+                      View Leave History
+                    </Text>
+                  </TouchableOpacity> */}
+                </View>
               </View>
 
               {/* Leave Type Dropdown */}
@@ -409,6 +538,17 @@ const SubmitLeaves = () => {
                   setOpen={setOpenLeaveType}
                   setValue={setLeaveType}
                   setItems={setLeaveTypeItems}
+                  onChangeValue={(val) => {
+                    console.log("[LeaveType] value:", val, "type:", typeof val);
+                  }}
+                  onSelectItem={(item) => {
+                    console.log(
+                      "[LeaveType] item:",
+                      item,
+                      "value type:",
+                      typeof item?.value
+                    );
+                  }}
                   placeholder="Select Leave Type"
                   textStyle={{ color: "#374151" }}
                   style={{
@@ -496,19 +636,36 @@ const SubmitLeaves = () => {
 
                 {/* Submit Button */}
                 <View className="mt-6">
-                  <Animated.View style={{ transform: [{ scale: submitButtonScale }] }}>
+                  <Animated.View
+                    style={{ transform: [{ scale: submitButtonScale }] }}
+                  >
                     <TouchableOpacity
                       onPress={handleSubmit}
                       disabled={isSubmitting}
-                      className={`py-4 rounded-lg flex-row justify-center items-center ${isSubmitting ? "bg-orange-400" : "bg-orange-400"}`}
+                      className={`py-4 rounded-lg flex-row justify-center items-center ${
+                        isSubmitting ? "bg-orange-400" : "bg-orange-400"
+                      }`}
                       activeOpacity={0.8}
                     >
                       {isSubmitting ? (
-                        <ActivityIndicator size="small" color="#FFFFFF" className="mr-2" />
+                        <ActivityIndicator
+                          size="small"
+                          color="#FFFFFF"
+                          className="mr-2"
+                        />
                       ) : (
-                        <Ionicons name="paper-plane" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+                        <Ionicons
+                          name="paper-plane"
+                          size={18}
+                          color="#FFFFFF"
+                          style={{ marginRight: 6 }}
+                        />
                       )}
-                      <Text className="text-white font-semibold text-base">{isSubmitting ? "Submitting..." : "Submit Leave Request"}</Text>
+                      <Text className="text-white font-semibold text-base">
+                        {isSubmitting
+                          ? "Submitting..."
+                          : "Submit Leave Request"}
+                      </Text>
                     </TouchableOpacity>
                   </Animated.View>
                 </View>
@@ -522,7 +679,9 @@ const SubmitLeaves = () => {
 
       {/* iOS Date/Time Modal */}
       {dateTimeModalVisible && (
-        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
+        <View
+          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+        >
           <Animated.View
             style={[
               {
@@ -535,7 +694,11 @@ const SubmitLeaves = () => {
               { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
             ]}
           >
-            <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={closeDateTimeModal} />
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={closeDateTimeModal}
+            />
           </Animated.View>
 
           <Animated.View
@@ -553,12 +716,17 @@ const SubmitLeaves = () => {
               paddingBottom: Platform.OS === "ios" ? 0 : 20,
             }}
           >
-            <View className="items-center py-3" {...dateTimePanResponder.panHandlers}>
+            <View
+              className="items-center py-3"
+              {...dateTimePanResponder.panHandlers}
+            >
               <View className="w-10 h-1 bg-slate-200 rounded-full" />
             </View>
 
             <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-              <Text className="text-lg font-bold text-slate-800">{pickerTitle}</Text>
+              <Text className="text-lg font-bold text-slate-800">
+                {pickerTitle}
+              </Text>
             </View>
 
             <View className="items-center justify-center px-4 py-2">
@@ -578,9 +746,17 @@ const SubmitLeaves = () => {
             </View>
 
             <View className="px-4 pt-2 pb-4">
-              <Animated.View style={{ transform: [{ scale: confirmButtonScale }] }}>
-                <TouchableOpacity onPress={handleDateTimeConfirm} className="bg-orange-400 py-3.5 rounded-lg w-full items-center" activeOpacity={0.8}>
-                  <Text className="text-white font-bold text-base">Confirm</Text>
+              <Animated.View
+                style={{ transform: [{ scale: confirmButtonScale }] }}
+              >
+                <TouchableOpacity
+                  onPress={handleDateTimeConfirm}
+                  className="bg-orange-400 py-3.5 rounded-lg w-full items-center"
+                  activeOpacity={0.8}
+                >
+                  <Text className="text-white font-bold text-base">
+                    Confirm
+                  </Text>
                 </TouchableOpacity>
               </Animated.View>
             </View>

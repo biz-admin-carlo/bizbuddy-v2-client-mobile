@@ -251,7 +251,16 @@ export default function LeavesApproval() {
 
     // Filter
     if (filter !== "all") {
-      result = result.filter((item) => item.status.toLowerCase() === filter.toLowerCase());
+      const target = filter.toLowerCase();
+      result = result.filter((item) => {
+        const status = (item.status || "").toLowerCase();
+        // Be a bit more flexible for "pending" so it also matches
+        // values like "pending_approval" coming from the backend.
+        if (target === "pending") {
+          return status.includes("pending");
+        }
+        return status === target;
+      });
     }
 
     // Sort

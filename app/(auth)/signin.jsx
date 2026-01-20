@@ -22,7 +22,11 @@ import useAuthStore from "../../store/useAuthStore";
 import { API_BASE_URL, VERSION } from "../../config/constant";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SecureStore from "expo-secure-store";
-import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from "@expo/vector-icons";
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+  FontAwesome5,
+} from "@expo/vector-icons";
 
 const { width } = Dimensions.get("window");
 
@@ -102,24 +106,30 @@ export default function SignIn() {
     getToken();
 
     // Keyboard listeners
-    const keyboardDidShowListener = Keyboard.addListener("keyboardDidShow", () => {
-      setKeyboardVisible(true);
-      // Only animate description out
-      Animated.timing(descriptionOpacity, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-    });
-    const keyboardDidHideListener = Keyboard.addListener("keyboardDidHide", () => {
-      setKeyboardVisible(false);
-      // Animate description in
-      Animated.timing(descriptionOpacity, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-    });
+    const keyboardDidShowListener = Keyboard.addListener(
+      "keyboardDidShow",
+      () => {
+        setKeyboardVisible(true);
+        // Only animate description out
+        Animated.timing(descriptionOpacity, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      }
+    );
+    const keyboardDidHideListener = Keyboard.addListener(
+      "keyboardDidHide",
+      () => {
+        setKeyboardVisible(false);
+        // Animate description in
+        Animated.timing(descriptionOpacity, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      }
+    );
 
     // Clean up listeners
     return () => {
@@ -202,6 +212,8 @@ export default function SignIn() {
 
     if (result.success) {
       await login(savedToken, true);
+
+      // Navigate to profile - notification modal will be shown there
       router.replace("(tabs)/profile");
     } else {
       setError("Biometric authentication failed. Please try again.");
@@ -219,7 +231,11 @@ export default function SignIn() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(email.trim().toLowerCase())}`);
+      const res = await fetch(
+        `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+          email.trim().toLowerCase()
+        )}`
+      );
       const data = await res.json();
       if (!res.ok) {
         setError(data.message || "Email not found.");
@@ -248,7 +264,11 @@ export default function SignIn() {
     setError(null);
     try {
       const signInRes = await fetch(
-        `${API_BASE_URL}/api/account/sign-in?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&companyId=${selectedCompanyId}`
+        `${API_BASE_URL}/api/account/sign-in?email=${encodeURIComponent(
+          email
+        )}&password=${encodeURIComponent(
+          password
+        )}&companyId=${selectedCompanyId}`
       );
       const signInData = await signInRes.json();
       if (!signInRes.ok) {
@@ -263,6 +283,8 @@ export default function SignIn() {
       if (rememberMe) {
         setSavedToken(token);
       }
+
+      // Navigate to profile - notification modal will be shown there
       router.replace("(tabs)/profile");
     } catch (err) {
       console.error("Sign-in error:", err);
@@ -277,22 +299,44 @@ export default function SignIn() {
 
   return (
     <SafeAreaView style={{ flex: 1 }} className="bg-white">
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1 }}
+      >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
-            <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled">
+            <ScrollView
+              contentContainerStyle={{ flexGrow: 1 }}
+              keyboardShouldPersistTaps="handled"
+            >
               <View className="flex-1 justify-center items-center px-5 py-20">
                 {/* Logo/Header - Always visible */}
                 <View className="items-center mb-6">
                   <View className="flex-row justify-center items-center">
-                    <Image source={require("../../assets/images/icon.png")} style={{ width: 50, height: 50 }} resizeMode="contain" className=" mb-4" />
-                    <Text className="text-6xl text-orange-400 font-extrabold">BizBuddy</Text>
+                    <Image
+                      source={require("../../assets/images/icon.png")}
+                      style={{ width: 50, height: 50 }}
+                      resizeMode="contain"
+                      className=" mb-4"
+                    />
+                    <Text className="text-6xl text-orange-400 font-extrabold">
+                      BizBuddy
+                    </Text>
                   </View>
 
                   {/* Only the description and version fade out */}
-                  <Animated.View style={{ opacity: descriptionOpacity, alignItems: "center" }}>
-                    <Text className="text-xs mt-2 text-slate-600">{VERSION}</Text>
-                    <Text className="text-slate-600 text-center text-sm mt-1">Your business companion</Text>
+                  <Animated.View
+                    style={{
+                      opacity: descriptionOpacity,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text className="text-xs mt-2 text-slate-600">
+                      {VERSION}
+                    </Text>
+                    <Text className="text-slate-600 text-center text-sm mt-1">
+                      Your business companion
+                    </Text>
                   </Animated.View>
                 </View>
 
@@ -310,9 +354,16 @@ export default function SignIn() {
                   {step === 1 && (
                     <View>
                       <View className="mb-7">
-                        <Text className="mb-3 font-medium text-slate-600">Email</Text>
+                        <Text className="mb-3 font-medium text-slate-600">
+                          Email
+                        </Text>
                         <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-4 mb-2">
-                          <MaterialCommunityIcons name="email-outline" size={20} color="#f97316" style={{ marginRight: 10 }} />
+                          <MaterialCommunityIcons
+                            name="email-outline"
+                            size={20}
+                            color="#f97316"
+                            style={{ marginRight: 10 }}
+                          />
                           <TextInput
                             placeholder="Enter your email"
                             className="flex-1 text-slate-700"
@@ -341,7 +392,9 @@ export default function SignIn() {
                       </Animated.View>
 
                       {/* Continue Button */}
-                      <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+                      <Animated.View
+                        style={{ transform: [{ scale: buttonScale }] }}
+                      >
                         <TouchableOpacity
                           onPress={handleEmailSubmit}
                           disabled={loading}
@@ -353,8 +406,14 @@ export default function SignIn() {
                             <ActivityIndicator color="#fff" size="small" />
                           ) : (
                             <View className="flex-row items-center justify-center">
-                              <Text className="text-white text-center font-semibold text-base mr-2">Continue</Text>
-                              <Ionicons name="arrow-forward" size={18} color="#fff" />
+                              <Text className="text-white text-center font-semibold text-base mr-2">
+                                Continue
+                              </Text>
+                              <Ionicons
+                                name="arrow-forward"
+                                size={18}
+                                color="#fff"
+                              />
                             </View>
                           )}
                         </TouchableOpacity>
@@ -362,15 +421,27 @@ export default function SignIn() {
 
                       {/* Biometric button - Moved below Continue button */}
                       {biometricAvailable && savedToken && (
-                        <Animated.View style={{ transform: [{ scale: buttonScale }], marginTop: 16 }}>
+                        <Animated.View
+                          style={{
+                            transform: [{ scale: buttonScale }],
+                            marginTop: 16,
+                          }}
+                        >
                           <TouchableOpacity
                             onPress={handleBiometricSignIn}
                             className="flex-row items-center justify-center py-4 px-5 rounded-lg border border-slate-200"
                             style={styles.buttonShadow}
                             activeOpacity={0.8}
                           >
-                            <Ionicons name="finger-print-outline" size={22} color="#f97316" style={{ marginRight: 8 }} />
-                            <Text className="font-medium text-slate-700">Sign in with biometrics</Text>
+                            <Ionicons
+                              name="finger-print-outline"
+                              size={22}
+                              color="#f97316"
+                              style={{ marginRight: 8 }}
+                            />
+                            <Text className="font-medium text-slate-700">
+                              Sign in with biometrics
+                            </Text>
                           </TouchableOpacity>
                         </Animated.View>
                       )}
@@ -381,12 +452,21 @@ export default function SignIn() {
                   {step === 2 && (
                     <View>
                       <View className="flex-row items-center mb-7">
-                        <TouchableOpacity onPress={goBackToEmail} className="mr-4">
+                        <TouchableOpacity
+                          onPress={goBackToEmail}
+                          className="mr-4"
+                        >
                           <View className="w-10 h-10 rounded-full  items-center justify-center">
-                            <Ionicons name="arrow-back" size={18} color="#f97316" />
+                            <Ionicons
+                              name="arrow-back"
+                              size={18}
+                              color="#f97316"
+                            />
                           </View>
                         </TouchableOpacity>
-                        <Text className="text-xl font-bold text-slate-700">Select your company</Text>
+                        <Text className="text-xl font-bold text-slate-700">
+                          Select your company
+                        </Text>
                       </View>
 
                       <View className="mb-7">
@@ -395,24 +475,54 @@ export default function SignIn() {
                             key={user.companyId}
                             onPress={() => setSelectedCompanyId(user.companyId)}
                             className={`p-4 mb-4 rounded-lg border ${
-                              selectedCompanyId === user.companyId ? "border-orange-400" : "border-slate-200"
+                              selectedCompanyId === user.companyId
+                                ? "border-orange-400"
+                                : "border-slate-200"
                             } bg-white`}
-                            style={[styles.cardShadow, selectedCompanyId === user.companyId && styles.selectedCardShadow]}
+                            style={[
+                              styles.cardShadow,
+                              selectedCompanyId === user.companyId &&
+                                styles.selectedCardShadow,
+                            ]}
                             activeOpacity={0.7}
                           >
                             <View className="flex-row items-center">
                               <View
                                 className={`w-12 h-12 rounded-full ${
-                                  selectedCompanyId === user.companyId ? "bg-orange-50" : "bg-slate-100"
+                                  selectedCompanyId === user.companyId
+                                    ? "bg-orange-50"
+                                    : "bg-slate-100"
                                 } items-center justify-center mr-4`}
                               >
-                                <FontAwesome5 name="building" size={18} color={selectedCompanyId === user.companyId ? "#f97316" : "#64748b"} />
+                                <FontAwesome5
+                                  name="building"
+                                  size={18}
+                                  color={
+                                    selectedCompanyId === user.companyId
+                                      ? "#f97316"
+                                      : "#64748b"
+                                  }
+                                />
                               </View>
                               <View className="flex-1">
-                                <Text className="font-semibold text-base text-slate-700">{user.companyName}</Text>
+                                <Text className="font-semibold text-base text-slate-700">
+                                  {user.companyName}
+                                </Text>
                                 <View className="flex-row items-center mt-2">
-                                  <View className={`px-3 py-1 rounded-full ${selectedCompanyId === user.companyId ? "bg-orange-50" : "bg-slate-100"}`}>
-                                    <Text className={`text-xs ${selectedCompanyId === user.companyId ? "text-orange-800" : "text-slate-600"} font-medium`}>
+                                  <View
+                                    className={`px-3 py-1 rounded-full ${
+                                      selectedCompanyId === user.companyId
+                                        ? "bg-orange-50"
+                                        : "bg-slate-100"
+                                    }`}
+                                  >
+                                    <Text
+                                      className={`text-xs ${
+                                        selectedCompanyId === user.companyId
+                                          ? "text-orange-800"
+                                          : "text-slate-600"
+                                      } font-medium`}
+                                    >
                                       {user.role}
                                     </Text>
                                   </View>
@@ -420,7 +530,11 @@ export default function SignIn() {
                               </View>
                               {selectedCompanyId === user.companyId && (
                                 <View className="w-8 h-8 rounded-full bg-orange-400 items-center justify-center">
-                                  <Ionicons name="checkmark" size={16} color="#fff" />
+                                  <Ionicons
+                                    name="checkmark"
+                                    size={16}
+                                    color="#fff"
+                                  />
                                 </View>
                               )}
                             </View>
@@ -429,9 +543,16 @@ export default function SignIn() {
                       </View>
 
                       <View className="mb-7">
-                        <Text className="mb-3 font-medium text-slate-600">Password</Text>
+                        <Text className="mb-3 font-medium text-slate-600">
+                          Password
+                        </Text>
                         <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-4">
-                          <MaterialCommunityIcons name="lock-outline" size={20} color="#f97316" style={{ marginRight: 10 }} />
+                          <MaterialCommunityIcons
+                            name="lock-outline"
+                            size={20}
+                            color="#f97316"
+                            style={{ marginRight: 10 }}
+                          />
                           <TextInput
                             secureTextEntry={!showPassword}
                             placeholder="Enter password"
@@ -440,8 +561,16 @@ export default function SignIn() {
                             onChangeText={setPassword}
                             placeholderTextColor="#9ca3af"
                           />
-                          <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-                            <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#64748b" />
+                          <TouchableOpacity
+                            onPress={() => setShowPassword(!showPassword)}
+                          >
+                            <Ionicons
+                              name={
+                                showPassword ? "eye-off-outline" : "eye-outline"
+                              }
+                              size={20}
+                              color="#64748b"
+                            />
                           </TouchableOpacity>
                         </View>
                       </View>
@@ -474,7 +603,9 @@ export default function SignIn() {
                       </Animated.View>
 
                       {/* Sign In Button */}
-                      <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+                      <Animated.View
+                        style={{ transform: [{ scale: buttonScale }] }}
+                      >
                         <TouchableOpacity
                           onPress={handleSignInWithPassword}
                           disabled={loading}
@@ -486,8 +617,15 @@ export default function SignIn() {
                             <ActivityIndicator color="#fff" size="small" />
                           ) : (
                             <View className="flex-row items-center justify-center">
-                              <Ionicons name="log-in-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
-                              <Text className="text-white text-center font-semibold text-base">Sign In</Text>
+                              <Ionicons
+                                name="log-in-outline"
+                                size={20}
+                                color="#fff"
+                                style={{ marginRight: 8 }}
+                              />
+                              <Text className="text-white text-center font-semibold text-base">
+                                Sign In
+                              </Text>
                             </View>
                           )}
                         </TouchableOpacity>
