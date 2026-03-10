@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizBuddy",
     "slug": "biz-buddy-slug",
-    "version": "1.0.0",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "myapp",
@@ -19,13 +19,13 @@
       }
     },
     "android": {
-      "googleServicesFile": "./serviceKey.json",
+      "googleServicesFile": "./android/app/google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.bizsolutions.bizbuddy",
-      "versionCode": 5,
+      "package": "com.bizsolutions.mybizbuddy",
+      "versionCode": 12,
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -64,7 +64,7 @@
         "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
-    "runtimeVersion": "1.0.0",
+    "runtimeVersion": "1.0.6",
     "owner": "miguelalviar"
   }
 }

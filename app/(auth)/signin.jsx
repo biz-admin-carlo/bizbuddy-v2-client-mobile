@@ -18,7 +18,7 @@ import {
   Dimensions,
 } from "react-native";
 import { useRouter } from "expo-router";
-import useAuthStore from "../../store/useAuthStore";
+import useAuthStore, { isTokenExpired } from "../../store/useAuthStore";
 import { API_BASE_URL, VERSION } from "../../config/constant";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SecureStore from "expo-secure-store";
@@ -99,7 +99,16 @@ export default function SignIn() {
 
     const getToken = async () => {
       const token = await SecureStore.getItemAsync("token");
-      setSavedToken(token);
+      // Only set saved token if it's not expired
+      if (token && !isTokenExpired(token)) {
+        setSavedToken(token);
+      } else if (token && isTokenExpired(token)) {
+        // Clean up expired token
+        await SecureStore.deleteItemAsync("token");
+        setSavedToken(null);
+      } else {
+        setSavedToken(null);
+      }
     };
 
     checkBiometric();
@@ -202,6 +211,15 @@ export default function SignIn() {
       return;
     }
 
+    // Check if token is expired before attempting biometric login
+    if (isTokenExpired(savedToken)) {
+      setError("Your session has expired. Please sign in again with your password.");
+      // Clear the expired token
+      await SecureStore.deleteItemAsync("token");
+      setSavedToken(null);
+      return;
+    }
+
     animateButtonPress();
 
     const result = await LocalAuthentication.authenticateAsync({
@@ -211,6 +229,14 @@ export default function SignIn() {
     });
 
     if (result.success) {
+      // Double-check token is still valid before using it
+      if (isTokenExpired(savedToken)) {
+        setError("Your session has expired. Please sign in again with your password.");
+        await SecureStore.deleteItemAsync("token");
+        setSavedToken(null);
+        return;
+      }
+
       await login(savedToken, true);
 
       // Navigate to profile - notification modal will be shown there

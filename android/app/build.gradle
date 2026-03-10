@@ -4,6 +4,23 @@ apply plugin: "com.facebook.react"
 
 def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
 
+// Release signing (Upload key) ------------------------------------------------
+//
+// Play Console expects your uploaded AAB to be signed with your *upload key*.
+// This project previously signed `release` with the debug keystore, which causes
+// the "wrong key" error on upload.
+//
+// Provide signing values via either:
+// - android/keystore.properties (recommended for local builds; keep it uncommitted)
+// - OR environment variables (recommended for CI)
+//
+// See android/keystore.properties.example
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
@@ -87,13 +104,14 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.bizsolutions.bizbuddy'
+    namespace 'com.bizsolutions.mybizbuddy'
     defaultConfig {
-        applicationId 'com.bizsolutions.bizbuddy'
+        applicationId 'com.bizsolutions.mybizbuddy'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 5
-        versionName "1.0.0"
+        // Play requires monotonically increasing version codes.
+        versionCode 12
+        versionName "1.0.6"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -104,6 +122,29 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        release {
+            def storeFilePath = (keystoreProperties['storeFile'] ?: System.getenv('ANDROID_UPLOAD_STORE_FILE'))?.toString()
+            def storePasswordValue = (keystoreProperties['storePassword'] ?: System.getenv('ANDROID_UPLOAD_STORE_PASSWORD'))?.toString()
+            def keyAliasValue = (keystoreProperties['keyAlias'] ?: System.getenv('ANDROID_UPLOAD_KEY_ALIAS'))?.toString()
+            def keyPasswordValue = (keystoreProperties['keyPassword'] ?: System.getenv('ANDROID_UPLOAD_KEY_PASSWORD'))?.toString()
+
+            if (storeFilePath && storePasswordValue && keyAliasValue && keyPasswordValue) {
+                // storeFile path can be relative to /android or absolute.
+                storeFile rootProject.file(storeFilePath)
+                storePassword storePasswordValue
+                keyAlias keyAliasValue
+                keyPassword keyPasswordValue
+            } else {
+                // Intentionally fail on release builds if signing isn't configured,
+                // to avoid producing debug-signed AABs that Play Console rejects.
+                if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }) {
+                    throw new GradleException(
+                        "Missing release signing config. Create android/keystore.properties (see android/keystore.properties.example) " +
+                        "or set ANDROID_UPLOAD_STORE_FILE / ANDROID_UPLOAD_STORE_PASSWORD / ANDROID_UPLOAD_KEY_ALIAS / ANDROID_UPLOAD_KEY_PASSWORD."
+                    )
+                }
+            }
+        }
     }
     buildTypes {
         debug {
@@ -112,7 +153,7 @@ android {
         release {
             // Caution! In production, you need to generate your own keystore file.
             // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'false'
             shrinkResources enableShrinkResources.toBoolean()
             minifyEnabled enableMinifyInReleaseBuilds
@@ -181,4 +222,17 @@ dependencies {
     }
 }
 
-apply plugin: 'com.google.gms.google-services'
+// Google Services / Firebase ---------------------------------------------------
+// Only apply the google-services plugin when the google-services.json contains a
+// matching client for the current applicationId. This prevents hard build breaks
+// when the package name changes but the Firebase file hasn't been updated yet.
+def googleServicesJson = file("google-services.json")
+def appId = android.defaultConfig.applicationId
+def hasMatchingGoogleServicesClient =
+        googleServicesJson.exists() && googleServicesJson.getText("UTF-8").contains("\"package_name\": \"${appId}\"")
+
+if (hasMatchingGoogleServicesClient) {
+    apply plugin: 'com.google.gms.google-services'
+} else {
+    println("⚠️  Skipping 'com.google.gms.google-services': no matching client for ${appId} in ${googleServicesJson}")
+}

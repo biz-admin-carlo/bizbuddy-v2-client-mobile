@@ -202,13 +202,13 @@ export default function NotificationPermissionModal({
           </View>
 
           {/* Buttons */}
-          <View className="space-y-3">
+          <View>
             {Platform.OS === "android" && !permStatus?.granted ? (
               <>
                 <TouchableOpacity
                   onPress={openAppSettings}
                   disabled={isRequesting}
-                  className="bg-orange-500 py-4 rounded-xl flex-row items-center justify-center"
+                  className="bg-orange-500 py-4 rounded-xl flex-row items-center justify-center mb-3"
                 >
                   {isRequesting ? (
                     <ActivityIndicator color="#fff" size="small" />
@@ -229,7 +229,7 @@ export default function NotificationPermissionModal({
                 <TouchableOpacity
                   onPress={refreshStatus}
                   disabled={isRequesting}
-                  className="py-4 rounded-xl border border-gray-300"
+                  className="py-4 rounded-xl border border-gray-300 mb-3"
                 >
                   <Text className="text-gray-600 text-center font-medium">
                     Done, check again
@@ -251,7 +251,7 @@ export default function NotificationPermissionModal({
                 <TouchableOpacity
                   onPress={handleEnableNotifications}
                   disabled={isRequesting}
-                  className="bg-orange-500 py-4 rounded-xl flex-row items-center justify-center"
+                  className="bg-orange-500 py-4 rounded-xl flex-row items-center justify-center mb-3"
                 >
                   {isRequesting ? (
                     <ActivityIndicator color="#fff" size="small" />
@@ -268,7 +268,7 @@ export default function NotificationPermissionModal({
                 <TouchableOpacity
                   onPress={openAppSettings}
                   disabled={isRequesting}
-                  className="py-4 rounded-xl border border-gray-300"
+                  className="py-4 rounded-xl border border-gray-300 mb-3"
                 >
                   <Text className="text-gray-600 text-center font-medium">
                     Open Settings

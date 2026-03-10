@@ -23,7 +23,10 @@ import {
 import axios from "axios";
 import * as SecureStore from "expo-secure-store";
 // Notification functionality removed - can be re-implemented later
-import { API_BASE_URL } from "../../../config/constant";
+import {
+  API_BASE_URL,
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE,
+} from "../../../config/constant";
 import { Calendar } from "react-native-calendars";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -62,12 +65,47 @@ const getLocalDateString = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
+// Parse naive time from API (no timezone in DB). Returns { hour, minute } or null.
+// Handles "08:00:00", "08:00", "2026-03-06T08:00:00", "2026-03-06T08:00:00.000Z" etc.
+const parseNaiveTime = (value) => {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  const timeMatch =
+    s.match(/T?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z)?$/i) ||
+    s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!timeMatch) return null;
+  const hour = parseInt(timeMatch[1], 10);
+  const minute = parseInt(timeMatch[2], 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+};
+
+// Format naive startTime/endTime (no timezone in DB) as display time.
+// The stored time is the clock time in the shift's timeZone; we parse and display it (e.g. 8:00 AM - 5:00 PM).
+const formatNaiveTimeInZone = (naiveTimeStr) => {
+  const t = parseNaiveTime(naiveTimeStr);
+  if (!t) return "";
+  const h = t.hour % 12 || 12;
+  const m = String(t.minute).padStart(2, "0");
+  const ampm = t.hour >= 12 ? "PM" : "AM";
+  return `${h}:${m} ${ampm}`;
+};
+
+// Format date in the shift's timezone for "Assigned on" display
+const formatDateInZone = (isoString, timeZone) => {
+  if (!isoString) return "";
+  const date = new Date(isoString);
+  if (!Number.isFinite(date.getTime())) return "";
+  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+  return date.toLocaleDateString("en-US", { timeZone: tz });
+};
+
 const TimekeepingSchedule = () => {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // Use the helper for the default selectedDate
   const [selectedDate, setSelectedDate] = useState(
-    getLocalDateString(new Date())
+    getLocalDateString(new Date()),
   );
   const [userShifts, setUserShifts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -112,7 +150,7 @@ const TimekeepingSchedule = () => {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   const openModal = () => {
@@ -212,7 +250,7 @@ const TimekeepingSchedule = () => {
   // Request notification permissions on mount.
   useEffect(() => {
     registerForPushNotificationsAsync().then((granted) =>
-      setNotificationAllowed(granted)
+      setNotificationAllowed(granted),
     );
   }, []);
 
@@ -349,9 +387,8 @@ const TimekeepingSchedule = () => {
       };
 
       if (updatedMarkedDates[selected].customStyles) {
-        updatedMarkedDates[
-          selected
-        ].customStyles.container.backgroundColor = `${COLORS.primary}20`;
+        updatedMarkedDates[selected].customStyles.container.backgroundColor =
+          `${COLORS.primary}20`;
       }
     } else {
       updatedMarkedDates[selected] = {
@@ -369,44 +406,45 @@ const TimekeepingSchedule = () => {
     setRefreshing(false);
   };
 
-  // Render each shift item.
-  const renderShiftItem = (shift) => (
-    <View
-      key={shift.id}
-      className="mb-3 p-4 bg-slate-50 rounded-xl border border-slate-50"
-    >
-      <View className="flex-row justify-between items-start">
-        <View style={{ flex: 1 }}>
-          <Text className="text-lg font-bold text-slate-800">
-            {shift.shift.shiftName}
-          </Text>
-          <View className="flex-row items-center mt-1">
-            <Ionicons
-              name="time-outline"
-              size={14}
-              color={COLORS.textSecondary}
-            />
-            <Text className="ml-1 text-slate-600 text-sm">
-              {new Date(shift.shift.startTime).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}{" "}
-              -{" "}
-              {new Date(shift.shift.endTime).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
+  // Render each shift item. Times and assigned date use the shift's timeZone when present (API may use timeZone or time_zone); otherwise use default so UTC times display correctly.
+  const renderShiftItem = (shift) => {
+    const timeZone =
+      shift?.shift?.timeZone ||
+      shift?.shift?.time_zone ||
+      shift?.timeZone ||
+      shift?.time_zone ||
+      DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+    return (
+      <View
+        key={shift.id}
+        className="mb-3 p-4 bg-slate-50 rounded-xl border border-slate-50"
+      >
+        <View className="flex-row justify-between items-start">
+          <View style={{ flex: 1 }}>
+            <Text className="text-lg font-bold text-slate-800">
+              {shift.shift.shiftName}
             </Text>
+            <View className="flex-row items-center mt-1">
+              <Ionicons
+                name="time-outline"
+                size={14}
+                color={COLORS.textSecondary}
+              />
+              <Text className="ml-1 text-slate-600 text-sm">
+                {formatNaiveTimeInZone(shift.shift.startTime)} -{" "}
+                {formatNaiveTimeInZone(shift.shift.endTime)}
+              </Text>
+            </View>
+            {shift.assignedDate && (
+              <Text className="text-xs text-slate-500 mt-1">
+                Assigned on: {formatDateInZone(shift.assignedDate, timeZone)}
+              </Text>
+            )}
           </View>
-          {shift.assignedDate && (
-            <Text className="text-xs text-slate-500 mt-1">
-              Assigned on: {new Date(shift.assignedDate).toLocaleDateString()}
-            </Text>
-          )}
         </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
     <SafeAreaView
@@ -432,7 +470,7 @@ const TimekeepingSchedule = () => {
                   {
                     month: "short",
                     day: "numeric",
-                  }
+                  },
                 )}`}
           </Text>
           <TouchableOpacity onPress={openModal}>

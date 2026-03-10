@@ -22,7 +22,10 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
+import * as LocalAuthentication from "expo-local-authentication";
 import { API_BASE_URL, WEBSITE_URL } from "../../../config/constant";
+import useTutorialStore from "../../../store/tutorialStore";
+import { isTokenExpired } from "../../../store/useAuthStore";
 import {
   MaterialIcons,
   Ionicons,
@@ -36,18 +39,21 @@ const { height } = Dimensions.get("window");
 
 const Settings = () => {
   const router = useRouter();
+  const replayTutorial = useTutorialStore((s) => s.replay);
 
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showLockedModal, setShowLockedModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [settingUpBiometric, setSettingUpBiometric] = useState(false);
 
   // Instead of starting from 'height', we'll start from a partial off-screen
   // position to allow partial expansions as in the department page.
   // (We keep modalOpacity for the background fade.)
   const modalY = useRef(
-    new Animated.Value(Platform.OS === "ios" ? 700 : 500)
+    new Animated.Value(Platform.OS === "ios" ? 700 : 500),
   ).current;
   const modalOpacity = useRef(new Animated.Value(0)).current;
 
@@ -66,6 +72,7 @@ const Settings = () => {
 
   // Individual option button animations
   const optionScales = useRef({}).current;
+  const biometricButtonScale = useRef(new Animated.Value(1)).current;
 
   // Here we replicate the "department" style panResponder for partial expansions:
   // - If dragged > 100 downwards, close
@@ -108,7 +115,7 @@ const Settings = () => {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   useEffect(() => {
@@ -127,7 +134,46 @@ const Settings = () => {
     ]).start();
 
     fetchProfile();
+    checkBiometricAvailability();
   }, []);
+
+  const checkBiometricAvailability = async () => {
+    try {
+      const hasHardware = await LocalAuthentication.hasHardwareAsync();
+      const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+      console.log(
+        "Biometric check - hasHardware:",
+        hasHardware,
+        "isEnrolled:",
+        isEnrolled,
+      );
+
+      // For iOS simulator testing, enable button even if checks fail
+      // In simulator, you can enable Face ID via: Features > Face ID > Enrolled
+      const isIOS = Platform.OS === "ios";
+      const isDev = __DEV__;
+
+      if (hasHardware && isEnrolled) {
+        setBiometricAvailable(true);
+        console.log("Biometric available - button should be visible");
+      } else if (isIOS && isDev) {
+        // Enable for iOS simulator testing
+        setBiometricAvailable(true);
+        console.log(
+          "iOS Dev mode - enabling biometric button for simulator testing",
+        );
+      } else {
+        console.log("Biometric not available - button will be disabled");
+      }
+    } catch (error) {
+      console.error("Error checking biometrics:", error);
+      // On error, still enable for iOS dev mode
+      if (Platform.OS === "ios" && __DEV__) {
+        setBiometricAvailable(true);
+        console.log("Error occurred but enabling for iOS simulator testing");
+      }
+    }
+  };
 
   const openModal = () => {
     // Reset position before animation (like in department page)
@@ -217,6 +263,83 @@ const Settings = () => {
     animateButtonPress(refreshButtonScale);
     setRefreshing(true);
     fetchProfile();
+  };
+
+  const handleSetupBiometric = async () => {
+    animateButtonPress(biometricButtonScale);
+    setSettingUpBiometric(true);
+
+    try {
+      // Check if user has a valid token
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        Alert.alert(
+          "No Active Session",
+          "Please sign in first before setting up biometric authentication.",
+          [{ text: "OK" }],
+        );
+        setSettingUpBiometric(false);
+        return;
+      }
+
+      // Check if token is expired
+      if (isTokenExpired(token)) {
+        Alert.alert(
+          "Session Expired",
+          "Your session has expired. Please sign in again before setting up biometric authentication.",
+          [{ text: "OK" }],
+        );
+        setSettingUpBiometric(false);
+        return;
+      }
+
+      // Check biometric availability (but allow in dev mode for simulator testing)
+      const isIOS = Platform.OS === "ios";
+      const isDev = __DEV__;
+
+      if (!biometricAvailable && !(isIOS && isDev)) {
+        Alert.alert(
+          "Biometric Not Available",
+          "Biometric authentication is not available on this device. Please ensure Face ID or Touch ID is set up in your device settings.",
+          [{ text: "OK" }],
+        );
+        setSettingUpBiometric(false);
+        return;
+      }
+
+      // Prompt for biometric authentication
+      // In iOS simulator, enable Face ID via: Features > Face ID > Enrolled
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Set up Face ID for BizBuddy",
+        fallbackLabel: "Enter Passcode",
+        disableDeviceFallback: false,
+      });
+
+      if (result.success) {
+        // Token is already saved, just confirm it's set up
+        // The token in SecureStore is what biometric login uses
+        Alert.alert(
+          "Success",
+          "Face ID has been set up successfully! You can now use biometric authentication to sign in.",
+          [{ text: "OK" }],
+        );
+      } else {
+        Alert.alert(
+          "Setup Cancelled",
+          "Biometric authentication setup was cancelled. Please try again if you want to enable it.",
+          [{ text: "OK" }],
+        );
+      }
+    } catch (error) {
+      console.error("Error setting up biometric:", error);
+      Alert.alert(
+        "Error",
+        "An error occurred while setting up biometric authentication. Please try again.",
+        [{ text: "OK" }],
+      );
+    } finally {
+      setSettingUpBiometric(false);
+    }
   };
 
   useEffect(() => {
@@ -368,21 +491,21 @@ const Settings = () => {
   let filteredOptions = [];
   if (userRole === "employee") {
     filteredOptions = optionsConfig.filter((option) =>
-      option.roles.includes("employee")
+      option.roles.includes("employee"),
     );
   } else if (userRole === "supervisor") {
     filteredOptions = optionsConfig.filter((option) =>
-      option.roles.includes("supervisor")
+      option.roles.includes("supervisor"),
     );
   } else if (userRole === "admin") {
     filteredOptions = optionsConfig.filter((option) =>
-      option.roles.includes("admin")
+      option.roles.includes("admin"),
     );
   } else if (userRole === "superadmin") {
     // Superadmins should see only options explicitly assigned to them,
     // not employee-only options like the second "Leave Requests" entry.
     filteredOptions = optionsConfig.filter((option) =>
-      option.roles.includes("superadmin")
+      option.roles.includes("superadmin"),
     );
   }
 
@@ -586,6 +709,102 @@ const Settings = () => {
                 </TouchableOpacity>
               </View>
             </View>
+
+            {/* App tutorial replay */}
+            <TouchableOpacity
+              onPress={replayTutorial}
+              activeOpacity={0.85}
+              className="mt-3 flex-row items-center bg-orange-50 border border-orange-100 rounded-[12px] px-4 py-4"
+              style={Platform.select({
+                ios: {
+                  shadowColor: "#000",
+                  shadowOffset: { width: 0, height: 1 },
+                  shadowOpacity: 0.05,
+                  shadowRadius: 2,
+                },
+                android: { elevation: 2 },
+              })}
+            >
+              <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
+                <Ionicons
+                  name="help-circle-outline"
+                  size={20}
+                  color="#ffffff"
+                />
+              </View>
+              <View className="flex-1">
+                <Text className="text-medium font-semibold text-slate-800">
+                  App Tutorial
+                </Text>
+                <Text className="text-[12px] text-slate-600 mt-0.5">
+                  Replay the guided tour with tips
+                </Text>
+              </View>
+              <Ionicons name="play-circle" size={20} color="#f97316" />
+            </TouchableOpacity>
+
+            {/* Biometric Setup Button - Always visible */}
+            <Animated.View
+              style={{ transform: [{ scale: biometricButtonScale }] }}
+            >
+              <TouchableOpacity
+                onPress={handleSetupBiometric}
+                disabled={
+                  settingUpBiometric ||
+                  (!biometricAvailable && !(Platform.OS === "ios" && __DEV__))
+                }
+                activeOpacity={0.85}
+                className="mt-3 flex-row items-center bg-slate-50 border border-slate-200 rounded-[12px] px-4 py-4"
+                style={[
+                  Platform.select({
+                    ios: {
+                      shadowColor: "#000",
+                      shadowOffset: { width: 0, height: 1 },
+                      shadowOpacity: 0.05,
+                      shadowRadius: 2,
+                    },
+                    android: { elevation: 2 },
+                  }),
+                  !biometricAvailable &&
+                    !(Platform.OS === "ios" && __DEV__) && { opacity: 0.6 },
+                ]}
+              >
+                <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3">
+                  {settingUpBiometric ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <Ionicons
+                      name="finger-print-outline"
+                      size={20}
+                      color="#ffffff"
+                    />
+                  )}
+                </View>
+                <View className="flex-1">
+                  <Text className="text-medium font-semibold text-slate-800">
+                    {settingUpBiometric
+                      ? "Setting up Face ID..."
+                      : "Set Up Face ID"}
+                  </Text>
+                  <Text className="text-[12px] text-slate-600 mt-0.5">
+                    {settingUpBiometric
+                      ? "Please authenticate with Face ID"
+                      : biometricAvailable || (Platform.OS === "ios" && __DEV__)
+                        ? "Enable biometric authentication for quick sign in"
+                        : "Biometric authentication not available on this device"}
+                  </Text>
+                </View>
+                {!settingUpBiometric &&
+                  (biometricAvailable ||
+                    (Platform.OS === "ios" && __DEV__)) && (
+                    <Ionicons
+                      name="chevron-forward"
+                      size={20}
+                      color="#94a3b8"
+                    />
+                  )}
+              </TouchableOpacity>
+            </Animated.View>
           </View>
 
           {/* Main Content Area */}
@@ -630,8 +849,8 @@ const Settings = () => {
                 {userRole === "employee"
                   ? "You don't have access to administrative features."
                   : userRole === "supervisor"
-                  ? "Only employee management is available for supervisors."
-                  : "No options available for your role."}
+                    ? "Only employee management is available for supervisors."
+                    : "No options available for your role."}
               </Text>
             </View>
           ) : (

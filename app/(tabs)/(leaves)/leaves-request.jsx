@@ -130,10 +130,15 @@ const SubmitLeaves = () => {
       });
       const data = await res.json();
       if (res.ok && data.data) {
-        const formattedApprovers = data.data.map((approver) => ({
-          label: `${approver.username} (${approver.email})`,
-          value: String(approver.id),
-        }));
+        const formattedApprovers = data.data.map((approver) => {
+          const firstName = approver.profile?.firstName || "";
+          const lastName = approver.profile?.lastName || "";
+          const fullName = `${firstName} ${lastName}`.trim();
+          return {
+            label: fullName || approver.username,
+            value: String(approver.id),
+          };
+        });
         setApproverItems(formattedApprovers);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch approvers.");

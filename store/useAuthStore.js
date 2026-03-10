@@ -4,7 +4,7 @@ import { create } from "zustand";
 import * as SecureStore from "expo-secure-store";
 
 // Helper function to check if JWT token is expired
-const isTokenExpired = (token) => {
+export const isTokenExpired = (token) => {
   try {
     if (!token) return true;
 
@@ -32,6 +32,11 @@ const useAuthStore = create((set, get) => ({
     if (!get().remember) {
       await SecureStore.deleteItemAsync("token");
     }
+  },
+  forceLogout: async () => {
+    // Force clear everything - used for security-sensitive operations like password changes
+    set({ token: null, remember: false });
+    await SecureStore.deleteItemAsync("token");
   },
   loadToken: async () => {
     const token = await SecureStore.getItemAsync("token");

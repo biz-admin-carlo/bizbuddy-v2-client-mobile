@@ -26,11 +26,28 @@ import * as Location from "expo-location";
 import io from "socket.io-client";
 import { Ionicons, Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { API_BASE_URL } from "../../../config/constant";
+import {
+  API_BASE_URL,
+  CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES,
+  CLOCK_OUT_DEVIATION_COMPANY_IDS,
+  DRIVER_AIDE_JOB_TITLES,
+} from "../../../config/constant";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  buildShiftWindowFromUserShift,
+  findSurroundingShiftBoundaries,
+} from "../../../utils/timekeepingShiftUtils";
 
 const PENDING_ACTIONS_KEY = "pendingPunchActions";
+const CLOCK_OUT_DEVIATION_RESPONSES_KEY = "clockOutDeviationResponses";
+
+// Developer logs for punch / deviation flow (only in __DEV__)
+const devLog = (...args) => {
+  if (__DEV__) {
+    console.log("[BizBuddy Punch]", ...args);
+  }
+};
 
 // Offline queue helpers
 const storePendingAction = async (action) => {
@@ -54,6 +71,21 @@ const getPendingActions = async () => {
 const clearPendingActions = async () => {
   try {
     await AsyncStorage.removeItem(PENDING_ACTIONS_KEY);
+  } catch {}
+};
+
+const storeClockOutDeviationResponse = async (entry) => {
+  try {
+    const existing = await AsyncStorage.getItem(
+      CLOCK_OUT_DEVIATION_RESPONSES_KEY
+    );
+    const parsed = existing ? JSON.parse(existing) : [];
+    const next = Array.isArray(parsed) ? parsed : [];
+    next.push(entry);
+    await AsyncStorage.setItem(
+      CLOCK_OUT_DEVIATION_RESPONSES_KEY,
+      JSON.stringify(next)
+    );
   } catch {}
 };
 
@@ -139,6 +171,15 @@ export default function TimekeepingPunch() {
   const [networkModalVisible, setNetworkModalVisible] = useState(false);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
   const [subscriptionModalVisible, setSubscriptionModalVisible] = useState(false);
+  const [clockOutDeviationModalVisible, setClockOutDeviationModalVisible] =
+    useState(false);
+  const [clockOutDeviationDetails, setClockOutDeviationDetails] = useState(null);
+  // When clock-out is deferred for deviation modal: payload to send when user picks Regular or Driver/Aide
+  const [pendingClockOutPayload, setPendingClockOutPayload] = useState(null);
+  // Clock-in early modal (for allowed company, non–driver/aide): user clocking in >45 mins before scheduled start
+  const [clockInEarlyModalVisible, setClockInEarlyModalVisible] = useState(false);
+  const [clockInEarlyDetails, setClockInEarlyDetails] = useState(null);
+  const [pendingClockInPayload, setPendingClockInPayload] = useState(null);
 
   // Timer reference
   const masterTimerRef = useRef(null);
@@ -560,13 +601,92 @@ export default function TimekeepingPunch() {
           resetAllStates();
         }
       } else {
-        // If user is online => normal punch
+        // If user is online => normal punch (or defer to deviation/early modals for that company)
+        let timeOutPayload = { ...payload };
+        let timeInPayload = payload;
+        let clockInEarlyCheck = null;
+
+        if (!isTimeIn) {
+          // Time-in: check if user (allowed company, non–driver/aide) is clocking in >45 mins before scheduled start
+          try {
+            clockInEarlyCheck = await checkClockInEarly({ token, clockInAt: new Date() });
+            devLog("Time-in check:", {
+              showModal: clockInEarlyCheck?.showModal,
+              addPunchTypeAM: clockInEarlyCheck?.addPunchTypeAM,
+              minutesEarly: clockInEarlyCheck?.details?.minutesEarly,
+            });
+            if (clockInEarlyCheck.showModal && clockInEarlyCheck.details) {
+              devLog("Showing clock-in early modal");
+              setPendingClockInPayload({ token, deviceInfo, location, localTimestamp });
+              setClockInEarlyDetails(clockInEarlyCheck.details);
+              openModal("clockInEarly");
+              setLoading(false);
+              return;
+            }
+            if (clockInEarlyCheck.addPunchTypeAM) {
+              timeInPayload = { ...payload, punchType: "DRIVER_AIDE_AM" };
+              devLog("Time-in payload: punchType = DRIVER_AIDE_AM");
+            }
+          } catch (e) {
+            devLog("Clock-in early check error:", e?.message);
+            // If check fails, proceed with normal time-in
+          }
+        }
+        if (isTimeIn) {
+          // Check if user's job title gets automatic DRIVER_AIDE (no modal)
+          try {
+            const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const profile = profRes?.data?.data?.profile ?? profRes?.data?.data ?? {};
+            const jobTitle = (profile.jobTitle ?? profile.job_title ?? profile.title ?? "").toString().trim();
+            const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
+            const isDriverAideJob = driverAideTitles.some(
+              (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase()
+            );
+            devLog("Time-out check:", { jobTitle, isDriverAideJob });
+            if (isDriverAideJob) {
+              timeOutPayload = { ...payload, punchType: "DRIVER_AIDE" };
+              devLog("Time-out payload: punchType = DRIVER_AIDE (driver/aide job)");
+            } else {
+              const clockOutAt = new Date();
+              const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
+              devLog("Clock-out deviation check:", {
+                showModal: deviationCheck?.showModal,
+                minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
+                minutesBeforeNextStart: deviationCheck?.details?.minutesBeforeNextStart,
+              });
+              if (deviationCheck.showModal && deviationCheck.details) {
+                devLog("Showing clock-out deviation modal");
+                setPendingClockOutPayload({
+                  token,
+                  deviceInfo,
+                  location,
+                  localTimestamp,
+                });
+                setClockOutDeviationDetails(deviationCheck.details);
+                openModal("clockOutDeviation");
+                setLoading(false);
+                return;
+              }
+              timeOutPayload = { ...payload, punchType: "DRIVER_AIDE_PM" };
+              devLog("Time-out payload: punchType = DRIVER_AIDE_PM (non–driver/aide)");
+            }
+          } catch (e) {
+            devLog("Time-out profile/deviation check error:", e?.message);
+            // If profile fetch fails, proceed with normal punch (no punchType, no modal)
+          }
+        }
+
         const url = `${API_BASE_URL}/api/timelogs${endpoint}`;
+        const body = isTimeIn ? timeOutPayload : timeInPayload;
+        devLog("Punch request:", endpoint, { punchType: body.punchType, localTimestamp: body.localTimestamp });
         try {
-          const res = await axios.post(url, payload, {
+          const res = await axios.post(url, body, {
             headers: { Authorization: `Bearer ${token}` },
           });
           if (res.status === 200 || res.status === 201) {
+            devLog("Punch success:", endpoint, res.data?.message);
             Alert.alert("Success", res.data.message);
             if (!isTimeIn) {
               const now = new Date();
@@ -730,6 +850,9 @@ export default function TimekeepingPunch() {
     if (type === "network") setNetworkModalVisible(true);
     else if (type === "location") setLocationModalVisible(true);
     else if (type === "subscription") setSubscriptionModalVisible(true);
+    else if (type === "clockOutDeviation")
+      setClockOutDeviationModalVisible(true);
+    else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
 
     modalYAnim.setValue(height);
     Animated.parallel([
@@ -764,11 +887,582 @@ export default function TimekeepingPunch() {
       setNetworkModalVisible(false);
       setLocationModalVisible(false);
       setSubscriptionModalVisible(false);
+      setClockOutDeviationModalVisible(false);
+      setClockOutDeviationDetails(null);
+      setPendingClockOutPayload(null);
+      setClockInEarlyModalVisible(false);
+      setClockInEarlyDetails(null);
+      setPendingClockInPayload(null);
     });
+  };
+
+  // Returns { showModal: true, details } when clock-out is in deviation window for an allowed company; else { showModal: false }.
+  const checkClockOutDeviation = async ({ token, clockOutAt }) => {
+    try {
+      if (!token) return { showModal: false };
+      if (!(clockOutAt instanceof Date) || !Number.isFinite(clockOutAt.getTime()))
+        return { showModal: false };
+
+      const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const company =
+        profRes?.data?.data?.company ||
+        profRes?.data?.data?.profile?.company ||
+        null;
+      const companyId = company?.id || company?._id || company?.companyId || null;
+      if (!companyId) return { showModal: false };
+
+      const allowedIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
+        ? CLOCK_OUT_DEVIATION_COMPANY_IDS
+        : [];
+      if (!allowedIds.includes(String(companyId))) {
+        devLog("checkClockOutDeviation: company not in allowed list", { companyId });
+        return { showModal: false };
+      }
+
+      const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const userShifts = shiftsRes?.data?.data;
+      if (!Array.isArray(userShifts) || userShifts.length === 0) return { showModal: false };
+
+      const windows = userShifts
+        .map(buildShiftWindowFromUserShift)
+        .filter(Boolean);
+      if (!windows.length) return { showModal: false };
+
+      const boundaries = findSurroundingShiftBoundaries(windows, clockOutAt);
+      const lastShiftEnd = boundaries?.lastShiftEnd;
+      const nextShiftStart = boundaries?.nextShiftStart;
+      if (!lastShiftEnd || !nextShiftStart) return { showModal: false };
+
+      const minutesAfterEnd =
+        (clockOutAt.getTime() - lastShiftEnd.getTime()) / 60000;
+      const minutesBeforeNextStart =
+        (nextShiftStart.getTime() - clockOutAt.getTime()) / 60000;
+
+      const threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 60;
+      const inDeviation = minutesAfterEnd >= threshold && minutesBeforeNextStart >= threshold;
+      devLog("checkClockOutDeviation:", {
+        companyId,
+        minutesAfterEnd: Math.floor(minutesAfterEnd),
+        minutesBeforeNextStart: Math.floor(minutesBeforeNextStart),
+        threshold,
+        showModal: inDeviation,
+      });
+      if (inDeviation) {
+        return {
+          showModal: true,
+          details: {
+            companyId: String(companyId),
+            clockOutAt,
+            lastShiftEnd,
+            nextShiftStart,
+            minutesAfterEnd: Math.floor(minutesAfterEnd),
+            minutesBeforeNextStart: Math.floor(minutesBeforeNextStart),
+          },
+        };
+      }
+      return { showModal: false };
+    } catch (e) {
+      devLog("checkClockOutDeviation error:", e?.message);
+      return { showModal: false };
+    }
+  };
+
+  // Returns { showModal?, details?, addPunchTypeAM } for time-in. When in allowed company and not driver/aide, addPunchTypeAM=true (use punchType DRIVER_AIDE_AM).
+  const checkClockInEarly = async ({ token, clockInAt }) => {
+    const noModal = (addPunchTypeAM = false) => ({ showModal: false, addPunchTypeAM });
+    try {
+      if (!token) return noModal(false);
+      if (!(clockInAt instanceof Date) || !Number.isFinite(clockInAt.getTime()))
+        return noModal(false);
+
+      const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = profRes?.data?.data ?? {};
+      const profile = data?.profile ?? data;
+      const company = data?.company ?? profile?.company ?? null;
+      const companyId = company?.id ?? company?._id ?? company?.companyId ?? null;
+      const jobTitle = (profile?.jobTitle ?? profile?.job_title ?? profile?.title ?? "").toString().trim();
+
+      const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS) ? CLOCK_OUT_DEVIATION_COMPANY_IDS : [];
+      if (!companyId || !allowedCompanyIds.includes(String(companyId))) {
+        devLog("checkClockInEarly: not in allowed company", { companyId });
+        return noModal(false);
+      }
+
+      const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
+      if (driverAideTitles.some((t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase())) {
+        devLog("checkClockInEarly: driver/aide job, skip", { jobTitle });
+        return noModal(false);
+      }
+
+      const addPunchTypeAM = true; // non–driver/aide in allowed company => time-in uses DRIVER_AIDE_AM
+
+      const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const userShifts = shiftsRes?.data?.data;
+      if (!Array.isArray(userShifts) || userShifts.length === 0) return noModal(addPunchTypeAM);
+
+      const windows = userShifts.map(buildShiftWindowFromUserShift).filter(Boolean);
+      if (!windows.length) return noModal(addPunchTypeAM);
+
+      const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
+      const nextShiftStart = boundaries?.nextShiftStart;
+      if (!nextShiftStart) return noModal(addPunchTypeAM);
+
+      const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
+      const threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
+      const showModal = minutesEarly >= threshold;
+      devLog("checkClockInEarly:", {
+        companyId,
+        jobTitle,
+        minutesEarly: Math.floor(minutesEarly),
+        threshold,
+        showModal,
+        addPunchTypeAM,
+      });
+      if (showModal) {
+        return {
+          showModal: true,
+          addPunchTypeAM,
+          details: {
+            companyId: String(companyId),
+            clockInAt,
+            scheduledShiftStart: nextShiftStart,
+            minutesEarly: Math.floor(minutesEarly),
+          },
+        };
+      }
+      return noModal(addPunchTypeAM);
+    } catch (e) {
+      devLog("checkClockInEarly error:", e?.message);
+      return noModal(false);
+    }
   };
 
   // Modal content
   const renderModalContent = () => {
+    if (clockInEarlyModalVisible) {
+      const d = clockInEarlyDetails;
+      return (
+        <View className="px-6 pb-6 pt-2">
+          <View className="items-center mb-6">
+            <View className="w-16 h-16 rounded-full bg-amber-100 items-center justify-center mb-4">
+              <Ionicons name="time-outline" size={32} color="#f59e0b" />
+            </View>
+            <Text className="text-2xl font-bold text-slate-900 mb-2 text-center">
+              Clock-In Time Notice
+            </Text>
+            <Text className="text-base text-slate-600 text-center px-2 leading-5">
+              You are clocking in more than 45 minutes before your scheduled shift start.
+            </Text>
+          </View>
+          <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
+            <View className="mb-4">
+              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">Clock-In Time</Text>
+              <Text className="text-lg font-bold text-slate-900">
+                {d?.clockInAt
+                  ? new Date(d.clockInAt).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "—"}
+              </Text>
+            </View>
+            <View className="h-px bg-slate-200 my-4" />
+            <View>
+              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">Scheduled Shift Start</Text>
+              <Text className="text-base font-semibold text-slate-800">
+                {d?.scheduledShiftStart
+                  ? new Date(d.scheduledShiftStart).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "—"}
+              </Text>
+              {Number.isFinite(d?.minutesEarly) && (
+                <View className="mt-2">
+                  <View className="flex-row items-center bg-amber-50 px-3 py-1.5 rounded-lg self-start">
+                    <Ionicons name="time" size={14} color="#f59e0b" />
+                    <Text className="text-xs font-medium text-amber-700 ml-1.5">
+                      {d.minutesEarly} minutes before scheduled start
+                    </Text>
+                  </View>
+                </View>
+              )}
+            </View>
+          </View>
+
+          {/* Action: Regular punch or Driver/Aide (icon buttons) */}
+          <View className="flex-row gap-4 justify-center items-stretch">
+            <TouchableOpacity
+              onPress={async () => {
+                const pending = pendingClockInPayload;
+                if (pending) {
+                  devLog("Modal: Regular punch clock-in (REGULAR)");
+                  try {
+                    const res = await axios.post(
+                      `${API_BASE_URL}/api/timelogs/time-in`,
+                      {
+                        deviceInfo: pending.deviceInfo,
+                        location: pending.location,
+                        localTimestamp: pending.localTimestamp,
+                        punchType: "REGULAR",
+                      },
+                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                    );
+                    if (res.status === 200 || res.status === 201) {
+                      Alert.alert("Success", res.data.message);
+                      const now = new Date();
+                      setIsTimeIn(true);
+                      setPunchTime(now);
+                      setSessionElapsed(0);
+                      setIsCoffeeBreakActive(false);
+                      setCoffeeBreakCount(0);
+                      setCoffeeBreakStartTime(null);
+                      setTotalCoffeeTime(0);
+                      setIsLunchBreakActive(false);
+                      setLunchBreakStartTime(null);
+                      setTotalLunchTime(0);
+                      closeModal();
+                    }
+                  } catch (err) {
+                    Alert.alert(
+                      "Error",
+                      err?.response?.data?.message || "Punch failed. Please try again."
+                    );
+                  }
+                  return;
+                }
+                closeModal();
+              }}
+              className="flex-1 items-center justify-center py-5 rounded-xl border-2 border-slate-200 bg-slate-50"
+              activeOpacity={0.85}
+            >
+              <View className="w-14 h-14 rounded-full bg-slate-200 items-center justify-center mb-2">
+                <Ionicons name="time-outline" size={28} color="#475569" />
+              </View>
+              <Text className="text-slate-700 font-semibold text-sm text-center">Regular punch</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={async () => {
+                const pending = pendingClockInPayload;
+                if (pending) {
+                  devLog("Modal: Driver/Aide clock-in (DRIVER_AIDE_AM)");
+                  try {
+                    const res = await axios.post(
+                      `${API_BASE_URL}/api/timelogs/time-in`,
+                      {
+                        deviceInfo: pending.deviceInfo,
+                        location: pending.location,
+                        localTimestamp: pending.localTimestamp,
+                        punchType: "DRIVER_AIDE_AM",
+                      },
+                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                    );
+                    if (res.status === 200 || res.status === 201) {
+                      Alert.alert("Success", res.data.message);
+                      const now = new Date();
+                      setIsTimeIn(true);
+                      setPunchTime(now);
+                      setSessionElapsed(0);
+                      setIsCoffeeBreakActive(false);
+                      setCoffeeBreakCount(0);
+                      setCoffeeBreakStartTime(null);
+                      setTotalCoffeeTime(0);
+                      setIsLunchBreakActive(false);
+                      setLunchBreakStartTime(null);
+                      setTotalLunchTime(0);
+                      closeModal();
+                    }
+                  } catch (err) {
+                    Alert.alert(
+                      "Error",
+                      err?.response?.data?.message || "Punch failed. Please try again."
+                    );
+                  }
+                  return;
+                }
+                closeModal();
+              }}
+              className="flex-1 items-center justify-center py-5 rounded-xl border-2 border-amber-400 bg-amber-50"
+              activeOpacity={0.85}
+              style={{
+                shadowColor: "#f59e0b",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.2,
+                shadowRadius: 4,
+                elevation: 3,
+              }}
+            >
+              <View className="w-14 h-14 rounded-full bg-amber-400 items-center justify-center mb-2">
+                <Ionicons name="person-outline" size={28} color="#fff" />
+              </View>
+              <Text className="text-amber-800 font-semibold text-sm text-center">Driver / Aide</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    if (clockOutDeviationModalVisible) {
+      const d = clockOutDeviationDetails;
+      return (
+        <View className="px-6 pb-6 pt-2">
+          {/* Header Section */}
+          <View className="items-center mb-6">
+            <View className="w-16 h-16 rounded-full bg-amber-100 items-center justify-center mb-4">
+              <Ionicons name="time-outline" size={32} color="#f59e0b" />
+            </View>
+            <Text className="text-2xl font-bold text-slate-900 mb-2 text-center">
+              Clock-Out Time Notice
+            </Text>
+            <Text className="text-base text-slate-600 text-center px-2 leading-5">
+              Your clock-out time is outside your scheduled shift window.
+            </Text>
+          </View>
+
+          {/* Time Details Card */}
+          <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
+            {/* Clock-out Time */}
+            <View className="mb-4">
+              <View className="flex-row items-center mb-2">
+                <View className="w-8 h-8 rounded-full bg-amber-100 items-center justify-center mr-3">
+                  <Ionicons name="log-out-outline" size={18} color="#f59e0b" />
+                </View>
+                <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+                  Clock-Out Time
+                </Text>
+              </View>
+              <Text className="text-lg font-bold text-slate-900 ml-11">
+                {d?.clockOutAt
+                  ? new Date(d.clockOutAt).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "—"}
+              </Text>
+            </View>
+
+            <View className="h-px bg-slate-200 my-4" />
+
+            {/* Last Shift End */}
+            <View className="mb-4">
+              <View className="flex-row items-center mb-2">
+                <View className="w-8 h-8 rounded-full bg-blue-100 items-center justify-center mr-3">
+                  <Ionicons name="arrow-down-circle-outline" size={18} color="#3b82f6" />
+                </View>
+                <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+                  Last Shift Ended
+                </Text>
+              </View>
+              <Text className="text-base font-semibold text-slate-800 ml-11 mb-1">
+                {d?.lastShiftEnd
+                  ? new Date(d.lastShiftEnd).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "—"}
+              </Text>
+              {Number.isFinite(d?.minutesAfterEnd) && (
+                <View className="ml-11 mt-1">
+                  <View className="flex-row items-center bg-amber-50 px-3 py-1.5 rounded-lg self-start">
+                    <Ionicons name="time" size={14} color="#f59e0b" />
+                    <Text className="text-xs font-medium text-amber-700 ml-1.5">
+                      {d.minutesAfterEnd} minutes after shift end
+                    </Text>
+                  </View>
+                </View>
+              )}
+            </View>
+
+            {/* Next Shift Start */}
+            <View>
+              <View className="flex-row items-center mb-2">
+                <View className="w-8 h-8 rounded-full bg-green-100 items-center justify-center mr-3">
+                  <Ionicons name="arrow-up-circle-outline" size={18} color="#10b981" />
+                </View>
+                <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+                  Next Shift Starts
+                </Text>
+              </View>
+              <Text className="text-base font-semibold text-slate-800 ml-11 mb-1">
+                {d?.nextShiftStart
+                  ? new Date(d.nextShiftStart).toLocaleString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                      hour12: true,
+                    })
+                  : "—"}
+              </Text>
+              {Number.isFinite(d?.minutesBeforeNextStart) && (
+                <View className="ml-11 mt-1">
+                  <View className="flex-row items-center bg-green-50 px-3 py-1.5 rounded-lg self-start">
+                    <Ionicons name="time" size={14} color="#10b981" />
+                    <Text className="text-xs font-medium text-green-700 ml-1.5">
+                      {d.minutesBeforeNextStart} minutes before next shift
+                    </Text>
+                  </View>
+                </View>
+              )}
+            </View>
+          </View>
+
+          {/* Action: Regular punch or Driver/Aide (icon buttons) */}
+          <View className="flex-row gap-4 justify-center items-stretch">
+            <TouchableOpacity
+              onPress={async () => {
+                const pending = pendingClockOutPayload;
+                if (pending) {
+                  devLog("Modal: Regular punch clock-out (REGULAR)");
+                  try {
+                    const reqBody = {
+                      deviceInfo: pending.deviceInfo,
+                      location: pending.location,
+                      localTimestamp: pending.localTimestamp,
+                      punchType: "REGULAR",
+                    };
+                    const res = await axios.post(
+                      `${API_BASE_URL}/api/timelogs/time-out`,
+                      reqBody,
+                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                    );
+                    if (res.status === 200 || res.status === 201) {
+                      if (d?.clockOutAt) {
+                        await storeClockOutDeviationResponse({
+                          ...d,
+                          clockOutAt: new Date(d.clockOutAt).toISOString(),
+                          lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
+                          nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                          workedAsAide: false,
+                          recordedAt: new Date().toISOString(),
+                        });
+                      }
+                      Alert.alert("Success", res.data.message);
+                      resetAllStates();
+                      closeModal();
+                    }
+                  } catch (err) {
+                    Alert.alert(
+                      "Error",
+                      err?.response?.data?.message || "Punch failed. Please try again."
+                    );
+                  }
+                  return;
+                }
+                if (d?.clockOutAt) {
+                  await storeClockOutDeviationResponse({
+                    ...d,
+                    clockOutAt: new Date(d.clockOutAt).toISOString(),
+                    lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
+                    nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                    workedAsAide: false,
+                    recordedAt: new Date().toISOString(),
+                  });
+                }
+                closeModal();
+              }}
+              className="flex-1 items-center justify-center py-5 rounded-xl border-2 border-slate-200 bg-slate-50"
+              activeOpacity={0.85}
+            >
+              <View className="w-14 h-14 rounded-full bg-slate-200 items-center justify-center mb-2">
+                <Ionicons name="time-outline" size={28} color="#475569" />
+              </View>
+              <Text className="text-slate-700 font-semibold text-sm text-center">Regular punch</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={async () => {
+                const pending = pendingClockOutPayload;
+                if (pending) {
+                  devLog("Modal: Driver/Aide clock-out (DRIVER_AIDE_PM)");
+                  try {
+                    const reqBody = {
+                      deviceInfo: pending.deviceInfo,
+                      location: pending.location,
+                      localTimestamp: pending.localTimestamp,
+                      punchType: "DRIVER_AIDE_PM",
+                    };
+                    const res = await axios.post(
+                      `${API_BASE_URL}/api/timelogs/time-out`,
+                      reqBody,
+                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                    );
+                    if (res.status === 200 || res.status === 201) {
+                      if (d?.clockOutAt) {
+                        await storeClockOutDeviationResponse({
+                          ...d,
+                          clockOutAt: new Date(d.clockOutAt).toISOString(),
+                          lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
+                          nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                          workedAsAide: true,
+                          recordedAt: new Date().toISOString(),
+                        });
+                      }
+                      Alert.alert("Success", res.data.message);
+                      resetAllStates();
+                      closeModal();
+                    }
+                  } catch (err) {
+                    Alert.alert(
+                      "Error",
+                      err?.response?.data?.message || "Punch failed. Please try again."
+                    );
+                  }
+                  return;
+                }
+                if (d?.clockOutAt) {
+                  await storeClockOutDeviationResponse({
+                    ...d,
+                    clockOutAt: new Date(d.clockOutAt).toISOString(),
+                    lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
+                    nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                    workedAsAide: true,
+                    recordedAt: new Date().toISOString(),
+                  });
+                }
+                closeModal();
+              }}
+              className="flex-1 items-center justify-center py-5 rounded-xl border-2 border-amber-400 bg-amber-50"
+              activeOpacity={0.85}
+              style={{
+                shadowColor: "#f59e0b",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.2,
+                shadowRadius: 4,
+                elevation: 3,
+              }}
+            >
+              <View className="w-14 h-14 rounded-full bg-amber-400 items-center justify-center mb-2">
+                <Ionicons name="person-outline" size={28} color="#fff" />
+              </View>
+              <Text className="text-amber-800 font-semibold text-sm text-center">Driver / Aide</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
     if (networkModalVisible) {
       return (
         <View className="p-5">
@@ -1016,7 +1710,11 @@ export default function TimekeepingPunch() {
       </Animated.View>
 
       {/* Bottom-sheet modals */}
-      {(networkModalVisible || locationModalVisible || subscriptionModalVisible) && (
+      {(networkModalVisible ||
+        locationModalVisible ||
+        subscriptionModalVisible ||
+        clockOutDeviationModalVisible ||
+        clockInEarlyModalVisible) && (
         <Modal transparent animationType="none" visible onRequestClose={closeModal}>
           <View style={{ flex: 1 }}>
             <Animated.View

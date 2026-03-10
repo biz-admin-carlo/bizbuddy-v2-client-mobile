@@ -341,7 +341,9 @@ export class NotificationService {
   }
 
   static removeNotificationListener(subscription) {
-    Notifications.removeNotificationSubscription(subscription);
+    if (subscription && typeof subscription.remove === 'function') {
+      subscription.remove();
+    }
   }
 
   static async sendDeviceTokenToBackend(deviceToken, authToken) {

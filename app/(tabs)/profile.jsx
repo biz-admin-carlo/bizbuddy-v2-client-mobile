@@ -16,6 +16,7 @@ import {
   PanResponder,
   Dimensions,
   Platform,
+  Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -32,6 +33,7 @@ import {
 import { NotificationService } from "../../utils/notificationService";
 import NotificationPermissionModal from "../../components/NotificationPermissionModal";
 import { useNotificationPermission } from "../../hooks/useNotificationPermission";
+import { useNotifications } from "../../hooks/useNotifications";
 
 const { height } = Dimensions.get("window");
 
@@ -65,10 +67,11 @@ const getStatusColor = (status) => {
 };
 
 const Profile = () => {
-  const { token, logout } = useAuthStore();
+  const { token, logout, forceLogout } = useAuthStore();
   const { presenceStatus, lastActiveAt } = usePresenceStore();
   const router = useRouter();
   const { showModal, closeModal, openModal } = useNotificationPermission();
+  const { unreadCount } = useNotifications();
 
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState(null);
@@ -87,6 +90,7 @@ const Profile = () => {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [logoutFromOtherDevices, setLogoutFromOtherDevices] = useState(false);
 
   // Updating states / errors
   const [passUpdating, setPassUpdating] = useState(false);
@@ -313,6 +317,12 @@ const Profile = () => {
       }),
     ]).start(() => {
       setIsPassModalVisible(false);
+      // Reset form fields
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setLogoutFromOtherDevices(false);
+      setPassError("");
     });
   };
 
@@ -469,7 +479,12 @@ const Profile = () => {
         router.replace("(auth)/signin");
         return;
       }
-      const payload = { oldPassword, newPassword, confirmPassword };
+      const payload = { 
+        oldPassword, 
+        newPassword, 
+        confirmPassword,
+        logoutFromOtherDevices 
+      };
       const response = await fetch(
         `${API_BASE_URL}/api/account/change-password`,
         {
@@ -487,8 +502,8 @@ const Profile = () => {
           {
             text: "OK",
             onPress: async () => {
-              await SecureStore.deleteItemAsync("token");
-              await logout();
+              // Force clear token and biometric access - user must sign in again with new password
+              await forceLogout();
               router.replace("(auth)/signin");
             },
           },
@@ -573,19 +588,48 @@ const Profile = () => {
               <Text className="text-2xl font-bold text-slate-700">
                 My Profile
               </Text>
-              <TouchableOpacity
-                onPress={fetchProfile}
-                className="w-10 h-10 rounded-full items-center justify-center"
-                style={{
-                  shadowColor: "#000",
-                  shadowOffset: { width: 0, height: 1 },
-                  shadowOpacity: 0.05,
-                  shadowRadius: 2,
-                  elevation: 2,
-                }}
-              >
-                <Feather name="refresh-cw" size={18} color="#f97316" />
-              </TouchableOpacity>
+              <View className="flex-row items-center gap-2">
+                <TouchableOpacity
+                  onPress={() => router.push("/(tabs)/notifications")}
+                  className="w-10 h-10 rounded-full items-center justify-center relative"
+                  style={{
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: 0.05,
+                    shadowRadius: 2,
+                    elevation: 2,
+                  }}
+                >
+                  <Ionicons name="notifications-outline" size={18} color="#f97316" />
+                  {unreadCount > 0 && (
+                    <View
+                      className="absolute -top-1 -right-1 bg-red-500 rounded-full items-center justify-center border-2 border-white"
+                      style={{
+                        minWidth: 18,
+                        height: 18,
+                        paddingHorizontal: unreadCount > 9 ? 4 : 0,
+                      }}
+                    >
+                      <Text className="text-white text-xs font-bold" style={{ fontSize: 10 }}>
+                        {unreadCount > 99 ? "99+" : unreadCount}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={fetchProfile}
+                  className="w-10 h-10 rounded-full items-center justify-center"
+                  style={{
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: 0.05,
+                    shadowRadius: 2,
+                    elevation: 2,
+                  }}
+                >
+                  <Feather name="refresh-cw" size={18} color="#f97316" />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {profile && profile.user && profile.profile ? (
@@ -1107,6 +1151,25 @@ const Profile = () => {
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
                   placeholderTextColor="#9ca3af"
+                />
+              </View>
+
+              {/* Logout from other devices checkbox */}
+              <View className="flex-row items-center justify-between bg-slate-50 border border-slate-200 rounded-lg px-4 py-4 mb-4">
+                <View className="flex-1 mr-3">
+                  <Text className="text-sm font-semibold text-slate-700 mb-1">
+                    Logout from other devices
+                  </Text>
+                  <Text className="text-xs text-slate-500">
+                    Sign out from all other devices when password is changed
+                  </Text>
+                </View>
+                <Switch
+                  value={logoutFromOtherDevices}
+                  onValueChange={setLogoutFromOtherDevices}
+                  trackColor={{ false: "#d1d5db", true: "#fdba74" }}
+                  thumbColor={logoutFromOtherDevices ? "#f97316" : "#ffffff"}
+                  ios_backgroundColor="#d1d5db"
                 />
               </View>
 

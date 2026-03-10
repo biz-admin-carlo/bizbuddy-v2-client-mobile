@@ -1,4 +1,4 @@
-package com.bizsolutions.bizbuddy
+package com.bizsolutions.mybizbuddy
 
 import android.os.Build
 import android.os.Bundle
@@ -59,3 +59,4 @@ class MainActivity : ReactActivity() {
       super.invokeDefaultOnBackPressed()
   }
 }
+

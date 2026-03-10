@@ -12,25 +12,63 @@ import {
   TouchableOpacity,
   Linking,
   Image,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { VERSION } from "../config/constant";
+import {
+  compareVersions,
+  getNativeAppVersion,
+  getDefaultStoreUrl,
+  getStoreUpdateInfo,
+} from "../utils/versionCheck";
+
+// TEMP (dev-only): force showing the "Update Available" modal on launch so you can verify UI.
+// Set to false (or remove) after validation.
+const FORCE_UPDATE_AVAILABLE_MODAL = false;
+const FORCE_LATEST_VERSION = "1.0.7";
 
 export default function Index() {
   const router = useRouter();
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [deviceVersion, setDeviceVersion] = useState(null);
+  const [latestVersion, setLatestVersion] = useState(null);
+  const [storeUrl, setStoreUrl] = useState(null);
 
   useEffect(() => {
     const initApp = async () => {
       try {
+        const nativeVersion = getNativeAppVersion() || VERSION;
+        setDeviceVersion(nativeVersion);
+
+        if (FORCE_UPDATE_AVAILABLE_MODAL) {
+          setLatestVersion(FORCE_LATEST_VERSION);
+          setStoreUrl(null);
+          setShowUpdateModal(true);
+          return;
+        }
+
         const storedVersion = await SecureStore.getItemAsync("appVersion");
         if (!storedVersion) {
           await SecureStore.setItemAsync("appVersion", VERSION);
         } else if (storedVersion !== VERSION) {
-          setDeviceVersion(storedVersion);
+          // The app was updated. Persist the new version and continue.
+          // (SecureStore persists across installs/updates, so a mismatch is expected.)
+          await SecureStore.setItemAsync("appVersion", VERSION);
+        }
+
+        // Check store version (App Store / Google Play). Only show modal if store is newer.
+        const storeInfo = await getStoreUpdateInfo({
+          iosAppId: "6742564608",
+          iosBundleId: "com.bizsolutions.bizbuddy",
+          androidPackageName: "com.bizsolutions.mybizbuddy",
+        });
+        const storeVersion = storeInfo?.storeVersion;
+        if (storeVersion && compareVersions(storeVersion, nativeVersion) === 1) {
+          setLatestVersion(storeVersion);
+          setStoreUrl(storeInfo?.storeUrl || null);
           setShowUpdateModal(true);
           return;
         }
@@ -49,7 +87,15 @@ export default function Index() {
   }, [router]);
 
   const handleUpdate = () => {
-    Linking.openURL("https://your-app-update-url.com");
+    const fallbackUrl = getDefaultStoreUrl({
+      appName: "BizBuddy",
+      // Explicit IDs (matches app.json)
+      iosAppId: "6742564608",
+      iosListingUrl: "https://apps.apple.com/ph/app/bizbuddy-tks-payroll/id6742564608",
+      iosBundleId: "com.bizsolutions.bizbuddy",
+      androidPackageName: "com.bizsolutions.mybizbuddy",
+    });
+    Linking.openURL(storeUrl || fallbackUrl);
   };
 
   return (
@@ -76,7 +122,9 @@ export default function Index() {
             Your business companion
           </Text>
 
-          <Text className="text-xs mb-8 text-slate-600">Version {VERSION}</Text>
+          <Text className="text-xs mb-8 text-slate-600">
+            Version {deviceVersion || VERSION}
+          </Text>
 
           <ActivityIndicator size="large" color="#f97316" />
           <Text className="mt-4 text-slate-600">
@@ -98,7 +146,7 @@ export default function Index() {
             </View>
 
             <Text className="text-xl font-bold mb-3 text-center text-slate-800">
-              Update Required
+              Update Available
             </Text>
 
             <Text className="mb-6 text-center text-slate-600">
@@ -118,7 +166,9 @@ export default function Index() {
 
               <View className="flex-row justify-between items-center">
                 <Text className="text-slate-600">Latest Version</Text>
-                <Text className="font-semibold text-orange-500">{VERSION}</Text>
+                <Text className="font-semibold text-orange-500">
+                  {latestVersion || VERSION}
+                </Text>
               </View>
             </View>
 
@@ -132,7 +182,7 @@ export default function Index() {
             </TouchableOpacity>
 
             <Text className="text-xs text-center text-slate-600">
-              This update is required to continue using the app
+              Please update to get the latest features and fixes
             </Text>
           </View>
         </View>

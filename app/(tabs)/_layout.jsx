@@ -15,13 +15,18 @@ import {
   PanResponder,
   Easing,
 } from "react-native";
-import { Tabs } from "expo-router";
+import { Tabs, useRouter } from "expo-router";
+import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import UserInactivity from "react-native-user-inactivity";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL, WEBSITE_URL } from "../../config/constant";
+import { NotificationService } from "../../utils/notificationService";
 import useAuthStore from "../../store/useAuthStore";
 import usePresenceStore from "../../store/presenceStore";
+import useTutorialStore from "../../store/tutorialStore";
+import TutorialOverlay from "../../components/TutorialOverlay";
+import { useNotifications } from "../../hooks/useNotifications";
 import io from "socket.io-client";
 
 const { height } = Dimensions.get("window");
@@ -205,10 +210,104 @@ const AvatarIcon = ({ color, size, focused }) => {
   );
 };
 
+// Notification icon with badge
+const NotificationIcon = ({ color, size, focused }) => {
+  const { unreadCount } = useNotifications();
+  
+  return (
+    <View className="items-center justify-center">
+      <TabIcon
+        name="notifications-outline"
+        size={size}
+        color={color}
+        focused={focused}
+      />
+      {unreadCount > 0 && (
+        <View
+          className="absolute -top-1 -right-1 bg-red-500 rounded-full items-center justify-center border-2 border-white"
+          style={{
+            minWidth: 18,
+            height: 18,
+            paddingHorizontal: unreadCount > 9 ? 4 : 0,
+          }}
+        >
+          <Text className="text-white text-xs font-bold" style={{ fontSize: 10 }}>
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+};
+
 const TabsLayout = () => {
   const { token } = useAuthStore();
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
+  const router = useRouter();
+  const handledNotificationIdsRef = useRef(new Set());
+  const maybeAutoStartTutorial = useTutorialStore((s) => s.maybeAutoStart);
+
+  // Show the tutorial once per install (after first successful entry into tabs).
+  useEffect(() => {
+    maybeAutoStartTutorial();
+  }, [maybeAutoStartTutorial]);
+
+  // When a user taps a notification, redirect to `data.targetRoute` (deep link-like behavior).
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+
+    const handleNotificationResponse = (response) => {
+      try {
+        if (
+          response?.actionIdentifier &&
+          response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER
+        ) {
+          return;
+        }
+
+        const request = response?.notification?.request;
+        const contentData = request?.content?.data ?? {};
+        const targetRoute = contentData?.targetRoute;
+        const identifier =
+          request?.identifier ??
+          response?.notification?.date?.toISOString?.() ??
+          null;
+
+        if (
+          identifier &&
+          handledNotificationIdsRef.current.has(String(identifier))
+        ) {
+          return;
+        }
+        if (identifier) handledNotificationIdsRef.current.add(String(identifier));
+
+        if (typeof targetRoute === "string" && targetRoute.startsWith("/")) {
+          router.push(targetRoute);
+        }
+      } catch (err) {
+        console.log("Notification redirect handling failed:", err?.message);
+      }
+    };
+
+    const subscription =
+      NotificationService.addNotificationResponseListener(
+        handleNotificationResponse
+      );
+
+    // Handle cold-start / app-resume where the notification response is already available.
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (response) handleNotificationResponse(response);
+      })
+      .catch(() => {});
+
+    return () => {
+      if (subscription) {
+        NotificationService.removeNotificationListener(subscription);
+      }
+    };
+  }, [router]);
 
   // State for subscription plan (e.g., "free", "basic", "pro")
   const [subscriptionPlan, setSubscriptionPlan] = useState(null);
@@ -507,6 +606,14 @@ const TabsLayout = () => {
               ),
             }}
           />
+          {/* Keep notifications route hidden from the tab bar */}
+          <Tabs.Screen
+            name="notifications"
+            options={{
+              headerShown: false,
+              href: null,
+            }}
+          />
           <Tabs.Screen
             name="(settings)"
             options={{
@@ -519,6 +626,9 @@ const TabsLayout = () => {
           />
         </Tabs>
       </UserInactivity>
+
+      {/* Tutorial overlay (text bubble walkthrough) */}
+      <TutorialOverlay />
 
       {/* Slide-up Modal for Locked Features */}
       <Modal
