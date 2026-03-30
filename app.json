@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizBuddy",
     "slug": "biz-buddy-slug",
-    "version": "1.0.6",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "myapp",
@@ -25,7 +25,7 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.bizsolutions.mybizbuddy",
-      "versionCode": 12,
+      "versionCode": 15,
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -64,7 +64,7 @@
         "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
-    "runtimeVersion": "1.0.6",
+    "runtimeVersion": "1.0.8",
     "owner": "miguelalviar"
   }
 }

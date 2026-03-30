@@ -289,13 +289,17 @@ export default function SignIn() {
     setLoading(true);
     setError(null);
     try {
-      const signInRes = await fetch(
-        `${API_BASE_URL}/api/account/sign-in?email=${encodeURIComponent(
-          email
-        )}&password=${encodeURIComponent(
-          password
-        )}&companyId=${selectedCompanyId}`
-      );
+      const signInRes = await fetch(`${API_BASE_URL}/api/account/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          password,
+          companyId: selectedCompanyId,
+        }),
+      });
       const signInData = await signInRes.json();
       if (!signInRes.ok) {
         setError(signInData.message || "Invalid credentials.");

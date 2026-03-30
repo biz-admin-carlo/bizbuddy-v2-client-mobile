@@ -1,9 +1,10 @@
 // hooks/useNotifications.js
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL } from "../config/constant";
 import io from "socket.io-client";
+import useNotificationStore from "../store/notificationStore";
 
 // Set to true to always use mock notifications (for testing)
 const USE_MOCK_NOTIFICATIONS = false;
@@ -294,9 +295,14 @@ const getMockNotifications = () => {
 };
 
 export const useNotifications = () => {
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const {
+    notifications,
+    unreadCount,
+    loading,
+    setNotifications,
+    setUnreadCount,
+    setLoading,
+  } = useNotificationStore();
   const socketRef = useRef(null);
 
   const fetchNotifications = async (seen = null) => {

@@ -17,6 +17,8 @@ import {
   PanResponder,
   Modal,
   Platform,
+  TextInput,
+  KeyboardAvoidingView,
 } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
 import axios from "axios";
@@ -30,6 +32,7 @@ import {
   API_BASE_URL,
   CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES,
   CLOCK_OUT_DEVIATION_COMPANY_IDS,
+  DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL,
   DRIVER_AIDE_JOB_TITLES,
 } from "../../../config/constant";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -180,6 +183,9 @@ export default function TimekeepingPunch() {
   const [clockInEarlyModalVisible, setClockInEarlyModalVisible] = useState(false);
   const [clockInEarlyDetails, setClockInEarlyDetails] = useState(null);
   const [pendingClockInPayload, setPendingClockInPayload] = useState(null);
+  const [noScheduledShiftClockInModalVisible, setNoScheduledShiftClockInModalVisible] =
+    useState(false);
+  const [noScheduledShiftClockInNotes, setNoScheduledShiftClockInNotes] = useState("");
 
   // Timer reference
   const masterTimerRef = useRef(null);
@@ -607,6 +613,28 @@ export default function TimekeepingPunch() {
         let clockInEarlyCheck = null;
 
         if (!isTimeIn) {
+          if (DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL) {
+            devLog("Demo: forcing no-scheduled-shift clock-in modal");
+            let demoTimeInPayload = { ...payload };
+            try {
+              const demoEarly = await checkClockInEarly({ token, clockInAt: new Date() });
+              if (demoEarly?.addPunchTypeAM) {
+                demoTimeInPayload = { ...payload, punchType: "DRIVER_AIDE_AM" };
+              }
+            } catch {
+              // ignore; use base payload
+            }
+            setPendingClockInPayload({
+              token,
+              deviceInfo,
+              location,
+              localTimestamp,
+              punchType: demoTimeInPayload?.punchType,
+            });
+            openModal("noScheduledShiftClockIn");
+            setLoading(false);
+            return;
+          }
           // Time-in: check if user (allowed company, non–driver/aide) is clocking in >45 mins before scheduled start
           try {
             clockInEarlyCheck = await checkClockInEarly({ token, clockInAt: new Date() });
@@ -617,7 +645,12 @@ export default function TimekeepingPunch() {
             });
             if (clockInEarlyCheck.showModal && clockInEarlyCheck.details) {
               devLog("Showing clock-in early modal");
-              setPendingClockInPayload({ token, deviceInfo, location, localTimestamp });
+              setPendingClockInPayload({
+                token,
+                deviceInfo,
+                location,
+                localTimestamp,
+              });
               setClockInEarlyDetails(clockInEarlyCheck.details);
               openModal("clockInEarly");
               setLoading(false);
@@ -626,6 +659,19 @@ export default function TimekeepingPunch() {
             if (clockInEarlyCheck.addPunchTypeAM) {
               timeInPayload = { ...payload, punchType: "DRIVER_AIDE_AM" };
               devLog("Time-in payload: punchType = DRIVER_AIDE_AM");
+            }
+            if (clockInEarlyCheck.hasScheduledShift === false) {
+              devLog("Showing no-scheduled-shift clock-in modal");
+              setPendingClockInPayload({
+                token,
+                deviceInfo,
+                location,
+                localTimestamp,
+                punchType: timeInPayload?.punchType,
+              });
+              openModal("noScheduledShiftClockIn");
+              setLoading(false);
+              return;
             }
           } catch (e) {
             devLog("Clock-in early check error:", e?.message);
@@ -853,6 +899,8 @@ export default function TimekeepingPunch() {
     else if (type === "clockOutDeviation")
       setClockOutDeviationModalVisible(true);
     else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
+    else if (type === "noScheduledShiftClockIn")
+      setNoScheduledShiftClockInModalVisible(true);
 
     modalYAnim.setValue(height);
     Animated.parallel([
@@ -893,6 +941,8 @@ export default function TimekeepingPunch() {
       setClockInEarlyModalVisible(false);
       setClockInEarlyDetails(null);
       setPendingClockInPayload(null);
+      setNoScheduledShiftClockInModalVisible(false);
+      setNoScheduledShiftClockInNotes("");
     });
   };
 
@@ -973,11 +1023,15 @@ export default function TimekeepingPunch() {
 
   // Returns { showModal?, details?, addPunchTypeAM } for time-in. When in allowed company and not driver/aide, addPunchTypeAM=true (use punchType DRIVER_AIDE_AM).
   const checkClockInEarly = async ({ token, clockInAt }) => {
-    const noModal = (addPunchTypeAM = false) => ({ showModal: false, addPunchTypeAM });
+    const noModal = (addPunchTypeAM = false, hasScheduledShift = true) => ({
+      showModal: false,
+      addPunchTypeAM,
+      hasScheduledShift,
+    });
     try {
-      if (!token) return noModal(false);
+      if (!token) return noModal(false, true);
       if (!(clockInAt instanceof Date) || !Number.isFinite(clockInAt.getTime()))
-        return noModal(false);
+        return noModal(false, true);
 
       const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -987,33 +1041,33 @@ export default function TimekeepingPunch() {
       const company = data?.company ?? profile?.company ?? null;
       const companyId = company?.id ?? company?._id ?? company?.companyId ?? null;
       const jobTitle = (profile?.jobTitle ?? profile?.job_title ?? profile?.title ?? "").toString().trim();
+      const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const userShifts = shiftsRes?.data?.data;
+      const windows = Array.isArray(userShifts)
+        ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
+        : [];
+      const hasScheduledShift = windows.length > 0;
 
       const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS) ? CLOCK_OUT_DEVIATION_COMPANY_IDS : [];
       if (!companyId || !allowedCompanyIds.includes(String(companyId))) {
         devLog("checkClockInEarly: not in allowed company", { companyId });
-        return noModal(false);
+        return noModal(false, hasScheduledShift);
       }
 
       const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
       if (driverAideTitles.some((t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase())) {
         devLog("checkClockInEarly: driver/aide job, skip", { jobTitle });
-        return noModal(false);
+        return noModal(false, hasScheduledShift);
       }
 
       const addPunchTypeAM = true; // non–driver/aide in allowed company => time-in uses DRIVER_AIDE_AM
-
-      const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const userShifts = shiftsRes?.data?.data;
-      if (!Array.isArray(userShifts) || userShifts.length === 0) return noModal(addPunchTypeAM);
-
-      const windows = userShifts.map(buildShiftWindowFromUserShift).filter(Boolean);
-      if (!windows.length) return noModal(addPunchTypeAM);
+      if (!hasScheduledShift) return noModal(addPunchTypeAM, false);
 
       const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
       const nextShiftStart = boundaries?.nextShiftStart;
-      if (!nextShiftStart) return noModal(addPunchTypeAM);
+      if (!nextShiftStart) return noModal(addPunchTypeAM, true);
 
       const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
       const threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
@@ -1038,10 +1092,10 @@ export default function TimekeepingPunch() {
           },
         };
       }
-      return noModal(addPunchTypeAM);
+      return noModal(addPunchTypeAM, true);
     } catch (e) {
       devLog("checkClockInEarly error:", e?.message);
-      return noModal(false);
+      return noModal(false, true);
     }
   };
 
@@ -1214,6 +1268,149 @@ export default function TimekeepingPunch() {
             </TouchableOpacity>
           </View>
         </View>
+      );
+    }
+
+    if (noScheduledShiftClockInModalVisible) {
+      const confirmNoScheduleClockIn = async () => {
+        const pending = pendingClockInPayload;
+        if (!pending) {
+          closeModal();
+          return;
+        }
+        try {
+          const reqBody = {
+            deviceInfo: pending.deviceInfo,
+            location: pending.location,
+            localTimestamp: pending.localTimestamp,
+          };
+          if (pending.punchType) {
+            reqBody.punchType = pending.punchType;
+          }
+          const trimmedNotes = noScheduledShiftClockInNotes.trim();
+          if (trimmedNotes) {
+            reqBody.remarks = trimmedNotes;
+          }
+          const res = await axios.post(
+            `${API_BASE_URL}/api/timelogs/time-in`,
+            reqBody,
+            { headers: { Authorization: `Bearer ${pending.token}` } }
+          );
+          if (res.status === 200 || res.status === 201) {
+            Alert.alert("Success", res.data.message);
+            const now = new Date();
+            setIsTimeIn(true);
+            setPunchTime(now);
+            setSessionElapsed(0);
+            setIsCoffeeBreakActive(false);
+            setCoffeeBreakCount(0);
+            setCoffeeBreakStartTime(null);
+            setTotalCoffeeTime(0);
+            setIsLunchBreakActive(false);
+            setLunchBreakStartTime(null);
+            setTotalLunchTime(0);
+            closeModal();
+          }
+        } catch (err) {
+          Alert.alert(
+            "Error",
+            err?.response?.data?.message || "Punch failed. Please try again."
+          );
+        }
+      };
+
+      return (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          style={{ width: "100%", flex: 1 }}
+        >
+          <ScrollView
+            style={{ flex: 1 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+            contentContainerStyle={{
+              paddingHorizontal: 24,
+              paddingTop: 4,
+              paddingBottom: Math.max(insets.bottom, 20) + 12,
+            }}
+          >
+            <View className="items-center mb-5">
+              <View
+                className="w-[72px] h-[72px] rounded-2xl items-center justify-center mb-3"
+                style={{ backgroundColor: "#fff7ed" }}
+              >
+                <Ionicons name="calendar-outline" size={36} color="#ea580c" />
+              </View>
+              <Text className="text-xl font-bold text-slate-900 text-center tracking-tight">
+                No shift on your schedule
+              </Text>
+              <Text className="text-base text-slate-500 text-center mt-2.5 leading-6 px-1">
+                Nothing is assigned for you right now. You can still clock in—add a short note if your team should know why.
+              </Text>
+            </View>
+
+            <View
+              className="flex-row rounded-2xl p-4 mb-5 border"
+              style={{ backgroundColor: "#fffbeb", borderColor: "#fde68a" }}
+            >
+              <Ionicons name="information-circle" size={22} color="#d97706" style={{ marginTop: 1 }} />
+              <Text className="flex-1 ml-3 text-sm text-amber-950 leading-5">
+                Your time-in will be recorded the same as a normal punch.
+              </Text>
+            </View>
+
+            <View className="mb-6">
+              <Text className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                Note (optional)
+              </Text>
+              <TextInput
+                multiline
+                value={noScheduledShiftClockInNotes}
+                onChangeText={setNoScheduledShiftClockInNotes}
+                placeholder="e.g. covering for Juan, training, on-call…"
+                placeholderTextColor="#94a3b8"
+                style={{
+                  backgroundColor: "#ffffff",
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 14,
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  fontSize: 16,
+                  color: "#0f172a",
+                  minHeight: 100,
+                  maxHeight: 160,
+                  textAlignVertical: "top",
+                }}
+              />
+            </View>
+
+            <TouchableOpacity
+              onPress={confirmNoScheduleClockIn}
+              className="py-4 rounded-2xl items-center justify-center bg-orange-500 mb-3"
+              activeOpacity={0.88}
+              style={{
+                shadowColor: "#ea580c",
+                shadowOffset: { width: 0, height: 3 },
+                shadowOpacity: 0.25,
+                shadowRadius: 6,
+                elevation: 4,
+              }}
+            >
+              <Text className="text-white font-bold text-base">Clock in</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={closeModal}
+              className="py-3.5 rounded-2xl items-center justify-center bg-slate-100 border border-slate-200"
+              activeOpacity={0.85}
+            >
+              <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </KeyboardAvoidingView>
       );
     }
 
@@ -1714,7 +1911,8 @@ export default function TimekeepingPunch() {
         locationModalVisible ||
         subscriptionModalVisible ||
         clockOutDeviationModalVisible ||
-        clockInEarlyModalVisible) && (
+        clockInEarlyModalVisible ||
+        noScheduledShiftClockInModalVisible) && (
         <Modal transparent animationType="none" visible onRequestClose={closeModal}>
           <View style={{ flex: 1 }}>
             <Animated.View

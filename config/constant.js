@@ -7,7 +7,7 @@ export const WEBSITE_URL = "https://mybizbuddy.co";
 export const API_BASE_URL = PROD_SERVER_CARLO;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
-export const VERSION = "1.0.6";
+export const VERSION = "1.0.8";
 
 // ---- Timekeeping: Clock-out deviation modal ----
 // Minutes threshold for showing the modal (>= this many minutes after shift end AND
@@ -15,6 +15,9 @@ export const VERSION = "1.0.6";
 export const CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES = 45;
 // Company IDs that see the clock-out deviation modal (others never see it).
 export const CLOCK_OUT_DEVIATION_COMPANY_IDS = ["cmb1rn4ks0001wqdx2nqth9ra"];
+// Set to true to always show the "no scheduled shift" clock-in modal (timekeeping punch, online flow).
+export const DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL = false;
+
 // Job titles that always clock out with punchType DRIVER_AIDE (no deviation modal).
 export const DRIVER_AIDE_JOB_TITLES = [
   "Driver",
