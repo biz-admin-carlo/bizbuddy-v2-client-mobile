@@ -40,6 +40,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   buildShiftWindowFromUserShift,
   findSurroundingShiftBoundaries,
+  getClockOutScheduleSummary,
 } from "../../../utils/timekeepingShiftUtils";
 
 const PENDING_ACTIONS_KEY = "pendingPunchActions";
@@ -179,13 +180,20 @@ export default function TimekeepingPunch() {
   const [clockOutDeviationDetails, setClockOutDeviationDetails] = useState(null);
   // When clock-out is deferred for deviation modal: payload to send when user picks Regular or Driver/Aide
   const [pendingClockOutPayload, setPendingClockOutPayload] = useState(null);
-  // Clock-in early modal (for allowed company, non–driver/aide): user clocking in >45 mins before scheduled start
+  // Clock-in early modal (for allowed company, non–driver/aide): early clock-in vs driverAideThresholdMinutes from /api/company-settings
   const [clockInEarlyModalVisible, setClockInEarlyModalVisible] = useState(false);
   const [clockInEarlyDetails, setClockInEarlyDetails] = useState(null);
   const [pendingClockInPayload, setPendingClockInPayload] = useState(null);
   const [noScheduledShiftClockInModalVisible, setNoScheduledShiftClockInModalVisible] =
     useState(false);
   const [noScheduledShiftClockInNotes, setNoScheduledShiftClockInNotes] = useState("");
+  const [clockOutConfirmModalVisible, setClockOutConfirmModalVisible] =
+    useState(false);
+  const [clockOutConfirmSchedule, setClockOutConfirmSchedule] = useState(null);
+  const [pendingClockOutConfirmPayload, setPendingClockOutConfirmPayload] =
+    useState(null);
+  const pendingClockOutAfterConfirmRef = useRef(null);
+  const executeOnlineClockOutRef = useRef(null);
 
   // Timer reference
   const masterTimerRef = useRef(null);
@@ -608,9 +616,33 @@ export default function TimekeepingPunch() {
         }
       } else {
         // If user is online => normal punch (or defer to deviation/early modals for that company)
-        let timeOutPayload = { ...payload };
         let timeInPayload = payload;
         let clockInEarlyCheck = null;
+
+        if (isTimeIn) {
+          try {
+            const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const userShifts = shiftsRes?.data?.data;
+            const windows = Array.isArray(userShifts)
+              ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
+              : [];
+            setClockOutConfirmSchedule(getClockOutScheduleSummary(windows, new Date()));
+          } catch (e) {
+            devLog("Clock-out confirm schedule fetch error:", e?.message);
+            setClockOutConfirmSchedule({ status: "no_shifts" });
+          }
+          setPendingClockOutConfirmPayload({
+            token,
+            deviceInfo,
+            location,
+            localTimestamp,
+          });
+          openModal("clockOutConfirm");
+          setLoading(false);
+          return;
+        }
 
         if (!isTimeIn) {
           if (DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL) {
@@ -635,7 +667,7 @@ export default function TimekeepingPunch() {
             setLoading(false);
             return;
           }
-          // Time-in: check if user (allowed company, non–driver/aide) is clocking in >45 mins before scheduled start
+          // Time-in: allowed company + non–driver/aide — early clock-in vs driverAideThresholdMinutes from /api/company-settings
           try {
             clockInEarlyCheck = await checkClockInEarly({ token, clockInAt: new Date() });
             devLog("Time-in check:", {
@@ -678,55 +710,10 @@ export default function TimekeepingPunch() {
             // If check fails, proceed with normal time-in
           }
         }
-        if (isTimeIn) {
-          // Check if user's job title gets automatic DRIVER_AIDE (no modal)
-          try {
-            const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            const profile = profRes?.data?.data?.profile ?? profRes?.data?.data ?? {};
-            const jobTitle = (profile.jobTitle ?? profile.job_title ?? profile.title ?? "").toString().trim();
-            const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
-            const isDriverAideJob = driverAideTitles.some(
-              (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase()
-            );
-            devLog("Time-out check:", { jobTitle, isDriverAideJob });
-            if (isDriverAideJob) {
-              timeOutPayload = { ...payload, punchType: "DRIVER_AIDE" };
-              devLog("Time-out payload: punchType = DRIVER_AIDE (driver/aide job)");
-            } else {
-              const clockOutAt = new Date();
-              const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
-              devLog("Clock-out deviation check:", {
-                showModal: deviationCheck?.showModal,
-                minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
-                minutesBeforeNextStart: deviationCheck?.details?.minutesBeforeNextStart,
-              });
-              if (deviationCheck.showModal && deviationCheck.details) {
-                devLog("Showing clock-out deviation modal");
-                setPendingClockOutPayload({
-                  token,
-                  deviceInfo,
-                  location,
-                  localTimestamp,
-                });
-                setClockOutDeviationDetails(deviationCheck.details);
-                openModal("clockOutDeviation");
-                setLoading(false);
-                return;
-              }
-              timeOutPayload = { ...payload, punchType: "DRIVER_AIDE_PM" };
-              devLog("Time-out payload: punchType = DRIVER_AIDE_PM (non–driver/aide)");
-            }
-          } catch (e) {
-            devLog("Time-out profile/deviation check error:", e?.message);
-            // If profile fetch fails, proceed with normal punch (no punchType, no modal)
-          }
-        }
 
-        const url = `${API_BASE_URL}/api/timelogs${endpoint}`;
-        const body = isTimeIn ? timeOutPayload : timeInPayload;
-        devLog("Punch request:", endpoint, { punchType: body.punchType, localTimestamp: body.localTimestamp });
+        const url = `${API_BASE_URL}/api/timelogs/time-in`;
+        const body = timeInPayload;
+        devLog("Punch request:", "/time-in", { punchType: body.punchType, localTimestamp: body.localTimestamp });
         try {
           const res = await axios.post(url, body, {
             headers: { Authorization: `Bearer ${token}` },
@@ -898,6 +885,8 @@ export default function TimekeepingPunch() {
     else if (type === "subscription") setSubscriptionModalVisible(true);
     else if (type === "clockOutDeviation")
       setClockOutDeviationModalVisible(true);
+    else if (type === "clockOutConfirm")
+      setClockOutConfirmModalVisible(true);
     else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
     else if (type === "noScheduledShiftClockIn")
       setNoScheduledShiftClockInModalVisible(true);
@@ -943,6 +932,15 @@ export default function TimekeepingPunch() {
       setPendingClockInPayload(null);
       setNoScheduledShiftClockInModalVisible(false);
       setNoScheduledShiftClockInNotes("");
+      setClockOutConfirmModalVisible(false);
+      setClockOutConfirmSchedule(null);
+      setPendingClockOutConfirmPayload(null);
+
+      const proceed = pendingClockOutAfterConfirmRef.current;
+      pendingClockOutAfterConfirmRef.current = null;
+      if (proceed && executeOnlineClockOutRef.current) {
+        executeOnlineClockOutRef.current(proceed);
+      }
     });
   };
 
@@ -1070,7 +1068,22 @@ export default function TimekeepingPunch() {
       if (!nextShiftStart) return noModal(addPunchTypeAM, true);
 
       const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
-      const threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
+
+      let threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
+      try {
+        const settingsRes = await axios.get(
+          `${API_BASE_URL}/api/company-settings`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
+        const fromApi = Number(
+          raw.driverAideThresholdMinutes ?? raw.driver_aide_threshold_minutes
+        );
+        if (Number.isFinite(fromApi) && fromApi > 0) threshold = fromApi;
+      } catch (e) {
+        devLog("checkClockInEarly: company-settings fetch failed, using fallback threshold", e?.message);
+      }
+
       const showModal = minutesEarly >= threshold;
       devLog("checkClockInEarly:", {
         companyId,
@@ -1089,6 +1102,7 @@ export default function TimekeepingPunch() {
             clockInAt,
             scheduledShiftStart: nextShiftStart,
             minutesEarly: Math.floor(minutesEarly),
+            thresholdMinutes: threshold,
           },
         };
       }
@@ -1099,8 +1113,195 @@ export default function TimekeepingPunch() {
     }
   };
 
+  executeOnlineClockOutRef.current = async ({
+    token,
+    deviceInfo,
+    location,
+    localTimestamp,
+  }) => {
+    const payload = { deviceInfo, location, localTimestamp };
+    let timeOutPayload = { ...payload };
+    setLoading(true);
+    try {
+      try {
+        const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const profile = profRes?.data?.data?.profile ?? profRes?.data?.data ?? {};
+        const jobTitle = (profile.jobTitle ?? profile.job_title ?? profile.title ?? "").toString().trim();
+        const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
+        const isDriverAideJob = driverAideTitles.some(
+          (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase()
+        );
+        devLog("Time-out check:", { jobTitle, isDriverAideJob });
+        if (isDriverAideJob) {
+          timeOutPayload = { ...payload, punchType: "DRIVER_AIDE" };
+          devLog("Time-out payload: punchType = DRIVER_AIDE (driver/aide job)");
+        } else {
+          const clockOutAt = new Date();
+          const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
+          devLog("Clock-out deviation check:", {
+            showModal: deviationCheck?.showModal,
+            minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
+            minutesBeforeNextStart: deviationCheck?.details?.minutesBeforeNextStart,
+          });
+          if (deviationCheck.showModal && deviationCheck.details) {
+            devLog("Showing clock-out deviation modal");
+            setPendingClockOutPayload({
+              token,
+              deviceInfo,
+              location,
+              localTimestamp,
+            });
+            setClockOutDeviationDetails(deviationCheck.details);
+            openModal("clockOutDeviation");
+            return;
+          }
+          timeOutPayload = { ...payload, punchType: "DRIVER_AIDE_PM" };
+          devLog("Time-out payload: punchType = DRIVER_AIDE_PM (non–driver/aide)");
+        }
+      } catch (e) {
+        devLog("Time-out profile/deviation check error:", e?.message);
+      }
+
+      const url = `${API_BASE_URL}/api/timelogs/time-out`;
+      const body = timeOutPayload;
+      devLog("Punch request:", "/time-out", {
+        punchType: body.punchType,
+        localTimestamp: body.localTimestamp,
+      });
+      try {
+        const res = await axios.post(url, body, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 200 || res.status === 201) {
+          devLog("Punch success:", "/time-out", res.data?.message);
+          Alert.alert("Success", res.data.message);
+          resetAllStates();
+        }
+      } catch (err) {
+        if (err?.response?.data?.message) {
+          Alert.alert("Error", err.response.data.message);
+        } else {
+          Alert.alert("Error", "Punch failed. Please try again.");
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Modal content
   const renderModalContent = () => {
+    if (clockOutConfirmModalVisible) {
+      const s = clockOutConfirmSchedule;
+      return (
+        <View className="px-6 pb-6 pt-2">
+          <View className="items-center mb-6">
+            <View className="w-16 h-16 rounded-full bg-slate-100 items-center justify-center mb-4">
+              <Ionicons name="log-out-outline" size={32} color="#475569" />
+            </View>
+            <Text className="text-2xl font-bold text-slate-900 mb-2 text-center">
+              Clock out?
+            </Text>
+            <Text className="text-base text-slate-600 text-center px-2 leading-5">
+              You are about to record your time out. Confirm to finish your shift.
+            </Text>
+          </View>
+
+          {s?.status === "in_shift" && s.shiftEnd && (
+            <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
+              <View className="flex-row items-center mb-2">
+                <View className="w-8 h-8 rounded-full bg-blue-100 items-center justify-center mr-3">
+                  <Ionicons name="calendar-outline" size={18} color="#3b82f6" />
+                </View>
+                <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+                  Scheduled shift
+                </Text>
+              </View>
+              <Text className="text-base font-semibold text-slate-800 ml-11 mb-1">
+                Ends{" "}
+                {new Date(s.shiftEnd).toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12: true,
+                })}
+              </Text>
+              <View className="ml-11 mt-2">
+                <View className="flex-row items-center bg-blue-50 px-3 py-1.5 rounded-lg self-start">
+                  <Ionicons name="time" size={14} color="#2563eb" />
+                  <Text className="text-xs font-medium text-blue-800 ml-1.5">
+                    {Number.isFinite(s.minutesUntilShiftEnd)
+                      ? s.minutesUntilShiftEnd === 0
+                        ? "Less than 1 minute until scheduled shift end"
+                        : `${s.minutesUntilShiftEnd} minute${s.minutesUntilShiftEnd === 1 ? "" : "s"} until scheduled shift end`
+                      : ""}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          )}
+
+          {s?.status === "after_scheduled_end" && s.shiftEnd && (
+            <View className="bg-amber-50 rounded-2xl p-5 mb-6 border border-amber-200 shadow-sm">
+              <View className="flex-row items-center mb-2">
+                <View className="w-8 h-8 rounded-full bg-amber-100 items-center justify-center mr-3">
+                  <Ionicons name="alert-circle-outline" size={18} color="#d97706" />
+                </View>
+                <Text className="text-sm font-semibold text-amber-900 uppercase tracking-wide">
+                  Past scheduled end
+                </Text>
+              </View>
+              <Text className="text-base text-amber-950 ml-11 leading-5">
+                Your shift was scheduled to end at{" "}
+                {new Date(s.shiftEnd).toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12: true,
+                })}
+                .
+                {Number.isFinite(s.minutesPastScheduledEnd) && s.minutesPastScheduledEnd > 0
+                  ? ` (${s.minutesPastScheduledEnd} minute${s.minutesPastScheduledEnd === 1 ? "" : "s"} after scheduled end)`
+                  : ""}
+              </Text>
+            </View>
+          )}
+
+          {s?.status === "not_in_shift" && (
+            <View className="bg-slate-50 rounded-2xl p-4 mb-6 border border-slate-200">
+              <Text className="text-sm text-slate-600 text-center leading-5">
+                You have shifts on your schedule, but this time is not inside a scheduled shift window.
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity
+            onPress={() => {
+              const p = pendingClockOutConfirmPayload;
+              if (p) pendingClockOutAfterConfirmRef.current = p;
+              closeModal();
+            }}
+            className="py-4 rounded-2xl items-center justify-center bg-slate-900 mb-3"
+            activeOpacity={0.88}
+          >
+            <Text className="text-white font-bold text-base">Clock out</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={closeModal}
+            className="py-3.5 rounded-2xl items-center justify-center bg-slate-100 border border-slate-200"
+            activeOpacity={0.85}
+          >
+            <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
     if (clockInEarlyModalVisible) {
       const d = clockInEarlyDetails;
       return (
@@ -1113,7 +1314,7 @@ export default function TimekeepingPunch() {
               Clock-In Time Notice
             </Text>
             <Text className="text-base text-slate-600 text-center px-2 leading-5">
-              You are clocking in more than 45 minutes before your scheduled shift start.
+              {`You are clocking in more than ${d?.thresholdMinutes ?? CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES} minutes before your scheduled shift start.`}
             </Text>
           </View>
           <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
@@ -1911,6 +2112,7 @@ export default function TimekeepingPunch() {
         locationModalVisible ||
         subscriptionModalVisible ||
         clockOutDeviationModalVisible ||
+        clockOutConfirmModalVisible ||
         clockInEarlyModalVisible ||
         noScheduledShiftClockInModalVisible) && (
         <Modal transparent animationType="none" visible onRequestClose={closeModal}>

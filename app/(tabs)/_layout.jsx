@@ -15,7 +15,7 @@ import {
   PanResponder,
   Easing,
 } from "react-native";
-import { Tabs, useRouter } from "expo-router";
+import { Tabs, useRouter, useSegments } from "expo-router";
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import UserInactivity from "react-native-user-inactivity";
@@ -26,6 +26,7 @@ import useAuthStore from "../../store/useAuthStore";
 import usePresenceStore from "../../store/presenceStore";
 import useTutorialStore from "../../store/tutorialStore";
 import TutorialOverlay from "../../components/TutorialOverlay";
+import FeedbackFloatingPill from "../../components/FeedbackFloatingPill";
 import { useNotifications } from "../../hooks/useNotifications";
 import io from "socket.io-client";
 
@@ -245,6 +246,7 @@ const TabsLayout = () => {
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
   const router = useRouter();
+  const segments = useSegments();
   const handledNotificationIdsRef = useRef(new Set());
   const maybeAutoStartTutorial = useTutorialStore((s) => s.maybeAutoStart);
 
@@ -486,6 +488,7 @@ const TabsLayout = () => {
 
   // Update the tab bar height to ensure icons are fully visible
   const tabBarHeight = Platform.OS === "ios" ? 90 : 70;
+  const isSettingsTabActive = segments.includes("(settings)");
 
   // Update the tabBarActiveTintColor to be white for the labels
   return (
@@ -626,6 +629,10 @@ const TabsLayout = () => {
           />
         </Tabs>
       </UserInactivity>
+
+      {isSettingsTabActive && (
+        <FeedbackFloatingPill tabBarHeight={tabBarHeight} />
+      )}
 
       {/* Tutorial overlay (text bubble walkthrough) */}
       <TutorialOverlay />

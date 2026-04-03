@@ -37,15 +37,15 @@ const TimekeepingTimeCard = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [modalMode, setModalMode] = useState("actions"); // "actions", "delete", "details"
   const [selectedLog, setSelectedLog] = useState(null);
-  const [deleting, setDeleting] = useState(false);
+  // const [deleting, setDeleting] = useState(false);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(20)).current;
   const modalBgAnim = useRef(new Animated.Value(0)).current;
   const modalYAnim = useRef(new Animated.Value(height)).current;
-  const deleteButtonScale = useRef(new Animated.Value(1)).current;
-  const cancelButtonScale = useRef(new Animated.Value(1)).current;
+  // const deleteButtonScale = useRef(new Animated.Value(1)).current;
+  // const cancelButtonScale = useRef(new Animated.Value(1)).current;
   const cardScales = useRef({}).current;
 
   const insets = useSafeAreaInsets();
@@ -235,36 +235,36 @@ const TimekeepingTimeCard = () => {
     });
   };
 
-  const handleDeleteTimeLog = async () => {
-    if (!selectedLog || !selectedLog.id) {
-      Alert.alert("Error", "No time log selected for deletion.");
-      return;
-    }
-
-    try {
-      setDeleting(true);
-      const token = await SecureStore.getItemAsync("token");
-      const url = `${API_BASE_URL}/api/timelogs/delete/${selectedLog.id}`;
-      const res = await axios.delete(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 200) {
-        Alert.alert("Success", res.data.message);
-        setTimeLogs((prev) => prev.filter((log) => log.id !== selectedLog.id));
-        closeModal();
-      } else {
-        Alert.alert("Error", "Failed to delete time log.");
-      }
-    } catch (error) {
-      console.error("Delete error:", error.message);
-      Alert.alert(
-        "Error",
-        error.response?.data?.message || "Failed to delete time log."
-      );
-    } finally {
-      setDeleting(false);
-    }
-  };
+  // const handleDeleteTimeLog = async () => {
+  //   if (!selectedLog || !selectedLog.id) {
+  //     Alert.alert("Error", "No time log selected for deletion.");
+  //     return;
+  //   }
+  //
+  //   try {
+  //     setDeleting(true);
+  //     const token = await SecureStore.getItemAsync("token");
+  //     const url = `${API_BASE_URL}/api/timelogs/delete/${selectedLog.id}`;
+  //     const res = await axios.delete(url, {
+  //       headers: { Authorization: `Bearer ${token}` },
+  //     });
+  //     if (res.status === 200) {
+  //       Alert.alert("Success", res.data.message);
+  //       setTimeLogs((prev) => prev.filter((log) => log.id !== selectedLog.id));
+  //       closeModal();
+  //     } else {
+  //       Alert.alert("Error", "Failed to delete time log.");
+  //     }
+  //   } catch (error) {
+  //     console.error("Delete error:", error.message);
+  //     Alert.alert(
+  //       "Error",
+  //       error.response?.data?.message || "Failed to delete time log."
+  //     );
+  //   } finally {
+  //     setDeleting(false);
+  //   }
+  // };
 
   const renderLogCard = ({ item, index }) => {
     if (!cardScales[index]) {
@@ -356,6 +356,8 @@ const TimekeepingTimeCard = () => {
             <Ionicons name="chevron-forward" size={20} color="#64748b" />
           </TouchableOpacity>
 
+          {/* Delete action intentionally disabled; keep block for quick restore. */}
+          {/*
           <TouchableOpacity
             onPress={() => setModalMode("delete")}
             className="flex-row items-center justify-between p-4 mb-3 bg-slate-50 rounded-lg"
@@ -370,6 +372,7 @@ const TimekeepingTimeCard = () => {
             </View>
             <Ionicons name="chevron-forward" size={20} color="#64748b" />
           </TouchableOpacity>
+          */}
 
           <TouchableOpacity
             onPress={closeModal}
@@ -379,6 +382,8 @@ const TimekeepingTimeCard = () => {
           </TouchableOpacity>
         </View>
       );
+    // Delete confirmation modal intentionally disabled; keep block for quick restore.
+    /*
     } else if (modalMode === "delete") {
       return (
         <View className="p-5">
@@ -431,6 +436,7 @@ const TimekeepingTimeCard = () => {
           )}
         </View>
       );
+    */
     } else if (modalMode === "details") {
       return (
         <View className="p-5">

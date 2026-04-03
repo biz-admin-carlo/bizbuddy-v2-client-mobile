@@ -26,73 +26,6 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import { API_BASE_URL } from "../../config/constant";
 
-// Mock payslips for development/testing fallback
-const MOCK_PAYSLIPS = [
-  {
-    id: "PS-2025-11B",
-    period: { start: "2025-11-16", end: "2025-11-30" },
-    generatedAt: "2025-12-01T09:12:00Z",
-    status: "Paid",
-    gross: 145000.0,
-    deductions: 25000.0,
-    net: 120000.0,
-    earnings: [
-      { label: "Basic Pay", amount: 120000 },
-      { label: "Overtime", amount: 5000 },
-      { label: "Allowance", amount: 20000 },
-    ],
-    deductionItems: [
-      { label: "Withholding Tax", amount: 12000 },
-      { label: "SSS", amount: 6000 },
-      { label: "PhilHealth", amount: 4000 },
-      { label: "Pag-IBIG", amount: 3000 },
-    ],
-    pdfUrl: "https://mybizbuddy.co/mock-payslip-PS-2025-11B.pdf",
-  },
-  {
-    id: "PS-2025-11A",
-    period: { start: "2025-11-01", end: "2025-11-15" },
-    generatedAt: "2025-11-16T09:10:00Z",
-    status: "Paid",
-    gross: 140000.0,
-    deductions: 22000.0,
-    net: 118000.0,
-    earnings: [
-      { label: "Basic Pay", amount: 115000 },
-      { label: "Overtime", amount: 4000 },
-      { label: "Allowance", amount: 21000 },
-    ],
-    deductionItems: [
-      { label: "Withholding Tax", amount: 11000 },
-      { label: "SSS", amount: 5500 },
-      { label: "PhilHealth", amount: 3500 },
-      { label: "Pag-IBIG", amount: 2000 },
-    ],
-    pdfUrl: "https://mybizbuddy.co/mock-payslip-PS-2025-11A.pdf",
-  },
-  {
-    id: "PS-2025-10B",
-    period: { start: "2025-10-16", end: "2025-10-31" },
-    generatedAt: "2025-11-01T09:00:00Z",
-    status: "Paid",
-    gross: 138000.0,
-    deductions: 21000.0,
-    net: 117000.0,
-    earnings: [
-      { label: "Basic Pay", amount: 114000 },
-      { label: "Overtime", amount: 3000 },
-      { label: "Allowance", amount: 21000 },
-    ],
-    deductionItems: [
-      { label: "Withholding Tax", amount: 10500 },
-      { label: "SSS", amount: 5200 },
-      { label: "PhilHealth", amount: 3300 },
-      { label: "Pag-IBIG", amount: 2000 },
-    ],
-    pdfUrl: "https://mybizbuddy.co/mock-payslip-PS-2025-10B.pdf",
-  },
-];
-
 const formatCurrency = (value) =>
   new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -159,7 +92,7 @@ function Payroll() {
     try {
       const token = await SecureStore.getItemAsync("token");
       if (!token) {
-        setPayslips(MOCK_PAYSLIPS);
+        setPayslips([]);
         setPage(1);
         return;
       }
@@ -205,7 +138,7 @@ function Payroll() {
             new Date(b?.period?.end || b?.generatedAt || 0).getTime() || 0;
           return bKey - aKey;
         });
-        setPayslips(sorted.length > 0 ? sorted : MOCK_PAYSLIPS);
+        setPayslips(sorted);
         setPage(1);
       };
 
@@ -245,7 +178,7 @@ function Payroll() {
             res.statusText,
             data
           );
-          setPayslips(MOCK_PAYSLIPS);
+          setPayslips([]);
           setPage(1);
         } else {
           handleSuccessPayload(data);
@@ -255,7 +188,7 @@ function Payroll() {
       }
     } catch (e) {
       console.error("[Payroll] Fetch error:", e);
-      setPayslips(MOCK_PAYSLIPS);
+      setPayslips([]);
       setPage(1);
       RNAlert?.alert?.("Error", "Failed to load payslips. Please try again.");
     } finally {
@@ -866,7 +799,7 @@ function Payroll() {
       }
 
       // Legacy / fallback behaviour: open whatever direct URL the backend
-      // provided on the payslip itself (useful for mocks or older APIs).
+      // provided on the payslip itself (useful for older APIs).
       const url = slip?.pdfUrl;
       if (!url) {
         RNAlert?.alert?.(

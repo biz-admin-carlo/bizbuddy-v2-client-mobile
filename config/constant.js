@@ -4,17 +4,22 @@ const PROD_SERVER_CARLO = "https://biz-maya-namagembe.onrender.com";
 const DEV_SERVER_NGROK = "https://acc5b2049424.ngrok-free.app";
 export const WEBSITE_URL = "https://mybizbuddy.co";
 
+/** In-app feedback form sends mail to this address via the device mail app. */
+export const FEEDBACK_EMAIL = "bizmobiledevelopment@gmail.com";
+
 export const API_BASE_URL = PROD_SERVER_CARLO;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
-export const VERSION = "1.0.8";
+export const VERSION = "1.0.9";
 
-// ---- Timekeeping: Clock-out deviation modal ----
-// Minutes threshold for showing the modal (>= this many minutes after shift end AND
-// >= this many minutes before the next shift start). Shown only to companies in the list below when met.
+// ---- Timekeeping: deviation thresholds ----
+// Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).
+// Clock-in early modal: fallback only when GET /api/company-settings cannot supply driverAideThresholdMinutes.
 export const CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES = 45;
 // Company IDs that see the clock-out deviation modal (others never see it).
-export const CLOCK_OUT_DEVIATION_COMPANY_IDS = ["cmb1rn4ks0001wqdx2nqth9ra"];
+export const CLOCK_OUT_DEVIATION_COMPANY_IDS = [
+  "cmb1rn4ks0001wqdx2nqth9ra,cmnegwuxm0004rf7fzo6wjrw2",
+];
 // Set to true to always show the "no scheduled shift" clock-in modal (timekeeping punch, online flow).
 export const DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL = false;
 

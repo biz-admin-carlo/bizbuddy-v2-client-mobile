@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizBuddy",
     "slug": "biz-buddy-slug",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "myapp",
@@ -13,6 +13,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.bizsolutions.bizbuddy",
       "infoPlist": {
+        "LSApplicationQueriesSchemes": ["mailto"],
         "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
         "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active.",
         "NSUserNotificationsUsageDescription": "BizBuddy sends notifications to remind you about work schedules, break times, and important updates."
@@ -25,7 +26,7 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.bizsolutions.mybizbuddy",
-      "versionCode": 15,
+      "versionCode": 16,
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -64,7 +65,7 @@
         "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
-    "runtimeVersion": "1.0.8",
+    "runtimeVersion": "1.0.9",
     "owner": "miguelalviar"
   }
 }
