@@ -16,6 +16,7 @@ import {
   TextInput,
   ScrollView,
   TouchableWithoutFeedback,
+  Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import DateTimePicker from "@react-native-community/datetimepicker";
@@ -36,6 +37,8 @@ const combineDateAndTime = (date, time) => {
   combined.setMilliseconds(time.getMilliseconds());
   return combined;
 };
+
+const formatDateOnly = (date) => date.toISOString().split("T")[0];
 
 const SubmitLeaves = () => {
   const router = useRouter();
@@ -60,6 +63,8 @@ const SubmitLeaves = () => {
   const [pickerMode, setPickerMode] = useState("date");
   const [pickerTitle, setPickerTitle] = useState("");
   const [currentDateTimeField, setCurrentDateTimeField] = useState(null);
+  /** true = paid leave, false = unpaid */
+  const [isPaidLeave, setIsPaidLeave] = useState(true);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -245,10 +250,11 @@ const SubmitLeaves = () => {
       // Include leaveReason in the payload
       const payload = {
         type: leaveType,
-        fromDate: combinedStart.toISOString(),
-        toDate: combinedEnd.toISOString(),
+        fromDate: formatDateOnly(combinedStart),
+        toDate: formatDateOnly(combinedEnd),
         approverId: approverValue,
         leaveReason,
+        isPaid: isPaidLeave,
       };
 
       const res = await fetch(`${API_BASE_URL}/api/leaves/submit`, {
@@ -270,6 +276,7 @@ const SubmitLeaves = () => {
         setLeaveEndDate(new Date());
         setLeaveEndTime(new Date());
         setApproverValue("");
+        setIsPaidLeave(true);
       } else {
         RNAlert.alert(
           "Error",
@@ -573,6 +580,28 @@ const SubmitLeaves = () => {
                   scrollViewProps={{ nestedScrollEnabled: true }}
                   autoScroll={false}
                 />
+              </View>
+
+              {/* Paid / unpaid leave */}
+              <View className="px-5 mb-5">
+                <FormLabel text="Leave compensation" required={false} />
+                <View className="bg-slate-50 rounded-lg px-4 py-3 flex-row items-center justify-between">
+                  <View className="flex-1 pr-3">
+                    <Text className="text-base font-medium text-slate-800">
+                      {isPaidLeave ? "Paid leave" : "Unpaid leave"}
+                    </Text>
+                    <Text className="text-sm text-slate-500 mt-0.5">
+                      Toggle if this request should be unpaid time off
+                    </Text>
+                  </View>
+                  <Switch
+                    value={isPaidLeave}
+                    onValueChange={setIsPaidLeave}
+                    trackColor={{ false: "#E5E7EB", true: "#FDBA74" }}
+                    thumbColor={isPaidLeave ? "#EA580C" : "#F3F4F6"}
+                    ios_backgroundColor="#E5E7EB"
+                  />
+                </View>
               </View>
 
               {/* Approver Dropdown */}

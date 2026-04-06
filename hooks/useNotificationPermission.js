@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { NotificationService } from "../utils/notificationService";
 
 export const useNotificationPermission = () => {
   const [showModal, setShowModal] = useState(false);
   const [permissionStatus, setPermissionStatus] = useState(null);
-  const [isChecking, setIsChecking] = useState(true);
+  const [isChecking, setIsChecking] = useState(false);
+  const closeTimerRef = useRef(null);
 
   const checkPermissionStatus = async () => {
     try {
@@ -45,18 +46,33 @@ export const useNotificationPermission = () => {
     }
   };
 
-  const closeModal = () => {
-    setShowModal(false);
-  };
+  // Defer hiding slightly so the native Modal can finish dismiss before the parent
+  // flips `visible` (reduces intermittent touch/UI lock on RN Fabric with Modal).
+  const closeModal = useCallback(() => {
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      setShowModal(false);
+    }, 0);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    },
+    []
+  );
 
   const openModal = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
     setShowModal(true);
   };
 
-  // Check permissions on mount
-  useEffect(() => {
-    checkPermissionStatus();
-  }, []);
+  // Initial prompt is driven by Profile (token + delay + token sync). Avoid a second
+  // mount-time check here — it raced with Profile's timer and doubled getPermissionsAsync.
 
   return {
     showModal,

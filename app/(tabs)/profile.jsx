@@ -235,7 +235,8 @@ const Profile = () => {
     };
 
     // Small delay to ensure profile is loaded
-    setTimeout(showNotificationModal, 1000);
+    const timerId = setTimeout(showNotificationModal, 1000);
+    return () => clearTimeout(timerId);
   }, [token]);
 
   const openEditModal = () => {

@@ -161,7 +161,7 @@ export default function NotificationPermissionModal({
     <Modal
       visible={visible}
       transparent={true}
-      animationType="fade"
+      animationType="none"
       onRequestClose={onClose}
     >
       <View className="flex-1 bg-black/50 justify-center items-center px-6">
