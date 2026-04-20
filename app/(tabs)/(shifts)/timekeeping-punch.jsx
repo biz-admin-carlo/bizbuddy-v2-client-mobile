@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   SafeAreaView,
   ScrollView,
@@ -19,6 +19,7 @@ import {
   Platform,
   TextInput,
   KeyboardAvoidingView,
+  AppState,
 } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
 import axios from "axios";
@@ -27,7 +28,7 @@ import * as Device from "expo-device";
 import * as Location from "expo-location";
 import io from "socket.io-client";
 import { Ionicons, Feather } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import {
   API_BASE_URL,
   CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES,
@@ -51,6 +52,63 @@ const devLog = (...args) => {
   if (__DEV__) {
     console.log("[BizBuddy Punch]", ...args);
   }
+};
+
+/**
+ * getSettings / GET company-settings fields used by punch:
+ * - shiftAssignmentWindowMinutes — assignment window (minutes)
+ * - driverAideThresholdMinutes — DayCare driver/aide early/late threshold (minutes)
+ * Legacy keys kept as fallbacks.
+ */
+const parseCompanySettingsPunchFields = (raw) => {
+  if (!raw || typeof raw !== "object") {
+    return {
+      shiftAssignmentWindowMinutes: null,
+      driverAideThresholdMinutes: null,
+    };
+  }
+  const readNum = (...keys) => {
+    for (const k of keys) {
+      if (!(k in raw)) continue;
+      const v = raw[k];
+      if (v === undefined || v === null || v === "") continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+  return {
+    shiftAssignmentWindowMinutes: readNum(
+      "shiftAssignmentWindowMinutes",
+      "shift_assignment_window_minutes",
+      "ShiftAssignmentWindowMinutes",
+      "WindowMinutes",
+      "windowMinutes",
+      "window_minutes"
+    ),
+    driverAideThresholdMinutes: readNum(
+      "driverAideThresholdMinutes",
+      "driver_aide_threshold_minutes",
+      "DriverAideThresholdMinutes",
+      "ThresholdMinutes",
+      "thresholdMinutes",
+      "threshold_minutes"
+    ),
+  };
+};
+
+/** GET /api/employment-details/me — `isDriver` drives time-in / time-out punch behavior. */
+const parseEmploymentIsDriver = (raw) => {
+  if (!raw || typeof raw !== "object") return null;
+  const v = raw.isDriver ?? raw.is_driver ?? raw.IsDriver;
+  if (v === true || v === 1) return true;
+  if (v === false || v === 0) return false;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "1" || s === "true" || s === "yes") return true;
+    if (s === "0" || s === "false" || s === "no") return false;
+  }
+  return null;
 };
 
 // Offline queue helpers
@@ -131,6 +189,55 @@ const getPunchData = async () => {
   return { deviceInfo, location };
 };
 
+const toFiniteNumber = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+const toRadians = (deg) => (deg * Math.PI) / 180;
+
+const distanceMeters = (lat1, lon1, lat2, lon2) => {
+  const earthRadiusMeters = 6371000;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusMeters * c;
+};
+
+const normalizeAssignedLocation = (rawLocation) => {
+  const loc = rawLocation?.location ?? rawLocation ?? {};
+  const latitude = toFiniteNumber(loc.latitude ?? loc.lat);
+  const longitude = toFiniteNumber(loc.longitude ?? loc.lng ?? loc.lon);
+  if (latitude == null || longitude == null) return null;
+
+  const radius =
+    toFiniteNumber(
+      loc.radius ??
+        loc.radiusMeters ??
+        loc.radius_meters ??
+        loc.allowedRadius ??
+        loc.allowedRadiusMeters
+    ) ?? 500;
+
+  return {
+    name:
+      loc.name ??
+      loc.locationName ??
+      loc.branchName ??
+      loc.title ??
+      "assigned location",
+    latitude,
+    longitude,
+    radius,
+  };
+};
+
 export default function TimekeepingPunch() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -160,6 +267,9 @@ export default function TimekeepingPunch() {
 
   // Whether the user is location restricted
   const [isLocationRestricted, setIsLocationRestricted] = useState(false);
+  const [assignedLocations, setAssignedLocations] = useState([]);
+  const [isWithinPunchLocation, setIsWithinPunchLocation] = useState(true);
+  const [punchLocationErrorMessage, setPunchLocationErrorMessage] = useState("");
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -195,11 +305,99 @@ export default function TimekeepingPunch() {
   const pendingClockOutAfterConfirmRef = useRef(null);
   const executeOnlineClockOutRef = useRef(null);
 
+  /** From GET /api/company-settings (getSettings) — loaded first on this screen. */
+  const companySettingsShiftAssignmentWindowMinutesRef = useRef(null);
+  const companySettingsDriverAideThresholdMinutesRef = useRef(null);
+  /** From GET /api/employment-details/me — used for time-in / time-out (driver vs non-driver). */
+  const employmentDetailsIsDriverRef = useRef(null);
+  /** Time In/Out stays disabled until company-settings and employment-details (first load) finish. */
+  const [companySettingsFetched, setCompanySettingsFetched] = useState(false);
+
   // Timer reference
   const masterTimerRef = useRef(null);
 
   // Socket
   const socketRef = useRef(null);
+
+  const resetAllStates = useCallback(() => {
+    setIsTimeIn(false);
+    setPunchTime(null);
+    setSessionElapsed(0);
+    setIsCoffeeBreakActive(false);
+    setCoffeeBreakStartTime(null);
+    setCoffeeBreakCount(0);
+    setTotalCoffeeTime(0);
+    setIsLunchBreakActive(false);
+    setLunchBreakStartTime(null);
+    setTotalLunchTime(0);
+  }, []);
+
+  /** Sync punch UI with server: clears local timers if there is no active timelog (e.g. server auto clock-out). */
+  const fetchAndSyncActiveTimelog = useCallback(async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) return;
+      const res = await axios.get(`${API_BASE_URL}/api/timelogs/user`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 200 && res.data.data) {
+        const activeLog = res.data.data.find((log) => log.status === true);
+        if (activeLog) {
+          setIsTimeIn(true);
+          const ti = new Date(activeLog.timeIn);
+          setPunchTime(ti);
+          setSessionElapsed(Math.floor((Date.now() - ti.getTime()) / 1000));
+          if (Array.isArray(activeLog.coffeeBreaks)) {
+            setCoffeeBreakCount(activeLog.coffeeBreaks.length);
+            const lastCoffee = activeLog.coffeeBreaks[activeLog.coffeeBreaks.length - 1];
+            if (lastCoffee && !lastCoffee.end) {
+              setIsCoffeeBreakActive(true);
+              const cStart = new Date(lastCoffee.start);
+              setCoffeeBreakStartTime(cStart);
+              setTotalCoffeeTime(Math.floor((Date.now() - cStart.getTime()) / 1000));
+            } else {
+              setIsCoffeeBreakActive(false);
+              setCoffeeBreakCount(0);
+              setCoffeeBreakStartTime(null);
+              setTotalCoffeeTime(0);
+            }
+          } else {
+            setIsCoffeeBreakActive(false);
+            setCoffeeBreakCount(0);
+            setCoffeeBreakStartTime(null);
+            setTotalCoffeeTime(0);
+          }
+          if (activeLog.lunchBreak && activeLog.lunchBreak.start && !activeLog.lunchBreak.end) {
+            setIsLunchBreakActive(true);
+            const lStart = new Date(activeLog.lunchBreak.start);
+            setLunchBreakStartTime(lStart);
+            setTotalLunchTime(Math.floor((Date.now() - lStart.getTime()) / 1000));
+          } else {
+            setIsLunchBreakActive(false);
+            setLunchBreakStartTime(null);
+            setTotalLunchTime(0);
+          }
+        } else {
+          resetAllStates();
+        }
+      }
+    } catch {}
+  }, [resetAllStates]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchAndSyncActiveTimelog();
+    }, [fetchAndSyncActiveTimelog])
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        fetchAndSyncActiveTimelog();
+      }
+    });
+    return () => sub.remove();
+  }, [fetchAndSyncActiveTimelog]);
 
   // Single interval for session + break timers
   useEffect(() => {
@@ -228,6 +426,86 @@ export default function TimekeepingPunch() {
     };
   }, [isTimeIn, punchTime, isCoffeeBreakActive, coffeeBreakStartTime, isLunchBreakActive, lunchBreakStartTime]);
 
+  const fetchCompanySettingsForPunch = useCallback(async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        devLog("company-settings: skip fetch (no token)");
+        return;
+      }
+      const settingsRes = await axios.get(
+        `${API_BASE_URL}/api/company-settings`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const raw =
+        settingsRes?.data?.data ??
+        settingsRes?.data?.settings ??
+        settingsRes?.data ??
+        {};
+      const { shiftAssignmentWindowMinutes, driverAideThresholdMinutes } =
+        parseCompanySettingsPunchFields(raw);
+
+      devLog("company-settings fetched", {
+        shiftAssignmentWindowMinutes,
+        driverAideThresholdMinutes,
+        httpStatus: settingsRes?.status,
+      });
+
+      companySettingsShiftAssignmentWindowMinutesRef.current =
+        shiftAssignmentWindowMinutes;
+      companySettingsDriverAideThresholdMinutesRef.current =
+        driverAideThresholdMinutes;
+
+      devLog("company-settings stored (refs)", {
+        shiftAssignmentWindowMinutes:
+          companySettingsShiftAssignmentWindowMinutesRef.current,
+        driverAideThresholdMinutes:
+          companySettingsDriverAideThresholdMinutesRef.current,
+      });
+    } catch (e) {
+      devLog("company-settings fetch failed", e?.message ?? String(e));
+      companySettingsShiftAssignmentWindowMinutesRef.current = null;
+      companySettingsDriverAideThresholdMinutesRef.current = null;
+    }
+  }, []);
+
+  const fetchEmploymentDetailsForPunch = useCallback(async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        devLog("employment-details/me: skip fetch (no token)");
+        employmentDetailsIsDriverRef.current = null;
+        return;
+      }
+      const res = await axios.get(`${API_BASE_URL}/api/employment-details/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const raw = res?.data?.data ?? res?.data ?? {};
+      let isDriver = parseEmploymentIsDriver(raw);
+      if (isDriver === null) {
+        const nested =
+          raw?.employment ??
+          raw?.employmentDetails ??
+          raw?.employment_detail ??
+          raw?.details;
+        if (nested && typeof nested === "object") {
+          isDriver = parseEmploymentIsDriver(nested);
+        }
+      }
+      devLog("employment-details/me fetched", {
+        isDriver,
+        httpStatus: res?.status,
+      });
+      employmentDetailsIsDriverRef.current = isDriver;
+      devLog("employment-details/me stored (ref)", {
+        isDriver: employmentDetailsIsDriverRef.current,
+      });
+    } catch (e) {
+      devLog("employment-details/me fetch failed", e?.message ?? String(e));
+      employmentDetailsIsDriverRef.current = null;
+    }
+  }, []);
+
   // Fetch subscription plan
   const fetchSubscription = async () => {
     try {
@@ -252,19 +530,103 @@ export default function TimekeepingPunch() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.status === 200 && res.data?.data) {
-        const assignedLocs = res.data.data;
+        const assignedLocs = Array.isArray(res.data.data) ? res.data.data : [];
+        const normalized = assignedLocs
+          .map(normalizeAssignedLocation)
+          .filter(Boolean);
+        setAssignedLocations(normalized);
         setIsLocationRestricted(assignedLocs.length > 0);
       }
     } catch (error) {
       // If error, assume not restricted for fallback
       setIsLocationRestricted(false);
+      setAssignedLocations([]);
     }
   };
 
+  const validatePunchLocation = useCallback(async () => {
+    if (!isLocationRestricted) {
+      setIsWithinPunchLocation(true);
+      setPunchLocationErrorMessage("");
+      return;
+    }
+
+    if (!locationEnabled) {
+      setIsWithinPunchLocation(false);
+      setPunchLocationErrorMessage(
+        "Enable location services to punch in/out."
+      );
+      return;
+    }
+
+    if (!assignedLocations.length) {
+      setIsWithinPunchLocation(true);
+      setPunchLocationErrorMessage("");
+      return;
+    }
+
+    try {
+      const current = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      const currentLat = current?.coords?.latitude;
+      const currentLng = current?.coords?.longitude;
+      if (!Number.isFinite(currentLat) || !Number.isFinite(currentLng)) {
+        setIsWithinPunchLocation(false);
+        setPunchLocationErrorMessage("Current location is unavailable.");
+        return;
+      }
+
+      let nearest = null;
+      let isInsideAny = false;
+      for (const loc of assignedLocations) {
+        const metersAway = distanceMeters(
+          currentLat,
+          currentLng,
+          loc.latitude,
+          loc.longitude
+        );
+        if (!nearest || metersAway < nearest.metersAway) {
+          nearest = { ...loc, metersAway };
+        }
+        if (metersAway <= loc.radius) {
+          isInsideAny = true;
+          break;
+        }
+      }
+
+      if (isInsideAny) {
+        setIsWithinPunchLocation(true);
+        setPunchLocationErrorMessage("");
+      } else {
+        const roundedDistance = Math.round(nearest?.metersAway ?? 0);
+        const roundedRadius = Math.round(nearest?.radius ?? 0);
+        setIsWithinPunchLocation(false);
+        setPunchLocationErrorMessage(
+          `You are outside the punch area (${roundedDistance}m away; allowed ${roundedRadius}m).`
+        );
+      }
+    } catch (error) {
+      setIsWithinPunchLocation(false);
+      setPunchLocationErrorMessage("Unable to verify your punch location.");
+    }
+  }, [assignedLocations, isLocationRestricted, locationEnabled]);
+
   useEffect(() => {
-    fetchSubscription();
-    fetchAssignedLocations();
-  }, []);
+    const init = async () => {
+      try {
+        await Promise.all([
+          fetchCompanySettingsForPunch(),
+          fetchEmploymentDetailsForPunch(),
+        ]);
+      } finally {
+        setCompanySettingsFetched(true);
+      }
+      fetchSubscription();
+      fetchAssignedLocations();
+    };
+    init();
+  }, [fetchCompanySettingsForPunch, fetchEmploymentDetailsForPunch]);
 
   // PanResponder for bottom-sheet drag
   const modalPanResponder = useRef(
@@ -334,50 +696,6 @@ export default function TimekeepingPunch() {
     return () => unsub();
   }, []);
 
-  // On mount, check if there's an active log
-  useEffect(() => {
-    const checkActiveLog = async () => {
-      try {
-        const token = await SecureStore.getItemAsync("token");
-        if (!token) return;
-        const res = await axios.get(`${API_BASE_URL}/api/timelogs/user`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.status === 200 && res.data.data) {
-          const activeLog = res.data.data.find((log) => log.status === true);
-          if (activeLog) {
-            setIsTimeIn(true);
-            const ti = new Date(activeLog.timeIn);
-            setPunchTime(ti);
-            setSessionElapsed(Math.floor((Date.now() - ti.getTime()) / 1000));
-
-            if (Array.isArray(activeLog.coffeeBreaks)) {
-              setCoffeeBreakCount(activeLog.coffeeBreaks.length);
-              const lastCoffee = activeLog.coffeeBreaks[activeLog.coffeeBreaks.length - 1];
-              if (lastCoffee && !lastCoffee.end) {
-                setIsCoffeeBreakActive(true);
-                const cStart = new Date(lastCoffee.start);
-                setCoffeeBreakStartTime(cStart);
-                setTotalCoffeeTime(Math.floor((Date.now() - cStart.getTime()) / 1000));
-              } else {
-                setIsCoffeeBreakActive(false);
-                setCoffeeBreakStartTime(null);
-                setTotalCoffeeTime(0);
-              }
-            }
-            if (activeLog.lunchBreak && activeLog.lunchBreak.start && !activeLog.lunchBreak.end) {
-              setIsLunchBreakActive(true);
-              const lStart = new Date(activeLog.lunchBreak.start);
-              setLunchBreakStartTime(lStart);
-              setTotalLunchTime(Math.floor((Date.now() - lStart.getTime()) / 1000));
-            }
-          }
-        }
-      } catch {}
-    };
-    checkActiveLog();
-  }, []);
-
   // Socket real-time updates
   useEffect(() => {
     const initSocket = async () => {
@@ -438,6 +756,10 @@ export default function TimekeepingPunch() {
     updateLocationStatus();
   }, []);
 
+  useEffect(() => {
+    validatePunchLocation();
+  }, [validatePunchLocation]);
+
   // Offline sync
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener(async (state) => {
@@ -464,20 +786,6 @@ export default function TimekeepingPunch() {
     return () => unsubscribe();
   }, []);
 
-  // Reset all states
-  const resetAllStates = () => {
-    setIsTimeIn(false);
-    setPunchTime(null);
-    setSessionElapsed(0);
-    setIsCoffeeBreakActive(false);
-    setCoffeeBreakStartTime(null);
-    setCoffeeBreakCount(0);
-    setTotalCoffeeTime(0);
-    setIsLunchBreakActive(false);
-    setLunchBreakStartTime(null);
-    setTotalLunchTime(0);
-  };
-
   // Animate button press
   const animateButtonPress = (scaleRef) => {
     Animated.sequence([
@@ -498,53 +806,14 @@ export default function TimekeepingPunch() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const token = await SecureStore.getItemAsync("token");
-      const res = await axios.get(`${API_BASE_URL}/api/timelogs/user`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 200 && res.data.data) {
-        const activeLog = res.data.data.find((log) => log.status === true);
-        if (activeLog) {
-          setIsTimeIn(true);
-          const ti = new Date(activeLog.timeIn);
-          setPunchTime(ti);
-          setSessionElapsed(Math.floor((Date.now() - ti.getTime()) / 1000));
-          if (Array.isArray(activeLog.coffeeBreaks)) {
-            setCoffeeBreakCount(activeLog.coffeeBreaks.length);
-            const lastCoffee = activeLog.coffeeBreaks[activeLog.coffeeBreaks.length - 1];
-            if (lastCoffee && !lastCoffee.end) {
-              setIsCoffeeBreakActive(true);
-              const cStart = new Date(lastCoffee.start);
-              setCoffeeBreakStartTime(cStart);
-              setTotalCoffeeTime(Math.floor((Date.now() - cStart.getTime()) / 1000));
-            } else {
-              setIsCoffeeBreakActive(false);
-              setCoffeeBreakCount(0);
-              setCoffeeBreakStartTime(null);
-              setTotalCoffeeTime(0);
-            }
-          } else {
-            setIsCoffeeBreakActive(false);
-            setCoffeeBreakCount(0);
-            setCoffeeBreakStartTime(null);
-            setTotalCoffeeTime(0);
-          }
-          if (activeLog.lunchBreak && activeLog.lunchBreak.start && !activeLog.lunchBreak.end) {
-            setIsLunchBreakActive(true);
-            const lStart = new Date(activeLog.lunchBreak.start);
-            setLunchBreakStartTime(lStart);
-            setTotalLunchTime(Math.floor((Date.now() - lStart.getTime()) / 1000));
-          } else {
-            setIsLunchBreakActive(false);
-            setLunchBreakStartTime(null);
-            setTotalLunchTime(0);
-          }
-        } else {
-          resetAllStates();
-        }
-      }
+      await Promise.all([
+        fetchCompanySettingsForPunch(),
+        fetchEmploymentDetailsForPunch(),
+      ]);
+      await fetchAndSyncActiveTimelog();
       updateLocationStatus();
       fetchAssignedLocations(); // re-check location restrictions
+      validatePunchLocation();
     } catch {}
     setRefreshing(false);
   };
@@ -552,6 +821,11 @@ export default function TimekeepingPunch() {
   // Time In/Out (with localTimestamp)
   const handlePunch = async () => {
     try {
+      if (!companySettingsFetched) return;
+      if (isLocationRestricted && !isWithinPunchLocation) {
+        Alert.alert("Outside Punch Location", "You must be inside your assigned punch location to continue.");
+        return;
+      }
       if (isTimeIn && (isCoffeeBreakActive || isLunchBreakActive)) {
         Alert.alert("Cannot Time Out", "Please end your active break first.");
         return;
@@ -575,6 +849,10 @@ export default function TimekeepingPunch() {
 
       const token = await SecureStore.getItemAsync("token");
       const endpoint = isTimeIn ? "/time-out" : "/time-in";
+      devLog("punch context", {
+        endpoint,
+        isDriver: employmentDetailsIsDriverRef.current,
+      });
       const { deviceInfo, location } = await getPunchData();
 
       // If location is restricted but location is missing => block
@@ -592,10 +870,19 @@ export default function TimekeepingPunch() {
         location,
         localTimestamp,
       };
+      const isDriverEmployment = employmentDetailsIsDriverRef.current === true;
+      const baseTimeInPayload =
+        !isTimeIn && isDriverEmployment
+          ? { ...payload, punchType: "DRIVER_AIDE" }
+          : payload;
+      if (!isTimeIn && isDriverEmployment) {
+        devLog("Time-in payload: forcing DRIVER_AIDE from employment isDriver=true");
+      }
 
       // If user is offline and plan=pro => store offline
       if (!wifiConnected) {
-        await storePendingAction({ endpoint, payload });
+        const offlinePayload = endpoint === "/time-in" ? baseTimeInPayload : payload;
+        await storePendingAction({ endpoint, payload: offlinePayload });
         Alert.alert("Offline Mode", "Your punch action is saved locally.");
 
         // Update local UI
@@ -616,7 +903,7 @@ export default function TimekeepingPunch() {
         }
       } else {
         // If user is online => normal punch (or defer to deviation/early modals for that company)
-        let timeInPayload = payload;
+        let timeInPayload = baseTimeInPayload;
         let clockInEarlyCheck = null;
 
         if (isTimeIn) {
@@ -625,6 +912,7 @@ export default function TimekeepingPunch() {
               headers: { Authorization: `Bearer ${token}` },
             });
             const userShifts = shiftsRes?.data?.data;
+            console.log("Timekeeping punch userShifts (clock-out confirm):", userShifts);
             const windows = Array.isArray(userShifts)
               ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
               : [];
@@ -673,6 +961,8 @@ export default function TimekeepingPunch() {
             devLog("Time-in check:", {
               showModal: clockInEarlyCheck?.showModal,
               addPunchTypeAM: clockInEarlyCheck?.addPunchTypeAM,
+              useRegularPunch: clockInEarlyCheck?.useRegularPunch,
+              isDriver: employmentDetailsIsDriverRef.current,
               minutesEarly: clockInEarlyCheck?.details?.minutesEarly,
             });
             if (clockInEarlyCheck.showModal && clockInEarlyCheck.details) {
@@ -691,6 +981,9 @@ export default function TimekeepingPunch() {
             if (clockInEarlyCheck.addPunchTypeAM) {
               timeInPayload = { ...payload, punchType: "DRIVER_AIDE_AM" };
               devLog("Time-in payload: punchType = DRIVER_AIDE_AM");
+            } else if (clockInEarlyCheck.useRegularPunch) {
+              timeInPayload = { ...payload, punchType: "REGULAR" };
+              devLog("Time-in payload: punchType = REGULAR (non-driver / not early)");
             }
             if (clockInEarlyCheck.hasScheduledShift === false) {
               devLog("Showing no-scheduled-shift clock-in modal");
@@ -944,7 +1237,7 @@ export default function TimekeepingPunch() {
     });
   };
 
-  // Returns { showModal: true, details } when clock-out is in deviation window for an allowed company; else { showModal: false }.
+  // Returns { showModal: true, details } when clock-out needs the type-selection modal.
   const checkClockOutDeviation = async ({ token, clockOutAt }) => {
     try {
       if (!token) return { showModal: false };
@@ -959,13 +1252,12 @@ export default function TimekeepingPunch() {
         profRes?.data?.data?.profile?.company ||
         null;
       const companyId = company?.id || company?._id || company?.companyId || null;
-      if (!companyId) return { showModal: false };
 
-      const allowedIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
-        ? CLOCK_OUT_DEVIATION_COMPANY_IDS
+      const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
+        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(Boolean)
         : [];
-      if (!allowedIds.includes(String(companyId))) {
-        devLog("checkClockOutDeviation: company not in allowed list", { companyId });
+      if (!companyId || !allowedCompanyIds.includes(String(companyId).trim())) {
+        devLog("checkClockOutDeviation: company outside allowlist", { companyId });
         return { showModal: false };
       }
 
@@ -973,6 +1265,7 @@ export default function TimekeepingPunch() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const userShifts = shiftsRes?.data?.data;
+      console.log("Timekeeping punch userShifts (clock-out deviation check):", userShifts);
       if (!Array.isArray(userShifts) || userShifts.length === 0) return { showModal: false };
 
       const windows = userShifts
@@ -983,32 +1276,84 @@ export default function TimekeepingPunch() {
       const boundaries = findSurroundingShiftBoundaries(windows, clockOutAt);
       const lastShiftEnd = boundaries?.lastShiftEnd;
       const nextShiftStart = boundaries?.nextShiftStart;
-      if (!lastShiftEnd || !nextShiftStart) return { showModal: false };
+      if (!lastShiftEnd) return { showModal: false };
 
       const minutesAfterEnd =
         (clockOutAt.getTime() - lastShiftEnd.getTime()) / 60000;
       const minutesBeforeNextStart =
-        (nextShiftStart.getTime() - clockOutAt.getTime()) / 60000;
+        nextShiftStart instanceof Date
+          ? (nextShiftStart.getTime() - clockOutAt.getTime()) / 60000
+          : null;
 
-      const threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 60;
-      const inDeviation = minutesAfterEnd >= threshold && minutesBeforeNextStart >= threshold;
+      let threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 60;
+      const cached = companySettingsDriverAideThresholdMinutesRef.current;
+      if (Number.isFinite(cached) && cached > 0) {
+        threshold = cached;
+      } else {
+        try {
+          const settingsRes = await axios.get(
+            `${API_BASE_URL}/api/company-settings`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
+          const parsed = parseCompanySettingsPunchFields(raw);
+          if (
+            Number.isFinite(parsed.driverAideThresholdMinutes) &&
+            parsed.driverAideThresholdMinutes > 0
+          ) {
+            threshold = parsed.driverAideThresholdMinutes;
+            companySettingsDriverAideThresholdMinutesRef.current =
+              parsed.driverAideThresholdMinutes;
+          }
+          if (Number.isFinite(parsed.shiftAssignmentWindowMinutes)) {
+            companySettingsShiftAssignmentWindowMinutesRef.current =
+              parsed.shiftAssignmentWindowMinutes;
+          }
+        } catch (e) {
+          devLog(
+            "checkClockOutDeviation: company-settings fetch failed, using fallback threshold",
+            e?.message
+          );
+        }
+      }
+
+      const isDriverEmployment = employmentDetailsIsDriverRef.current;
+      let showModal = false;
+
+      if (isDriverEmployment === false) {
+        showModal = minutesAfterEnd >= threshold;
+      } else if (isDriverEmployment === true) {
+        showModal = false;
+      } else {
+        showModal =
+          minutesAfterEnd >= threshold &&
+          Number.isFinite(minutesBeforeNextStart) &&
+          minutesBeforeNextStart >= threshold;
+      }
+
       devLog("checkClockOutDeviation:", {
         companyId,
+        isDriver: isDriverEmployment,
         minutesAfterEnd: Math.floor(minutesAfterEnd),
-        minutesBeforeNextStart: Math.floor(minutesBeforeNextStart),
+        minutesBeforeNextStart: Number.isFinite(minutesBeforeNextStart)
+          ? Math.floor(minutesBeforeNextStart)
+          : null,
         threshold,
-        showModal: inDeviation,
+        showModal,
       });
-      if (inDeviation) {
+      if (showModal) {
         return {
           showModal: true,
           details: {
-            companyId: String(companyId),
+            companyId: String(companyId ?? ""),
             clockOutAt,
             lastShiftEnd,
             nextShiftStart,
             minutesAfterEnd: Math.floor(minutesAfterEnd),
-            minutesBeforeNextStart: Math.floor(minutesBeforeNextStart),
+            minutesBeforeNextStart: Number.isFinite(minutesBeforeNextStart)
+              ? Math.floor(minutesBeforeNextStart)
+              : null,
+            thresholdMinutes: threshold,
           },
         };
       }
@@ -1019,17 +1364,29 @@ export default function TimekeepingPunch() {
     }
   };
 
-  // Returns { showModal?, details?, addPunchTypeAM } for time-in. When in allowed company and not driver/aide, addPunchTypeAM=true (use punchType DRIVER_AIDE_AM).
+  /**
+   * Time-in early flow:
+   * - Companies outside CLOCK_OUT_DEVIATION_COMPANY_IDS: punch REGULAR with no clock-in
+   *   deviation modals (early Driver/Aide vs Regular, nor no-scheduled-shift notes).
+   * - If employment `isDriver === false` in an allowed company: show Driver/Aide (AM) vs Regular
+   *   modal when clock-in is >= driverAideThresholdMinutes before the next shift start; otherwise
+   *   default punchType REGULAR.
+   * - If employment `isDriver === true`: skip that modal (no automatic DRIVER_AIDE_AM).
+   * - If `isDriver` is unknown (null): legacy allowed-company + job-title rules (DRIVER_AIDE_AM default).
+   */
   const checkClockInEarly = async ({ token, clockInAt }) => {
-    const noModal = (addPunchTypeAM = false, hasScheduledShift = true) => ({
+    const baseResult = (over = {}) => ({
       showModal: false,
-      addPunchTypeAM,
-      hasScheduledShift,
+      addPunchTypeAM: false,
+      hasScheduledShift: true,
+      useRegularPunch: false,
+      ...over,
     });
+
     try {
-      if (!token) return noModal(false, true);
+      if (!token) return baseResult();
       if (!(clockInAt instanceof Date) || !Number.isFinite(clockInAt.getTime()))
-        return noModal(false, true);
+        return baseResult();
 
       const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1039,53 +1396,164 @@ export default function TimekeepingPunch() {
       const company = data?.company ?? profile?.company ?? null;
       const companyId = company?.id ?? company?._id ?? company?.companyId ?? null;
       const jobTitle = (profile?.jobTitle ?? profile?.job_title ?? profile?.title ?? "").toString().trim();
+
       const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const userShifts = shiftsRes?.data?.data;
+      console.log("Timekeeping punch userShifts (clock-in early check):", userShifts);
       const windows = Array.isArray(userShifts)
         ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
         : [];
       const hasScheduledShift = windows.length > 0;
+      const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
+        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(Boolean)
+        : [];
 
-      const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS) ? CLOCK_OUT_DEVIATION_COMPANY_IDS : [];
-      if (!companyId || !allowedCompanyIds.includes(String(companyId))) {
-        devLog("checkClockInEarly: not in allowed company", { companyId });
-        return noModal(false, hasScheduledShift);
+      if (!companyId || !allowedCompanyIds.includes(String(companyId).trim())) {
+        devLog("checkClockInEarly: company outside allowlist, REGULAR, skip deviation modals", {
+          companyId,
+        });
+        return baseResult({ hasScheduledShift: true, useRegularPunch: true });
+      }
+
+      const resolveCompanySettingsThresholds = async () => {
+        let threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
+        let assignmentWindow = null;
+        const cachedDriverAide = companySettingsDriverAideThresholdMinutesRef.current;
+        const cachedAssignmentWindow =
+          companySettingsShiftAssignmentWindowMinutesRef.current;
+        if (Number.isFinite(cachedDriverAide) && cachedDriverAide > 0) {
+          devLog("checkClockInEarly: using driverAideThresholdMinutes from company-settings cache", {
+            threshold: cachedDriverAide,
+          });
+          threshold = cachedDriverAide;
+        }
+        if (
+          Number.isFinite(cachedAssignmentWindow) &&
+          cachedAssignmentWindow > 0
+        ) {
+          assignmentWindow = cachedAssignmentWindow;
+        }
+        if (Number.isFinite(threshold) && threshold > 0 && assignmentWindow != null) {
+          return { threshold, assignmentWindow };
+        }
+        try {
+          const settingsRes = await axios.get(
+            `${API_BASE_URL}/api/company-settings`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
+          const parsed = parseCompanySettingsPunchFields(raw);
+          if (
+            Number.isFinite(parsed.driverAideThresholdMinutes) &&
+            parsed.driverAideThresholdMinutes > 0
+          ) {
+            threshold = parsed.driverAideThresholdMinutes;
+            companySettingsDriverAideThresholdMinutesRef.current =
+              parsed.driverAideThresholdMinutes;
+          }
+          if (Number.isFinite(parsed.shiftAssignmentWindowMinutes)) {
+            companySettingsShiftAssignmentWindowMinutesRef.current =
+              parsed.shiftAssignmentWindowMinutes;
+            assignmentWindow = parsed.shiftAssignmentWindowMinutes;
+          }
+        } catch (e) {
+          devLog(
+            "checkClockInEarly: company-settings fetch failed, using fallback threshold",
+            e?.message
+          );
+        }
+        return { threshold, assignmentWindow };
+      };
+
+      const isDriverEmployment = employmentDetailsIsDriverRef.current;
+
+      if (isDriverEmployment === false) {
+        if (!hasScheduledShift) {
+          devLog("checkClockInEarly: isDriver false, no scheduled shift", { jobTitle });
+          return baseResult({ hasScheduledShift: false, useRegularPunch: true });
+        }
+        const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
+        const nextShiftStart = boundaries?.nextShiftStart;
+        if (!nextShiftStart) {
+          devLog("checkClockInEarly: isDriver false, no next shift start", { jobTitle });
+          return baseResult({ hasScheduledShift: true, useRegularPunch: true });
+        }
+        const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
+        const { threshold, assignmentWindow } =
+          await resolveCompanySettingsThresholds();
+        const bypassModalByAssignmentWindow =
+          Number.isFinite(assignmentWindow) &&
+          assignmentWindow > 0 &&
+          minutesEarly >= assignmentWindow;
+        const showModal = !bypassModalByAssignmentWindow && minutesEarly >= threshold;
+        devLog("checkClockInEarly (isDriver false):", {
+          companyId,
+          jobTitle,
+          minutesEarly: Math.floor(minutesEarly),
+          threshold,
+          shiftAssignmentWindowMinutes: assignmentWindow,
+          bypassModalByAssignmentWindow,
+          showModal,
+        });
+        if (bypassModalByAssignmentWindow) {
+          devLog(
+            "checkClockInEarly: bypass modal, use REGULAR (isDriver false + assignment window reached)",
+            {
+              minutesEarly: Math.floor(minutesEarly),
+              shiftAssignmentWindowMinutes: assignmentWindow,
+            }
+          );
+          return baseResult({ hasScheduledShift: true, useRegularPunch: true });
+        }
+        if (showModal) {
+          return {
+            showModal: true,
+            addPunchTypeAM: false,
+            hasScheduledShift: true,
+            useRegularPunch: false,
+            details: {
+              companyId: String(companyId ?? ""),
+              clockInAt,
+              scheduledShiftStart: nextShiftStart,
+              minutesEarly: Math.floor(minutesEarly),
+              thresholdMinutes: threshold,
+            },
+          };
+        }
+        return baseResult({ hasScheduledShift: true, useRegularPunch: true });
+      }
+
+      if (isDriverEmployment === true) {
+        devLog("checkClockInEarly: isDriver true, skip early Driver/Aide vs Regular modal", {
+          jobTitle,
+        });
+        return baseResult({ hasScheduledShift });
       }
 
       const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
       if (driverAideTitles.some((t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase())) {
-        devLog("checkClockInEarly: driver/aide job, skip", { jobTitle });
-        return noModal(false, hasScheduledShift);
+        devLog("checkClockInEarly: driver/aide job title, skip (legacy)", { jobTitle });
+        return baseResult({ hasScheduledShift });
       }
 
-      const addPunchTypeAM = true; // non–driver/aide in allowed company => time-in uses DRIVER_AIDE_AM
-      if (!hasScheduledShift) return noModal(addPunchTypeAM, false);
+      const addPunchTypeAM = true;
+      if (!hasScheduledShift) {
+        return baseResult({ addPunchTypeAM: true, hasScheduledShift: false, useRegularPunch: false });
+      }
 
       const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
       const nextShiftStart = boundaries?.nextShiftStart;
-      if (!nextShiftStart) return noModal(addPunchTypeAM, true);
-
-      const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
-
-      let threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
-      try {
-        const settingsRes = await axios.get(
-          `${API_BASE_URL}/api/company-settings`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
-        const fromApi = Number(
-          raw.driverAideThresholdMinutes ?? raw.driver_aide_threshold_minutes
-        );
-        if (Number.isFinite(fromApi) && fromApi > 0) threshold = fromApi;
-      } catch (e) {
-        devLog("checkClockInEarly: company-settings fetch failed, using fallback threshold", e?.message);
+      if (!nextShiftStart) {
+        return baseResult({ addPunchTypeAM: true, hasScheduledShift: true, useRegularPunch: false });
       }
 
+      const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
+      const { threshold } = await resolveCompanySettingsThresholds();
+
       const showModal = minutesEarly >= threshold;
-      devLog("checkClockInEarly:", {
+      devLog("checkClockInEarly (legacy):", {
         companyId,
         jobTitle,
         minutesEarly: Math.floor(minutesEarly),
@@ -1097,6 +1565,8 @@ export default function TimekeepingPunch() {
         return {
           showModal: true,
           addPunchTypeAM,
+          hasScheduledShift: true,
+          useRegularPunch: false,
           details: {
             companyId: String(companyId),
             clockInAt,
@@ -1106,10 +1576,14 @@ export default function TimekeepingPunch() {
           },
         };
       }
-      return noModal(addPunchTypeAM, true);
+      return baseResult({
+        addPunchTypeAM: true,
+        hasScheduledShift: true,
+        useRegularPunch: false,
+      });
     } catch (e) {
       devLog("checkClockInEarly error:", e?.message);
-      return noModal(false, true);
+      return baseResult();
     }
   };
 
@@ -1133,10 +1607,37 @@ export default function TimekeepingPunch() {
         const isDriverAideJob = driverAideTitles.some(
           (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase()
         );
-        devLog("Time-out check:", { jobTitle, isDriverAideJob });
-        if (isDriverAideJob) {
+        const isDriverEmployment = employmentDetailsIsDriverRef.current;
+        devLog("Time-out check:", {
+          jobTitle,
+          isDriverAideJob,
+          isDriver: isDriverEmployment,
+        });
+        if (isDriverEmployment === true) {
           timeOutPayload = { ...payload, punchType: "DRIVER_AIDE" };
-          devLog("Time-out payload: punchType = DRIVER_AIDE (driver/aide job)");
+          devLog("Time-out payload: punchType = DRIVER_AIDE (isDriver=true)");
+        } else if (isDriverEmployment === false) {
+          const clockOutAt = new Date();
+          const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
+          devLog("Clock-out deviation check (isDriver=false):", {
+            showModal: deviationCheck?.showModal,
+            minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
+            thresholdMinutes: deviationCheck?.details?.thresholdMinutes,
+          });
+          if (deviationCheck.showModal && deviationCheck.details) {
+            devLog("Showing clock-out deviation modal");
+            setPendingClockOutPayload({
+              token,
+              deviceInfo,
+              location,
+              localTimestamp,
+            });
+            setClockOutDeviationDetails(deviationCheck.details);
+            openModal("clockOutDeviation");
+            return;
+          }
+          timeOutPayload = { ...payload, punchType: "REGULAR" };
+          devLog("Time-out payload: punchType = REGULAR (isDriver=false)");
         } else {
           const clockOutAt = new Date();
           const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
@@ -1158,7 +1659,7 @@ export default function TimekeepingPunch() {
             return;
           }
           timeOutPayload = { ...payload, punchType: "DRIVER_AIDE_PM" };
-          devLog("Time-out payload: punchType = DRIVER_AIDE_PM (non–driver/aide)");
+          devLog("Time-out payload: punchType = DRIVER_AIDE_PM (legacy)");
         }
       } catch (e) {
         devLog("Time-out profile/deviation check error:", e?.message);
@@ -1196,7 +1697,17 @@ export default function TimekeepingPunch() {
     if (clockOutConfirmModalVisible) {
       const s = clockOutConfirmSchedule;
       return (
-        <View className="px-6 pb-6 pt-2">
+        <ScrollView
+          style={{ maxHeight: height * 0.72 }}
+          contentContainerStyle={{
+            paddingHorizontal: 24,
+            paddingTop: 8,
+            paddingBottom: Math.max(insets.bottom, 20),
+          }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator
+          bounces
+        >
           <View className="items-center mb-6">
             <View className="w-16 h-16 rounded-full bg-slate-100 items-center justify-center mb-4">
               <Ionicons name="log-out-outline" size={32} color="#475569" />
@@ -1298,14 +1809,24 @@ export default function TimekeepingPunch() {
           >
             <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       );
     }
 
     if (clockInEarlyModalVisible) {
       const d = clockInEarlyDetails;
       return (
-        <View className="px-6 pb-6 pt-2">
+        <ScrollView
+          style={{ maxHeight: height * 0.72 }}
+          contentContainerStyle={{
+            paddingHorizontal: 24,
+            paddingTop: 8,
+            paddingBottom: Math.max(insets.bottom, 20),
+          }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator
+          bounces
+        >
           <View className="items-center mb-6">
             <View className="w-16 h-16 rounded-full bg-amber-100 items-center justify-center mb-4">
               <Ionicons name="time-outline" size={32} color="#f59e0b" />
@@ -1314,7 +1835,13 @@ export default function TimekeepingPunch() {
               Clock-In Time Notice
             </Text>
             <Text className="text-base text-slate-600 text-center px-2 leading-5">
-              {`You are clocking in more than ${d?.thresholdMinutes ?? CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES} minutes before your scheduled shift start.`}
+              {`You are clocking in ${d?.thresholdMinutes ?? CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES} or more minutes before your scheduled shift start (company driver/aide threshold).`}
+            </Text>
+            <Text className="text-sm text-slate-500 text-center px-2 leading-5 mt-3">
+              Choose how to record this time-in:{" "}
+              <Text className="font-semibold text-slate-700">Regular</Text> or{" "}
+              <Text className="font-semibold text-slate-700">Driver / Aide (AM)</Text> (
+              <Text className="font-mono text-xs">DRIVER_AIDE_AM</Text>).
             </Text>
           </View>
           <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
@@ -1359,7 +1886,7 @@ export default function TimekeepingPunch() {
             </View>
           </View>
 
-          {/* Action: Regular punch or Driver/Aide (icon buttons) */}
+          {/* Action: Regular vs Driver/Aide AM (non-drivers clocking in early) */}
           <View className="flex-row gap-4 justify-center items-stretch">
             <TouchableOpacity
               onPress={async () => {
@@ -1465,10 +1992,12 @@ export default function TimekeepingPunch() {
               <View className="w-14 h-14 rounded-full bg-amber-400 items-center justify-center mb-2">
                 <Ionicons name="person-outline" size={28} color="#fff" />
               </View>
-              <Text className="text-amber-800 font-semibold text-sm text-center">Driver / Aide</Text>
+              <Text className="text-amber-800 font-semibold text-sm text-center">
+                Driver / Aide (AM)
+              </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       );
     }
 
@@ -1618,7 +2147,17 @@ export default function TimekeepingPunch() {
     if (clockOutDeviationModalVisible) {
       const d = clockOutDeviationDetails;
       return (
-        <View className="px-6 pb-6 pt-2">
+        <ScrollView
+          style={{ maxHeight: height * 0.72 }}
+          contentContainerStyle={{
+            paddingHorizontal: 24,
+            paddingTop: 8,
+            paddingBottom: Math.max(insets.bottom, 20),
+          }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator
+          bounces
+        >
           {/* Header Section */}
           <View className="items-center mb-6">
             <View className="w-16 h-16 rounded-full bg-amber-100 items-center justify-center mb-4">
@@ -1857,7 +2396,7 @@ export default function TimekeepingPunch() {
               <Text className="text-amber-800 font-semibold text-sm text-center">Driver / Aide</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       );
     }
 
@@ -1924,6 +2463,8 @@ export default function TimekeepingPunch() {
     }
     return null;
   };
+
+  const isPunchLocationBlocked = isLocationRestricted && !isWithinPunchLocation;
 
   return (
     <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: insets.top + 60 }}>
@@ -2043,14 +2584,40 @@ export default function TimekeepingPunch() {
           </Animated.View>
 
           {/* Time In/Out button */}
+          {isPunchLocationBlocked && (
+            <View className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
+              <Text className="text-sm text-red-700">
+                {punchLocationErrorMessage || "You are outside your assigned punch location."}
+              </Text>
+            </View>
+          )}
           <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
             <TouchableOpacity
               onPress={handlePunch}
-              disabled={loading}
-              className={`py-4 rounded-lg items-center justify-center mb-4 ${isTimeIn ? "bg-slate-500" : "bg-orange-400"}`}
+              disabled={loading || !companySettingsFetched || isPunchLocationBlocked}
+              className={`py-4 rounded-lg items-center justify-center mb-4 ${
+                isPunchLocationBlocked
+                  ? "bg-slate-300"
+                  : isTimeIn
+                    ? "bg-slate-500"
+                    : "bg-orange-400"
+              } ${!companySettingsFetched || isPunchLocationBlocked ? "opacity-60" : ""}`}
               activeOpacity={0.8}
             >
-              {loading ? <ActivityIndicator color="#fff" /> : <Text className="text-white text-lg font-bold">{isTimeIn ? "Time Out" : "Time In"}</Text>}
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : !companySettingsFetched ? (
+                <View className="flex-row items-center justify-center px-2">
+                  <ActivityIndicator color="#fff" style={{ marginRight: 10 }} />
+                  <Text className="text-white text-base font-bold shrink">
+                    Loading punch settings…
+                  </Text>
+                </View>
+              ) : (
+                <Text className="text-white text-lg font-bold">
+                  {isTimeIn ? "Time Out" : "Time In"}
+                </Text>
+              )}
             </TouchableOpacity>
           </Animated.View>
 

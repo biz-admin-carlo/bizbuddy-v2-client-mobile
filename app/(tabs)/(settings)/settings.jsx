@@ -36,6 +36,7 @@ import io from "socket.io-client";
 
 // Same as your department page, define a min and max offset
 const { height } = Dimensions.get("window");
+const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 
 const Settings = () => {
   const router = useRouter();
@@ -47,6 +48,7 @@ const Settings = () => {
   const [showLockedModal, setShowLockedModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
   const [settingUpBiometric, setSettingUpBiometric] = useState(false);
 
   // Instead of starting from 'height', we'll start from a partial off-screen
@@ -135,7 +137,17 @@ const Settings = () => {
 
     fetchProfile();
     checkBiometricAvailability();
+    loadBiometricEnabledState();
   }, []);
+
+  const loadBiometricEnabledState = async () => {
+    try {
+      const enabledFlag = await SecureStore.getItemAsync(BIOMETRIC_ENABLED_KEY);
+      setBiometricEnabled(enabledFlag === "true");
+    } catch {
+      setBiometricEnabled(false);
+    }
+  };
 
   const checkBiometricAvailability = async () => {
     try {
@@ -270,6 +282,13 @@ const Settings = () => {
     setSettingUpBiometric(true);
 
     try {
+      if (biometricEnabled) {
+        await SecureStore.deleteItemAsync(BIOMETRIC_ENABLED_KEY);
+        setBiometricEnabled(false);
+        Alert.alert("Biometric Disabled", "Biometric sign-in has been turned off for this device.", [{ text: "OK" }]);
+        return;
+      }
+
       // Check if user has a valid token
       const token = await SecureStore.getItemAsync("token");
       if (!token) {
@@ -316,8 +335,8 @@ const Settings = () => {
       });
 
       if (result.success) {
-        // Token is already saved, just confirm it's set up
-        // The token in SecureStore is what biometric login uses
+        await SecureStore.setItemAsync(BIOMETRIC_ENABLED_KEY, "true");
+        setBiometricEnabled(true);
         Alert.alert(
           "Success",
           "Face ID has been set up successfully! You can now use biometric authentication to sign in.",
@@ -784,13 +803,17 @@ const Settings = () => {
                   <Text className="text-medium font-semibold text-slate-800">
                     {settingUpBiometric
                       ? "Setting up Face ID..."
-                      : "Set Up Face ID"}
+                      : biometricEnabled
+                        ? "Disable Face ID"
+                        : "Set Up Face ID"}
                   </Text>
                   <Text className="text-[12px] text-slate-600 mt-0.5">
                     {settingUpBiometric
                       ? "Please authenticate with Face ID"
-                      : biometricAvailable || (Platform.OS === "ios" && __DEV__)
-                        ? "Enable biometric authentication for quick sign in"
+                      : biometricEnabled
+                        ? "Face ID is enabled on this device"
+                        : biometricAvailable || (Platform.OS === "ios" && __DEV__)
+                          ? "Enable biometric authentication for quick sign in"
                         : "Biometric authentication not available on this device"}
                   </Text>
                 </View>

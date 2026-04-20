@@ -10,15 +10,16 @@ export const FEEDBACK_EMAIL = "bizmobiledevelopment@gmail.com";
 export const API_BASE_URL = PROD_SERVER_CARLO;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
-export const VERSION = "1.0.9";
+export const VERSION = "1.0.14";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).
 // Clock-in early modal: fallback only when GET /api/company-settings cannot supply driverAideThresholdMinutes.
 export const CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES = 45;
-// Company IDs that see the clock-out deviation modal (others never see it).
+// Company IDs that use the clock-out deviation and driver/aide clock-in modal logic.
 export const CLOCK_OUT_DEVIATION_COMPANY_IDS = [
-  "cmb1rn4ks0001wqdx2nqth9ra,cmnegwuxm0004rf7fzo6wjrw2",
+  "cmb1rn4ks0001wqdx2nqth9ra",
+  "cmnegwuxm0004rf7fzo6wjrw2",
 ];
 // Set to true to always show the "no scheduled shift" clock-in modal (timekeeping punch, online flow).
 export const DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL = false;
@@ -33,4 +34,4 @@ export const DRIVER_AIDE_JOB_TITLES = [
 ];
 
 // Timekeeping schedule: timezone used to display shift start/end when the API does not provide shift.timeZone (e.g. "Asia/Manila").
-export const DEFAULT_SHIFT_DISPLAY_TIMEZONE = "Asia/Manila";
+export const DEFAULT_SHIFT_DISPLAY_TIMEZONE = "America/Los_Angeles";

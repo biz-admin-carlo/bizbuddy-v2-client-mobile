@@ -65,6 +65,34 @@ const getLocalDateString = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
+const getDateKeyInTimeZone = (dateInput, timeZone) => {
+  if (!dateInput) return "";
+  const date = new Date(dateInput);
+  if (!Number.isFinite(date.getTime())) return "";
+  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  if (!year || !month || !day) return "";
+  return `${year}-${month}-${day}`;
+};
+
+const getShiftTimeZone = (shift) =>
+  shift?.shift?.timeZone ||
+  shift?.shift?.time_zone ||
+  shift?.timeZone ||
+  shift?.time_zone ||
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+
+const getShiftDateKey = (shift) =>
+  getDateKeyInTimeZone(shift?.assignedDate, getShiftTimeZone(shift));
+
 // Parse naive time from API (no timezone in DB). Returns { hour, minute } or null.
 // Handles "08:00:00", "08:00", "2026-03-06T08:00:00", "2026-03-06T08:00:00.000Z" etc.
 const parseNaiveTime = (value) => {
@@ -270,12 +298,13 @@ const TimekeepingSchedule = () => {
       const res = await axios.get(`${API_BASE_URL}/api/usershifts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      console.log("Timekeeping schedule userShifts response:", res?.data?.data);
       if (res.status === 200 && res.data.data) {
         setUserShifts(res.data.data);
         createMarkedDates(res.data.data);
         const todayShifts = res.data.data.filter((shift) => {
-          // Use local date string for filtering
-          const shiftDate = getLocalDateString(shift.assignedDate);
+          // Use shift timezone date key for filtering to avoid day shifts across device timezones.
+          const shiftDate = getShiftDateKey(shift);
           return shiftDate === selectedDate;
         });
         setSelectedShifts(todayShifts);
@@ -313,8 +342,9 @@ const TimekeepingSchedule = () => {
     const marked = {};
 
     shifts.forEach((userShift) => {
-      // Use local date string for marking the calendar
-      const shiftDate = getLocalDateString(userShift.assignedDate);
+      // Mark by shift timezone date key so schedule days stay correct across viewer locales.
+      const shiftDate = getShiftDateKey(userShift);
+      if (!shiftDate) return;
 
       marked[shiftDate] = {
         ...marked[shiftDate],
@@ -355,8 +385,8 @@ const TimekeepingSchedule = () => {
     setSelectedDate(selected);
 
     const shiftsForDate = userShifts.filter((userShift) => {
-      // Compare using local date string
-      const shiftDate = getLocalDateString(userShift.assignedDate);
+      // Compare using shift timezone date key.
+      const shiftDate = getShiftDateKey(userShift);
       return shiftDate === selected;
     });
 
@@ -463,7 +493,7 @@ const TimekeepingSchedule = () => {
         {/* Title Row with Date and Notification Icon */}
         <View className="px-4 py-2 flex-row items-center justify-between">
           <Text className="text-xl font-bold text-slate-700">
-            {selectedDate === new Date().toISOString().split("T")[0]
+            {selectedDate === getLocalDateString(new Date())
               ? "Today's Shifts"
               : `Shift(s) for ${new Date(selectedDate).toLocaleDateString(
                   "en-US",

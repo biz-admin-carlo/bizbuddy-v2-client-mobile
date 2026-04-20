@@ -1,6 +1,6 @@
 // app/(tabs)/(leaves)/leaves-request.jsx
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   Text,
@@ -17,11 +17,12 @@ import {
   ScrollView,
   TouchableWithoutFeedback,
   Switch,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import DropDownPicker from "react-native-dropdown-picker";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../config/constant";
@@ -39,6 +40,118 @@ const combineDateAndTime = (date, time) => {
 };
 
 const formatDateOnly = (date) => date.toISOString().split("T")[0];
+
+/** Pull an array of balance rows from typical API wrapper shapes */
+const extractBalancesList = (payload) => {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  const d = payload.data;
+  if (Array.isArray(d)) return d;
+  if (d && Array.isArray(d.balances)) return d.balances;
+  if (d && Array.isArray(d.items)) return d.items;
+  if (Array.isArray(payload.balances)) return payload.balances;
+  return [];
+};
+
+const balanceRowLabel = (row) =>
+  row?.displayName ??
+  row?.leaveType ??
+  row?.name ??
+  row?.type ??
+  row?.code ??
+  "Leave";
+
+const formatBalanceNumber = (v) => {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  if (Number.isFinite(n)) {
+    return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, "");
+  }
+  return String(v);
+};
+
+const rowSaysHours = (row) =>
+  /hour/i.test(
+    String(row?.unit ?? row?.creditUnit ?? row?.balanceUnit ?? row?.type ?? ""),
+  );
+
+/**
+ * Resolves day vs hour amounts from mixed API shapes.
+ * Hour-only payloads (e.g. `{ hours: 40 }` or `{ remainingHours: 8 }`) were
+ * previously invisible because only generic "credits" fields were read.
+ */
+const balanceRowDaysAndHours = (row) => {
+  const nested = row?.balance;
+  const hours = formatBalanceNumber(
+    row?.hours ??
+      row?.remainingHours ??
+      row?.availableHours ??
+      row?.creditHours ??
+      row?.balanceHours ??
+      row?.hoursRemaining ??
+      row?.totalHours ??
+      row?.accruedHours ??
+      row?.hourBalance ??
+      nested?.hours ??
+      nested?.remainingHours ??
+      nested?.availableHours,
+  );
+
+  const daysExplicit = formatBalanceNumber(
+    row?.availableDays ??
+      row?.daysRemaining ??
+      row?.days ??
+      row?.dayBalance ??
+      row?.remainingDays ??
+      nested?.availableDays ??
+      nested?.daysRemaining ??
+      nested?.days,
+  );
+
+  const generic = formatBalanceNumber(
+    row?.credits ??
+      row?.credit ??
+      row?.balance ??
+      row?.remainingBalance ??
+      row?.remaining ??
+      row?.available,
+  );
+
+  if (rowSaysHours(row) && hours == null && generic != null) {
+    return { days: daysExplicit, hours: generic };
+  }
+
+  if (daysExplicit != null) {
+    return { days: daysExplicit, hours };
+  }
+
+  if (hours != null) {
+    return { days: null, hours };
+  }
+
+  return { days: generic, hours: null };
+};
+
+const creditsHint = (valueStr, kind /* "day" | "hour" */) => {
+  if (valueStr == null) return null;
+  const n = Number(String(valueStr).replace(",", ""));
+  if (!Number.isFinite(n)) return null;
+  if (kind === "hour") {
+    return n === 1 ? "1 hour available" : `${n} hours available`;
+  }
+  return n === 1 ? "1 day available" : `${n} days available`;
+};
+
+/** Subtle card elevation (NativeWind shadow is inconsistent on Android) */
+const balanceCardShadow = Platform.select({
+  ios: {
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+  },
+  android: { elevation: 2 },
+});
 
 const SubmitLeaves = () => {
   const router = useRouter();
@@ -65,6 +178,10 @@ const SubmitLeaves = () => {
   const [currentDateTimeField, setCurrentDateTimeField] = useState(null);
   /** true = paid leave, false = unpaid */
   const [isPaidLeave, setIsPaidLeave] = useState(true);
+  const [leaveBalances, setLeaveBalances] = useState([]);
+  const [balancesLoading, setBalancesLoading] = useState(true);
+  const [balancesError, setBalancesError] = useState(null);
+  const [refreshingBalances, setRefreshingBalances] = useState(false);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -95,7 +212,7 @@ const SubmitLeaves = () => {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   useEffect(() => {
@@ -119,7 +236,7 @@ const SubmitLeaves = () => {
         RNAlert.alert(
           "Authentication Error",
           "You are not logged in. Please sign in again.",
-          [{ text: "OK", onPress: () => router.replace("(auth)/login-user") }]
+          [{ text: "OK", onPress: () => router.replace("(auth)/login-user") }],
         );
         return;
       }
@@ -127,6 +244,84 @@ const SubmitLeaves = () => {
     };
     initialize();
   }, [router]);
+
+  const fetchLeaveBalances = useCallback(async (token, options = {}) => {
+    const soft = options.soft === true;
+    if (!soft) {
+      setBalancesLoading(true);
+      setBalancesError(null);
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/leaves/balances`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLeaveBalances([]);
+        setBalancesError(
+          data?.message || "We could not load your balances. Try again.",
+        );
+        return;
+      }
+      const list = extractBalancesList(data);
+      const rows = list.map((row, index) => {
+        const { days, hours } = balanceRowDaysAndHours(row);
+        return {
+          key: String(
+            row?.id ?? row?.leaveTypeId ?? `${balanceRowLabel(row)}-${index}`,
+          ),
+          label: balanceRowLabel(row),
+          credits: days,
+          hours,
+        };
+      });
+      setLeaveBalances(rows);
+      setBalancesError(null);
+    } catch (error) {
+      console.error("Error fetching leave balances:", error);
+      setLeaveBalances([]);
+      setBalancesError(
+        "Something went wrong. Check your connection and try again.",
+      );
+    } finally {
+      setBalancesLoading(false);
+    }
+  }, []);
+
+  const onRefreshBalances = useCallback(async () => {
+    setRefreshingBalances(true);
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (token) await fetchLeaveBalances(token, { soft: true });
+    } finally {
+      setRefreshingBalances(false);
+    }
+  }, [fetchLeaveBalances]);
+
+  const handleRetryBalances = useCallback(async () => {
+    const token = await SecureStore.getItemAsync("token");
+    if (!token) return;
+    await fetchLeaveBalances(token);
+  }, [fetchLeaveBalances]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        const token = await SecureStore.getItemAsync("token");
+        if (!token || cancelled) {
+          if (!token) setBalancesLoading(false);
+          return;
+        }
+        await fetchLeaveBalances(token, { soft: true });
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, [fetchLeaveBalances]),
+  );
 
   const fetchApprovers = async (token) => {
     try {
@@ -168,8 +363,8 @@ const SubmitLeaves = () => {
         const list = Array.isArray(data?.data)
           ? data.data
           : Array.isArray(data)
-          ? data
-          : [];
+            ? data
+            : [];
 
         // IMPORTANT:
         // Backend expects a "type" (e.g. SICK, VACATION) when submitting a leave.
@@ -205,14 +400,14 @@ const SubmitLeaves = () => {
       } else {
         RNAlert.alert(
           "Error",
-          data?.message || "Failed to fetch leave policies."
+          data?.message || "Failed to fetch leave policies.",
         );
       }
     } catch (error) {
       console.error("Error fetching leave policies:", error);
       RNAlert.alert(
         "Error",
-        "An error occurred while fetching leave policies."
+        "An error occurred while fetching leave policies.",
       );
     }
   };
@@ -223,7 +418,7 @@ const SubmitLeaves = () => {
     if (!leaveType || !approverValue) {
       RNAlert.alert(
         "Incomplete Form",
-        "Please fill in all required fields, including selecting an approver."
+        "Please fill in all required fields, including selecting an approver.",
       );
       return;
     }
@@ -232,7 +427,7 @@ const SubmitLeaves = () => {
     if (combinedStart > combinedEnd) {
       RNAlert.alert(
         "Invalid Dates",
-        "Start Date and Time cannot be after End Date and Time."
+        "Start Date and Time cannot be after End Date and Time.",
       );
       return;
     }
@@ -277,17 +472,18 @@ const SubmitLeaves = () => {
         setLeaveEndTime(new Date());
         setApproverValue("");
         setIsPaidLeave(true);
+        await fetchLeaveBalances(token, { soft: true });
       } else {
         RNAlert.alert(
           "Error",
-          data.message || "Failed to submit leave request."
+          data.message || "Failed to submit leave request.",
         );
       }
     } catch (error) {
       console.error("Error submitting leave request:", error);
       RNAlert.alert(
         "Error",
-        "There was an issue submitting your leave request."
+        "There was an issue submitting your leave request.",
       );
     } finally {
       setIsSubmitting(false);
@@ -432,8 +628,8 @@ const SubmitLeaves = () => {
               ? leaveStartDate
               : leaveStartTime
             : isDatePicker
-            ? leaveEndDate
-            : leaveEndTime
+              ? leaveEndDate
+              : leaveEndTime
         }
         mode={isDatePicker ? "date" : "time"}
         is24Hour={true}
@@ -509,6 +705,15 @@ const SubmitLeaves = () => {
             contentContainerStyle={{ paddingBottom: 80 }}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled={true}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshingBalances}
+                onRefresh={onRefreshBalances}
+                tintColor="#EA580C"
+                colors={["#EA580C"]}
+                progressViewOffset={Platform.OS === "android" ? 70 : 0}
+              />
+            }
           >
             <Animated.View
               style={{
@@ -540,6 +745,203 @@ const SubmitLeaves = () => {
                 </View>
               </View>
 
+              {/* Leave credits from GET /api/leaves/balances */}
+              <View className="px-5 mb-5">
+                <View className="rounded-2xl border border-orange-100 bg-orange-50/60 overflow-hidden">
+                  <View className="h-1 bg-orange-400" />
+                  <View className="p-4">
+                    <View className="flex-row items-start">
+                      <View className="w-11 h-11 rounded-2xl bg-orange-100 items-center justify-center mr-3">
+                        <Ionicons
+                          name="pie-chart-outline"
+                          size={22}
+                          color="#C2410C"
+                        />
+                      </View>
+                      <View className="flex-1 pt-0.5">
+                        <Text className="text-lg font-bold text-slate-800">
+                          Your leave balance
+                        </Text>
+                        <Text className="text-sm text-slate-600 mt-1 leading-5">
+                          See how much paid leave you still have before you
+                          choose a type below. Pull down on this screen anytime
+                          to refresh.
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View className="mt-4">
+                      {balancesLoading ? (
+                        <View
+                          className="bg-white/90 rounded-xl py-8 px-4 items-center border border-orange-100/80"
+                          style={balanceCardShadow}
+                        >
+                          <ActivityIndicator size="large" color="#EA580C" />
+                          <Text className="text-sm font-medium text-slate-600 mt-4 text-center">
+                            Loading your balances…
+                          </Text>
+                          <Text className="text-xs text-slate-500 mt-1 text-center">
+                            This only takes a moment
+                          </Text>
+                        </View>
+                      ) : balancesError ? (
+                        <View
+                          className="bg-white rounded-xl py-5 px-4 border border-amber-200"
+                          style={balanceCardShadow}
+                          accessibilityRole="alert"
+                        >
+                          <View className="flex-row items-start">
+                            <View className="w-9 h-9 rounded-full bg-amber-100 items-center justify-center mr-3 mt-0.5">
+                              <Ionicons
+                                name="cloud-offline-outline"
+                                size={20}
+                                color="#B45309"
+                              />
+                            </View>
+                            <View className="flex-1">
+                              <Text className="text-base font-semibold text-slate-800">
+                                Balances could not be loaded
+                              </Text>
+                              <Text className="text-sm text-slate-600 mt-1 leading-5">
+                                {balancesError}
+                              </Text>
+                              <TouchableOpacity
+                                onPress={handleRetryBalances}
+                                activeOpacity={0.85}
+                                className="mt-4 self-start flex-row items-center bg-orange-500 px-4 py-2.5 rounded-xl"
+                                accessibilityRole="button"
+                                accessibilityLabel="Retry loading leave balances"
+                              >
+                                <Ionicons
+                                  name="refresh"
+                                  size={18}
+                                  color="#FFFFFF"
+                                />
+                                <Text className="text-white font-semibold text-sm ml-2">
+                                  Try again
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        </View>
+                      ) : leaveBalances.length === 0 ? (
+                        <View
+                          className="bg-white rounded-xl py-8 px-4 items-center border border-slate-100"
+                          style={balanceCardShadow}
+                        >
+                          <View className="w-14 h-14 rounded-full bg-slate-100 items-center justify-center mb-3">
+                            <Ionicons
+                              name="file-tray-outline"
+                              size={32}
+                              color="#94A3B8"
+                            />
+                          </View>
+                          <Text className="text-base font-semibold text-slate-800 text-center">
+                            No balances to show yet
+                          </Text>
+                          <Text className="text-sm text-slate-500 mt-2 text-center leading-5 px-1">
+                            When your employer assigns leave credits, they will
+                            appear here automatically.
+                          </Text>
+                        </View>
+                      ) : (
+                        <View className="flex-col gap-2">
+                          {leaveBalances.map((row) => {
+                            const hasDays = row.credits != null;
+                            const hasHours = row.hours != null;
+                            const hintParts = [];
+                            if (hasDays)
+                              hintParts.push(creditsHint(row.credits, "day"));
+                            if (hasHours)
+                              hintParts.push(creditsHint(row.hours, "hour"));
+                            const hint =
+                              hintParts.length > 1
+                                ? hintParts.join(" · ")
+                                : (hintParts[0] ?? null);
+
+                            const a11yAmount = [
+                              hasDays ? `${row.credits} days` : null,
+                              hasHours ? `${row.hours} hours` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(", ");
+
+                            return (
+                              <View
+                                key={row.key}
+                                className="bg-white rounded-xl px-4 py-3.5 border border-slate-100 flex-row items-center justify-between"
+                                style={balanceCardShadow}
+                                accessibilityLabel={`${row.label}. ${a11yAmount || "No balance data"}`}
+                              >
+                                <View className="flex-1 pr-3 flex-row items-center min-w-0">
+                                  <View className="w-9 h-9 rounded-full bg-slate-100 items-center justify-center mr-3">
+                                    <Ionicons
+                                      name="leaf-outline"
+                                      size={18}
+                                      color="#64748B"
+                                    />
+                                  </View>
+                                  <View className="flex-1 min-w-0">
+                                    <Text
+                                      className="text-[13px] font-semibold text-slate-500 uppercase tracking-wide"
+                                      numberOfLines={1}
+                                    >
+                                      {row.label}
+                                    </Text>
+                                    {hint ? (
+                                      <Text
+                                        className="text-xs text-slate-400 mt-0.5"
+                                        numberOfLines={2}
+                                      >
+                                        {hint}
+                                      </Text>
+                                    ) : null}
+                                  </View>
+                                </View>
+                                <View className="items-end shrink-0">
+                                  {!hasDays && !hasHours ? (
+                                    <Text className="text-2xl font-bold text-orange-600">
+                                      —
+                                    </Text>
+                                  ) : (
+                                    <>
+                                      {hasDays ? (
+                                        <View className="items-end mb-1">
+                                          <Text className="text-2xl font-bold text-orange-600 tabular-nums">
+                                            {row.credits}
+                                          </Text>
+                                          <Text className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                                            days
+                                          </Text>
+                                        </View>
+                                      ) : null}
+                                      {hasHours ? (
+                                        <View className="items-end">
+                                          <Text
+                                            className={`font-bold text-orange-600 tabular-nums ${
+                                              hasDays ? "text-xl" : "text-2xl"
+                                            }`}
+                                          >
+                                            {row.hours}
+                                          </Text>
+                                          <Text className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                                            hours
+                                          </Text>
+                                        </View>
+                                      ) : null}
+                                    </>
+                                  )}
+                                </View>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                </View>
+              </View>
+
               {/* Leave Type Dropdown */}
               <View style={{ zIndex: 3000 }} className="px-5 mb-5">
                 <FormLabel text="Leave Type" />
@@ -558,7 +960,7 @@ const SubmitLeaves = () => {
                       "[LeaveType] item:",
                       item,
                       "value type:",
-                      typeof item?.value
+                      typeof item?.value,
                     );
                   }}
                   placeholder="Select Leave Type"

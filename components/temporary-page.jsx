@@ -150,7 +150,7 @@ export default function TemporaryPage() {
                 </View>
                 <View>
                   <Text className="text-xs text-slate-500">Version</Text>
-                  <Text className="text-sm font-medium text-slate-700">1.0.0</Text>
+                  <Text className="text-sm font-medium text-slate-700">1.0.12</Text>
                 </View>
               </View>
             </View>

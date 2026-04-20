@@ -29,6 +29,7 @@ import {
 } from "@expo/vector-icons";
 
 const { width } = Dimensions.get("window");
+const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 
 export default function SignIn() {
   const router = useRouter();
@@ -47,6 +48,7 @@ export default function SignIn() {
 
   // For biometric authentication
   const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
   const [savedToken, setSavedToken] = useState(null);
 
   // Animation values
@@ -99,6 +101,8 @@ export default function SignIn() {
 
     const getToken = async () => {
       const token = await SecureStore.getItemAsync("token");
+      const enabledFlag = await SecureStore.getItemAsync(BIOMETRIC_ENABLED_KEY);
+      setBiometricEnabled(enabledFlag === "true");
       // Only set saved token if it's not expired
       if (token && !isTokenExpired(token)) {
         setSavedToken(token);
@@ -449,8 +453,8 @@ export default function SignIn() {
                         </TouchableOpacity>
                       </Animated.View>
 
-                      {/* Biometric button - Moved below Continue button */}
-                      {biometricAvailable && savedToken && (
+                      {/* Biometric button */}
+                      {biometricAvailable && biometricEnabled && (
                         <Animated.View
                           style={{
                             transform: [{ scale: buttonScale }],
@@ -459,8 +463,9 @@ export default function SignIn() {
                         >
                           <TouchableOpacity
                             onPress={handleBiometricSignIn}
+                            disabled={!savedToken}
                             className="flex-row items-center justify-center py-4 px-5 rounded-lg border border-slate-200"
-                            style={styles.buttonShadow}
+                            style={[styles.buttonShadow, !savedToken && { opacity: 0.6 }]}
                             activeOpacity={0.8}
                           >
                             <Ionicons
@@ -473,6 +478,11 @@ export default function SignIn() {
                               Sign in with biometrics
                             </Text>
                           </TouchableOpacity>
+                          {!savedToken && (
+                            <Text className="text-xs text-slate-500 mt-2 text-center">
+                              Biometric is enabled, but your session has expired. Sign in with password once to continue using it.
+                            </Text>
+                          )}
                         </Animated.View>
                       )}
                     </View>
