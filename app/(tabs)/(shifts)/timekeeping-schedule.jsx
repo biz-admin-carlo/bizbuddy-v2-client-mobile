@@ -65,8 +65,23 @@ const getLocalDateString = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const parseDateOnlyToLocalDate = (dateString) => {
+  if (!DATE_ONLY_REGEX.test(String(dateString || "").trim())) return null;
+  const [year, month, day] = String(dateString)
+    .trim()
+    .split("-")
+    .map((part) => parseInt(part, 10));
+  const date = new Date(year, month - 1, day);
+  if (!Number.isFinite(date.getTime())) return null;
+  return date;
+};
+
 const getDateKeyInTimeZone = (dateInput, timeZone) => {
   if (!dateInput) return "";
+  const normalizedDateInput = String(dateInput).trim();
+  if (DATE_ONLY_REGEX.test(normalizedDateInput)) return normalizedDateInput;
   const date = new Date(dateInput);
   if (!Number.isFinite(date.getTime())) return "";
   const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
@@ -122,6 +137,8 @@ const formatNaiveTimeInZone = (naiveTimeStr) => {
 // Format date in the shift's timezone for "Assigned on" display
 const formatDateInZone = (isoString, timeZone) => {
   if (!isoString) return "";
+  const dateOnly = parseDateOnlyToLocalDate(isoString);
+  if (dateOnly) return dateOnly.toLocaleDateString("en-US");
   const date = new Date(isoString);
   if (!Number.isFinite(date.getTime())) return "";
   const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
@@ -495,7 +512,7 @@ const TimekeepingSchedule = () => {
           <Text className="text-xl font-bold text-slate-700">
             {selectedDate === getLocalDateString(new Date())
               ? "Today's Shifts"
-              : `Shift(s) for ${new Date(selectedDate).toLocaleDateString(
+              : `Shift(s) for ${(parseDateOnlyToLocalDate(selectedDate) || new Date(selectedDate)).toLocaleDateString(
                   "en-US",
                   {
                     month: "short",

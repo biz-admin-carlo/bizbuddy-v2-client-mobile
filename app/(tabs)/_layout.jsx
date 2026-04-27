@@ -28,6 +28,7 @@ import useTutorialStore from "../../store/tutorialStore";
 import TutorialOverlay from "../../components/TutorialOverlay";
 import FeedbackFloatingPill from "../../components/FeedbackFloatingPill";
 import { useNotifications } from "../../hooks/useNotifications";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import io from "socket.io-client";
 
 const { height } = Dimensions.get("window");
@@ -242,6 +243,7 @@ const NotificationIcon = ({ color, size, focused }) => {
 };
 
 const TabsLayout = () => {
+  const insets = useSafeAreaInsets();
   const { token } = useAuthStore();
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
@@ -486,8 +488,9 @@ const TabsLayout = () => {
     />
   );
 
-  // Update the tab bar height to ensure icons are fully visible
-  const tabBarHeight = Platform.OS === "ios" ? 90 : 70;
+  // Add extra Android bottom-safe-area spacing so system navigation does not overlap tabs.
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 16) : 0;
+  const tabBarHeight = Platform.OS === "ios" ? 90 : 70 + androidBottomInset;
   const isSettingsTabActive = segments.includes("(settings)");
 
   // Update the tabBarActiveTintColor to be white for the labels
@@ -506,7 +509,7 @@ const TabsLayout = () => {
               borderTopWidth: 0,
               height: tabBarHeight,
               paddingTop: Platform.OS === "ios" ? 12 : 8,
-              paddingBottom: Platform.OS === "ios" ? 30 : 12,
+              paddingBottom: Platform.OS === "ios" ? 30 : androidBottomInset,
               // Use platform-specific styling
               ...Platform.select({
                 ios: {

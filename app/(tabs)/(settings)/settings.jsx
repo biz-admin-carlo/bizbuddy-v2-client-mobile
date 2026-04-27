@@ -23,6 +23,7 @@ import {
 import { useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
+import * as Location from "expo-location";
 import { API_BASE_URL, WEBSITE_URL } from "../../../config/constant";
 import useTutorialStore from "../../../store/tutorialStore";
 import { isTokenExpired } from "../../../store/useAuthStore";
@@ -50,6 +51,8 @@ const Settings = () => {
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [biometricEnabled, setBiometricEnabled] = useState(false);
   const [settingUpBiometric, setSettingUpBiometric] = useState(false);
+  const [requestingLocationPermission, setRequestingLocationPermission] =
+    useState(false);
 
   // Instead of starting from 'height', we'll start from a partial off-screen
   // position to allow partial expansions as in the department page.
@@ -75,6 +78,7 @@ const Settings = () => {
   // Individual option button animations
   const optionScales = useRef({}).current;
   const biometricButtonScale = useRef(new Animated.Value(1)).current;
+  const locationButtonScale = useRef(new Animated.Value(1)).current;
 
   // Here we replicate the "department" style panResponder for partial expansions:
   // - If dragged > 100 downwards, close
@@ -358,6 +362,66 @@ const Settings = () => {
       );
     } finally {
       setSettingUpBiometric(false);
+    }
+  };
+
+  const handleLocationSettings = async () => {
+    animateButtonPress(locationButtonScale);
+    if (requestingLocationPermission) return;
+    setRequestingLocationPermission(true);
+
+    try {
+      const currentPermission = await Location.getForegroundPermissionsAsync();
+
+      if (currentPermission.granted) {
+        const servicesEnabled = await Location.hasServicesEnabledAsync();
+        if (!servicesEnabled) {
+          Alert.alert(
+            "Location Services Disabled",
+            "Location permission is granted, but device location services are turned off. Please enable location services in your device settings.",
+            [
+              { text: "Cancel", style: "cancel" },
+              {
+                text: "Open Settings",
+                onPress: () => Linking.openSettings(),
+              },
+            ],
+          );
+          return;
+        }
+
+        Alert.alert(
+          "Location Ready",
+          "Location access is already enabled and ready to use.",
+        );
+        return;
+      }
+
+      const permissionResult = await Location.requestForegroundPermissionsAsync();
+      if (permissionResult.granted) {
+        Alert.alert("Success", "Location permission has been enabled.");
+        return;
+      }
+
+      Alert.alert(
+        "Location Permission Needed",
+        "Please enable location access in system settings so punch-in location checks can work.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Open Settings",
+            onPress: () => Linking.openSettings(),
+          },
+        ],
+      );
+    } catch (error) {
+      console.error("Error requesting location permission:", error);
+      Alert.alert(
+        "Error",
+        "Unable to update location permission right now. Please try again.",
+      );
+    } finally {
+      setRequestingLocationPermission(false);
     }
   };
 
@@ -826,6 +890,47 @@ const Settings = () => {
                       color="#94a3b8"
                     />
                   )}
+              </TouchableOpacity>
+            </Animated.View>
+
+            <Animated.View
+              style={{ transform: [{ scale: locationButtonScale }] }}
+            >
+              <TouchableOpacity
+                onPress={handleLocationSettings}
+                disabled={requestingLocationPermission}
+                activeOpacity={0.85}
+                className="mt-3 flex-row items-center bg-slate-50 border border-slate-200 rounded-[12px] px-4 py-4"
+                style={Platform.select({
+                  ios: {
+                    shadowColor: "#000",
+                    shadowOffset: { width: 0, height: 1 },
+                    shadowOpacity: 0.05,
+                    shadowRadius: 2,
+                  },
+                  android: { elevation: 2 },
+                })}
+              >
+                <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3">
+                  {requestingLocationPermission ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <Ionicons name="location-outline" size={20} color="#ffffff" />
+                  )}
+                </View>
+                <View className="flex-1">
+                  <Text className="text-medium font-semibold text-slate-800">
+                    {requestingLocationPermission
+                      ? "Checking location access..."
+                      : "Location Settings"}
+                  </Text>
+                  <Text className="text-[12px] text-slate-600 mt-0.5">
+                    Re-prompt location permission or open system settings
+                  </Text>
+                </View>
+                {!requestingLocationPermission && (
+                  <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+                )}
               </TouchableOpacity>
             </Animated.View>
           </View>

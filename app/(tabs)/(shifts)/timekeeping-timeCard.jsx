@@ -144,7 +144,7 @@ const TimekeepingTimeCard = () => {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   const fetchTimeLogs = async () => {
@@ -157,7 +157,7 @@ const TimekeepingTimeCard = () => {
       });
       if (res.status === 200 && res.data.data) {
         const sortedLogs = res.data.data.sort(
-          (a, b) => new Date(b.timeIn) - new Date(a.timeIn)
+          (a, b) => new Date(b.timeIn) - new Date(a.timeIn),
         );
         setTimeLogs(sortedLogs);
       } else {
@@ -167,7 +167,7 @@ const TimekeepingTimeCard = () => {
       console.error("Fetch time logs error:", error.message);
       Alert.alert(
         "Error",
-        error.response?.data?.message || "Failed to fetch time logs."
+        error.response?.data?.message || "Failed to fetch time logs.",
       );
     } finally {
       setLoading(false);
@@ -382,8 +382,8 @@ const TimekeepingTimeCard = () => {
           </TouchableOpacity>
         </View>
       );
-    // Delete confirmation modal intentionally disabled; keep block for quick restore.
-    /*
+      // Delete confirmation modal intentionally disabled; keep block for quick restore.
+      /*
     } else if (modalMode === "delete") {
       return (
         <View className="p-5">

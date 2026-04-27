@@ -623,15 +623,21 @@ function Payroll() {
 
         <View className="mt-3">
           <View className="flex-row items-center justify-between mb-2">
-            <View className="flex-row items-center">
+            <View className="flex-row items-center flex-1 mr-3">
               <Ionicons name="calendar-outline" size={16} color="#64748b" />
               <Text className="ml-1 text-xs text-slate-500">
                 Generated {formatDate(slip.generatedAt)}
               </Text>
             </View>
-            <View className="flex-row items-center">
+            <View className="flex-row items-center flex-1 min-w-0 justify-end">
               <Ionicons name="pricetag-outline" size={16} color="#64748b" />
-              <Text className="ml-1 text-xs text-slate-500">{slip.id}</Text>
+              <Text
+                className="ml-1 text-xs text-slate-500 flex-1 text-right"
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {slip.id}
+              </Text>
             </View>
           </View>
           <View className="flex-row mt-1">
@@ -684,7 +690,11 @@ function Payroll() {
               <Text className="font-semibold text-slate-700 text-sm">
                 {formatRange(slip.period.start, slip.period.end)}
               </Text>
-              <Text className="text-xs text-slate-500 mt-0.5">
+              <Text
+                className="text-xs text-slate-500 mt-0.5"
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
                 Ref: {slip.id} • {formatDate(slip.generatedAt)}
               </Text>
             </View>

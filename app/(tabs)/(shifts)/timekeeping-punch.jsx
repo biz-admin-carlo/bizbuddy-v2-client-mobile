@@ -1702,7 +1702,7 @@ export default function TimekeepingPunch() {
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
-            paddingBottom: Math.max(insets.bottom, 20),
+            paddingBottom: modalContentBottomPadding,
           }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
@@ -1821,7 +1821,7 @@ export default function TimekeepingPunch() {
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
-            paddingBottom: Math.max(insets.bottom, 20),
+            paddingBottom: modalContentBottomPadding,
           }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
@@ -2063,7 +2063,7 @@ export default function TimekeepingPunch() {
             contentContainerStyle={{
               paddingHorizontal: 24,
               paddingTop: 4,
-              paddingBottom: Math.max(insets.bottom, 20) + 12,
+              paddingBottom: modalContentBottomPadding + 12,
             }}
           >
             <View className="items-center mb-5">
@@ -2152,7 +2152,7 @@ export default function TimekeepingPunch() {
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
-            paddingBottom: Math.max(insets.bottom, 20),
+            paddingBottom: modalContentBottomPadding,
           }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
@@ -2465,6 +2465,10 @@ export default function TimekeepingPunch() {
   };
 
   const isPunchLocationBlocked = isLocationRestricted && !isWithinPunchLocation;
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 28) : insets.bottom;
+  const mainScrollBottomPadding = Platform.OS === "android" ? androidBottomInset + 40 : 32;
+  const modalContentBottomPadding = Platform.OS === "android" ? androidBottomInset + 16 : Math.max(insets.bottom, 20);
+  const modalSheetBottomPadding = Platform.OS === "android" ? androidBottomInset + 8 : 0;
 
   return (
     <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: insets.top + 60 }}>
@@ -2478,7 +2482,7 @@ export default function TimekeepingPunch() {
       >
         <ScrollView
           className="flex-1"
-          contentContainerClassName="p-4 pb-8"
+          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: mainScrollBottomPadding }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
         >
           {/* Status cards */}
@@ -2708,7 +2712,7 @@ export default function TimekeepingPunch() {
                 borderTopRightRadius: 10,
                 minHeight: height * 0.65,
                 maxHeight: height * 0.8,
-                paddingBottom: Platform.OS === "ios" ? 0 : 20,
+                paddingBottom: modalSheetBottomPadding,
               }}
             >
               <View style={{ alignItems: "center", paddingVertical: 12 }} {...modalPanResponder.panHandlers}>

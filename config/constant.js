@@ -10,7 +10,7 @@ export const FEEDBACK_EMAIL = "bizmobiledevelopment@gmail.com";
 export const API_BASE_URL = PROD_SERVER_CARLO;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
-export const VERSION = "1.0.14";
+export const VERSION = "1.0.15";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).
