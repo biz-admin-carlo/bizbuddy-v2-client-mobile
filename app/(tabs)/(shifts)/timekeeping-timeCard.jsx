@@ -399,6 +399,7 @@ const TimekeepingTimeCard = () => {
   const [ctApproversLoading, setCtApproversLoading] = useState(false);
   const [ctReqDateModalVisible, setCtReqDateModalVisible] = useState(false);
   const [ctTimeModalVisible, setCtTimeModalVisible] = useState(false);
+  const [ctAndroidPicker, setCtAndroidPicker] = useState(null);
   const [ctTimeModalKind, setCtTimeModalKind] = useState(null);
   const ctTimeModalKindRef = useRef(null);
   const ctTimePickerSessionRef = useRef(0);
@@ -477,6 +478,7 @@ const TimekeepingTimeCard = () => {
     ctTimeModalKindRef.current = null;
     setCtTimeModalVisible(false);
     setCtTimeModalKind(null);
+    setCtAndroidPicker(null);
   };
 
   const openCtTimePicker = (kind) => {
@@ -485,7 +487,11 @@ const TimekeepingTimeCard = () => {
     ctTimeModalKindRef.current = kind;
     ctTimePickerSessionRef.current += 1;
     setCtTimeModalKind(kind);
-    setCtTimeModalVisible(true);
+    if (Platform.OS === "android") {
+      setCtAndroidPicker(kind);
+    } else {
+      setCtTimeModalVisible(true);
+    }
   };
 
   const fetchCompanyTimeZone = async (token) => {
@@ -598,56 +604,78 @@ const TimekeepingTimeCard = () => {
     setContestLog(null);
   };
 
-  const onCtReqDateModalChange = (event, selectedDate) => {
-    const toRequestedLocalDate = (dateValue) => {
-      if (!(dateValue instanceof Date) || Number.isNaN(dateValue.getTime())) {
-        return cloneJsDate(ctReqDateRef.current);
-      }
-      return cloneJsDate(
-        new Date(
-          dateValue.getFullYear(),
-          dateValue.getMonth(),
-          dateValue.getDate(),
-        ),
-      );
-    };
-    const syncClockStatesToRequestedDate = (rawSelected) => {
-      if (!(rawSelected instanceof Date) || Number.isNaN(rawSelected.getTime()))
-        return;
-      const nextReqDate = toRequestedLocalDate(rawSelected);
-      setCtReqDate(nextReqDate);
-      setCtClockInTime((prev) =>
-        cloneJsDate(combinePickerDateAndWallTime(nextReqDate, prev)),
-      );
-      setCtClockOutTime((prev) =>
-        cloneJsDate(combinePickerDateAndWallTime(nextReqDate, prev)),
-      );
-    };
-    if (Platform.OS === "android") {
-      setCtReqDateModalVisible(false);
-      if (event?.type === "set" && selectedDate)
-        syncClockStatesToRequestedDate(selectedDate);
+  const syncCtClockStatesToRequestedDate = (rawSelected) => {
+    if (!(rawSelected instanceof Date) || Number.isNaN(rawSelected.getTime())) {
       return;
     }
-    if (selectedDate) syncClockStatesToRequestedDate(selectedDate);
+    const nextReqDate = cloneJsDate(
+      new Date(
+        rawSelected.getFullYear(),
+        rawSelected.getMonth(),
+        rawSelected.getDate(),
+      ),
+    );
+    setCtReqDate(nextReqDate);
+    setCtClockInTime((prev) =>
+      cloneJsDate(combinePickerDateAndWallTime(nextReqDate, prev)),
+    );
+    setCtClockOutTime((prev) =>
+      cloneJsDate(combinePickerDateAndWallTime(nextReqDate, prev)),
+    );
   };
 
-  const onCtTimeModalChange = (event, selectedDate) => {
+  const onCtReqDateModalChange = (_event, selectedDate) => {
+    if (selectedDate) syncCtClockStatesToRequestedDate(selectedDate);
+  };
+
+  const onCtTimeModalChange = (_event, selectedDate) => {
     const kind = ctTimeModalKindRef.current;
-    const applyTimeToRequestedDate = () => {
-      if (!selectedDate || !kind) return;
-      const next = cloneJsDate(
-        combinePickerDateAndWallTime(ctReqDateRef.current, selectedDate),
-      );
-      if (kind === "out") setCtClockOutTime(next);
-      else setCtClockInTime(next);
-    };
-    if (Platform.OS === "android") {
-      if (event?.type === "set") applyTimeToRequestedDate();
-      dismissCtTimePickerSheet();
-      return;
+    if (!selectedDate || !kind) return;
+    const next = cloneJsDate(
+      combinePickerDateAndWallTime(ctReqDateRef.current, selectedDate),
+    );
+    if (kind === "out") setCtClockOutTime(next);
+    else setCtClockInTime(next);
+  };
+
+  const onCtAndroidPickerChange = (event, selectedDate) => {
+    const picker = ctAndroidPicker;
+    if (event?.type === "set" && selectedDate) {
+      if (picker === "date") {
+        syncCtClockStatesToRequestedDate(selectedDate);
+      } else if (picker === "in" || picker === "out") {
+        const next = cloneJsDate(
+          combinePickerDateAndWallTime(ctReqDateRef.current, selectedDate),
+        );
+        if (picker === "out") setCtClockOutTime(next);
+        else setCtClockInTime(next);
+      }
     }
-    applyTimeToRequestedDate();
+    if (event?.type === "set" || event?.type === "dismissed") {
+      setCtAndroidPicker(null);
+      ctTimeModalKindRef.current = null;
+      setCtTimeModalKind(null);
+    }
+  };
+
+  const renderCtAndroidPicker = () => {
+    if (Platform.OS !== "android" || !ctAndroidPicker) return null;
+    const isDate = ctAndroidPicker === "date";
+    return (
+      <DateTimePicker
+        value={
+          isDate
+            ? ctReqDate
+            : ctAndroidPicker === "out"
+              ? ctClockOutTime
+              : ctClockInTime
+        }
+        mode={isDate ? "date" : "time"}
+        is24Hour
+        display="default"
+        onChange={onCtAndroidPickerChange}
+      />
+    );
   };
 
   const effectiveCtTimeModalKind =
@@ -2376,7 +2404,11 @@ const TimekeepingTimeCard = () => {
                     keyboardShouldPersistTaps="handled"
                     nestedScrollEnabled
                     scrollEnabled={
-                      !(ctReqDateModalVisible || ctTimeModalVisible)
+                      !(
+                        ctReqDateModalVisible ||
+                        ctTimeModalVisible ||
+                        ctAndroidPicker
+                      )
                     }
                     contentContainerStyle={{
                       paddingHorizontal: 16,
@@ -2463,7 +2495,11 @@ const TimekeepingTimeCard = () => {
                       onPress={() => {
                         dismissCtTimePickerSheet();
                         setCtApproverOpen(false);
-                        setCtReqDateModalVisible(true);
+                        if (Platform.OS === "android") {
+                          setCtAndroidPicker("date");
+                        } else {
+                          setCtReqDateModalVisible(true);
+                        }
                       }}
                     >
                       <Text style={{ color: TC.text }}>
@@ -2735,7 +2771,7 @@ const TimekeepingTimeCard = () => {
             </View>
           </KeyboardAvoidingView>
 
-          {ctReqDateModalVisible ? (
+          {Platform.OS === "ios" && ctReqDateModalVisible ? (
             <View
               pointerEvents="box-none"
               style={[
@@ -2805,7 +2841,8 @@ const TimekeepingTimeCard = () => {
             </View>
           ) : null}
 
-          {ctTimeModalVisible &&
+          {Platform.OS === "ios" &&
+          ctTimeModalVisible &&
           (ctTimeModalKind === "in" || ctTimeModalKind === "out") ? (
             <View
               pointerEvents="box-none"
@@ -2952,6 +2989,8 @@ const TimekeepingTimeCard = () => {
           </View>
         </Modal>
       )}
+
+      {renderCtAndroidPicker()}
     </SafeAreaView>
   );
 };

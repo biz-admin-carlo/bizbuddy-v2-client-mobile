@@ -462,6 +462,76 @@ export const formatShortDateTimeInCompanyZone = (iso, timeZone) => {
   return `${mm}/${dd}/${cal.year}, ${formatFriendlyTime12h(wall.hour, wall.minute, wall.second)}`;
 };
 
+const isPunchLogApiInstantString = (s) =>
+  typeof s === "string" && /(?:Z|[+-]\d{2}:\d{2})$/i.test(s.trim());
+
+const resolvePunchLogDisplayTimeZone = (companyTimeZone) => {
+  if (companyTimeZone) return companyTimeZone;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return null;
+  }
+};
+
+const formatWallClockInZone = (instant, timeZone) => {
+  const cal = getDatePartsInTimeZone(instant, timeZone);
+  const wall = getWallClockPartsInTimeZone(instant, timeZone);
+  if (!cal || !wall) return null;
+  return {
+    dateLabel: formatFriendlyDateOnly(cal.year, cal.month, cal.day),
+    dateTimeLabel: `${formatFriendlyDateOnly(cal.year, cal.month, cal.day)} · ${formatFriendlyTime12h(wall.hour, wall.minute, wall.second)}`,
+  };
+};
+
+/**
+ * Display a requested punch-log field from GET my-requests.
+ * Naive strings (no Z/offset) are shown as stored wall clock.
+ * UTC/offset ISO instants are converted to company (or device) wall clock.
+ */
+export const formatRequestedPunchLogDisplay = (value, companyTimeZone) => {
+  if (value == null || value === "") return "—";
+  const s = (typeof value === "string" ? value.trim() : String(value)).trim();
+  if (!isPunchLogApiInstantString(s)) {
+    return formatNaivePunchLogDateTimeDisplay(value);
+  }
+  const instant = new Date(s);
+  if (!Number.isFinite(instant.getTime())) {
+    return formatNaivePunchLogDateTimeDisplay(value);
+  }
+  const tz = resolvePunchLogDisplayTimeZone(companyTimeZone);
+  if (!tz) return formatNaivePunchLogDateTimeDisplay(value);
+  const formatted = formatWallClockInZone(instant, tz);
+  return formatted?.dateTimeLabel ?? formatNaivePunchLogDateTimeDisplay(value);
+};
+
+/** Date-only label for request list headers (no time). */
+export const formatRequestedPunchLogDateOnlyDisplay = (
+  value,
+  companyTimeZone,
+) => {
+  if (value == null || value === "") return null;
+  const s = (typeof value === "string" ? value.trim() : String(value)).trim();
+  if (isPunchLogApiInstantString(s)) {
+    const instant = new Date(s);
+    if (!Number.isFinite(instant.getTime())) return null;
+    const tz = resolvePunchLogDisplayTimeZone(companyTimeZone);
+    if (!tz) return null;
+    const formatted = formatWallClockInZone(instant, tz);
+    return formatted?.dateLabel ?? null;
+  }
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(s)
+    ? s
+    : /^(\d{4}-\d{2}-\d{2})T/.exec(s)?.[1];
+  if (dateOnly) {
+    const [y, mo, d] = dateOnly.split("-").map(Number);
+    if (y && mo && d) return formatFriendlyDateOnly(y, mo, d);
+  }
+  const naive = formatNaivePunchLogDateTimeDisplay(value);
+  const dot = naive.indexOf(" · ");
+  return dot >= 0 ? naive.slice(0, dot) : naive;
+};
+
 /**
  * Display punch-log API datetime as naive wall clock (no IANA / UTC conversion).
  * Strips trailing Z, milliseconds, or offset if the server echoes them.
@@ -490,9 +560,9 @@ export const formatNaivePunchLogDateTimeDisplay = (value) => {
   return s || "—";
 };
 
-/** @deprecated Use formatNaivePunchLogDateTimeDisplay — punch logs are naive, not company-zone. */
-export const formatPunchLogDateTimeInCompanyZone = (value, _companyTimeZone) =>
-  formatNaivePunchLogDateTimeDisplay(value);
+/** @deprecated Use formatRequestedPunchLogDisplay for my-requests API values. */
+export const formatPunchLogDateTimeInCompanyZone = (value, companyTimeZone) =>
+  formatRequestedPunchLogDisplay(value, companyTimeZone);
 
 export const extractCompanySettingsRaw = (settingsRes) =>
   settingsRes?.data?.data ??

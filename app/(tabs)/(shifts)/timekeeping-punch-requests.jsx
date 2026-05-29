@@ -21,9 +21,16 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   API_BASE_URL,
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE,
   REQUEST_PUNCH_LOG_MY_REQUESTS_PATH,
 } from "../../../config/constant";
-import { formatNaivePunchLogDateTimeDisplay } from "../../../utils/companyTimeZoneUtils";
+import {
+  extractCompanySettingsRaw,
+  formatRequestedPunchLogDateOnlyDisplay,
+  formatRequestedPunchLogDisplay,
+  logCompanySettingsTimeZoneResult,
+  parseCompanyTimeZone,
+} from "../../../utils/companyTimeZoneUtils";
 
 const extractPunchLogRequestList = (body) => {
   if (!body) return [];
@@ -38,15 +45,6 @@ const extractPunchLogRequestList = (body) => {
   return [];
 };
 
-const datePrefixFromDateTimeString = (s) => {
-  if (typeof s !== "string") return null;
-  const t = s.trim();
-  const i = t.indexOf("T");
-  if (i === 10 && /^\d{4}-\d{2}-\d{2}$/.test(t.slice(0, 10))) return t.slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-  return null;
-};
-
 const punchRequestStatus = (row) =>
   row?.status ??
   row?.requestStatus ??
@@ -54,18 +52,14 @@ const punchRequestStatus = (row) =>
   row?.approvalStatus ??
   "—";
 
-const punchRequestLabel = (row) => {
-  if (row?.requestedDate != null && row.requestedDate !== "")
-    return formatNaivePunchLogDateTimeDisplay(String(row.requestedDate).trim());
-  if (row?.requestDate != null && row.requestDate !== "")
-    return formatNaivePunchLogDateTimeDisplay(String(row.requestDate).trim());
-  if (row?.requestedClockIn != null && row.requestedClockIn !== "") {
-    const raw = String(row.requestedClockIn).trim();
-    const prefix = datePrefixFromDateTimeString(raw);
-    if (prefix) return formatNaivePunchLogDateTimeDisplay(prefix);
-    return formatNaivePunchLogDateTimeDisplay(raw);
-  }
-  return "Request";
+const punchRequestLabel = (row, companyTimeZone) => {
+  const dateValue =
+    row?.submittedAt ?? row?.createdAt ?? row?.updatedAt;
+  const label = formatRequestedPunchLogDateOnlyDisplay(
+    dateValue,
+    companyTimeZone,
+  );
+  return label ?? "Request";
 };
 
 export default function TimekeepingPunchRequests() {
@@ -73,6 +67,10 @@ export default function TimekeepingPunchRequests() {
   const [punchRequests, setPunchRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [companyTimeZone, setCompanyTimeZone] = useState(null);
+
+  const displayTimeZone =
+    companyTimeZone ?? DEFAULT_SHIFT_DISPLAY_TIMEZONE;
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(20)).current;
@@ -88,16 +86,33 @@ export default function TimekeepingPunchRequests() {
         setPunchRequests([]);
         return;
       }
+      try {
+        const settingsRes = await axios.get(
+          `${API_BASE_URL}/api/company-settings`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        const logged = logCompanySettingsTimeZoneResult(
+          settingsRes,
+          "punch-requests:company-settings",
+        );
+        const parsed =
+          parseCompanyTimeZone(extractCompanySettingsRaw(settingsRes)) ??
+          logged;
+        setCompanyTimeZone(parsed ?? null);
+      } catch (tzErr) {
+        console.error("Fetch company timezone:", tzErr?.message);
+        setCompanyTimeZone(null);
+      }
       const res = await axios.get(`${API_BASE_URL}${REQUEST_PUNCH_LOG_MY_REQUESTS_PATH}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const list = extractPunchLogRequestList(res.data);
       const sorted = [...list].sort((a, b) => {
         const timeA = new Date(
-          a?.createdAt ?? a?.updatedAt ?? a?.requestedClockIn ?? 0,
+          a?.submittedAt ?? a?.createdAt ?? a?.updatedAt ?? 0,
         ).getTime();
         const timeB = new Date(
-          b?.createdAt ?? b?.updatedAt ?? b?.requestedClockIn ?? 0,
+          b?.submittedAt ?? b?.createdAt ?? b?.updatedAt ?? 0,
         ).getTime();
         return timeB - timeA;
       });
@@ -204,7 +219,7 @@ export default function TimekeepingPunchRequests() {
                   >
                     <View className="flex-row justify-between items-start mb-2">
                       <Text className="font-semibold text-slate-800 flex-1 pr-2">
-                        {punchRequestLabel(row)}
+                        {punchRequestLabel(row, displayTimeZone)}
                       </Text>
                       <View className="bg-white px-2 py-1 rounded-md border border-slate-200">
                         <Text className="text-xs font-medium text-orange-600 capitalize">
@@ -214,14 +229,16 @@ export default function TimekeepingPunchRequests() {
                     </View>
                     <Text className="text-xs text-slate-500 mb-1">Clock in (requested)</Text>
                     <Text className="text-sm text-slate-700 mb-2">
-                      {formatNaivePunchLogDateTimeDisplay(
+                      {formatRequestedPunchLogDisplay(
                         row?.requestedClockIn ?? row?.clockIn ?? row?.timeIn,
+                        displayTimeZone,
                       )}
                     </Text>
                     <Text className="text-xs text-slate-500 mb-1">Clock out (requested)</Text>
                     <Text className="text-sm text-slate-700 mb-2">
-                      {formatNaivePunchLogDateTimeDisplay(
+                      {formatRequestedPunchLogDisplay(
                         row?.requestedClockOut ?? row?.clockOut ?? row?.timeOut,
+                        displayTimeZone,
                       )}
                     </Text>
                     <Text className="text-xs text-slate-500 mb-1">Approver</Text>

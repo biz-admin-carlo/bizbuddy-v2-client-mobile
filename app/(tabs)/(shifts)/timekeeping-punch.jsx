@@ -24,7 +24,9 @@ import {
   TouchableWithoutFeedback,
   StyleSheet,
 } from "react-native";
-import DateTimePicker from "@react-native-community/datetimepicker";
+import DateTimePicker, {
+  DateTimePickerAndroid,
+} from "@react-native-community/datetimepicker";
 import DropDownPicker from "react-native-dropdown-picker";
 import NetInfo from "@react-native-community/netinfo";
 import axios from "axios";
@@ -360,7 +362,11 @@ export default function TimekeepingPunch() {
   const plReqDateRef = useRef(plReqDate);
   plReqDateRef.current = plReqDate;
   const [plClockInTime, setPlClockInTime] = useState(() => new Date());
+  const plClockInTimeRef = useRef(plClockInTime);
+  plClockInTimeRef.current = plClockInTime;
   const [plClockOutTime, setPlClockOutTime] = useState(() => new Date());
+  const plClockOutTimeRef = useRef(plClockOutTime);
+  plClockOutTimeRef.current = plClockOutTime;
   const [plApproverOpen, setPlApproverOpen] = useState(false);
   const [plApproverItems, setPlApproverItems] = useState([]);
   const [plApproverValue, setPlApproverValue] = useState("");
@@ -387,13 +393,68 @@ export default function TimekeepingPunch() {
     setPlTimeModalKind(null);
   };
 
+  const syncPlClockStatesToRequestedDate = (rawSelected) => {
+    if (!(rawSelected instanceof Date) || Number.isNaN(rawSelected.getTime())) {
+      return;
+    }
+    const nextReqDate = cloneJsDate(
+      new Date(
+        rawSelected.getFullYear(),
+        rawSelected.getMonth(),
+        rawSelected.getDate(),
+      ),
+    );
+    setPlReqDate(nextReqDate);
+    setPlClockInTime((prev) =>
+      cloneJsDate(combineDateAndTime(nextReqDate, prev)),
+    );
+    setPlClockOutTime((prev) =>
+      cloneJsDate(combineDateAndTime(nextReqDate, prev)),
+    );
+  };
+
+  /**
+   * Android: imperative picker — works while the punch-log RN Modal is open
+   * (declarative DateTimePicker is blocked behind Modal windows).
+   */
+  const openPlAndroidDateTimePicker = (kind) => {
+    const isDate = kind === "date";
+    const value = isDate
+      ? cloneJsDate(plReqDateRef.current)
+      : kind === "out"
+        ? cloneJsDate(plClockOutTimeRef.current)
+        : cloneJsDate(plClockInTimeRef.current);
+
+    DateTimePickerAndroid.open({
+      value,
+      mode: isDate ? "date" : "time",
+      is24Hour: true,
+      onChange: (event, selectedDate) => {
+        if (event?.type !== "set" || !selectedDate) return;
+        if (isDate) {
+          syncPlClockStatesToRequestedDate(selectedDate);
+          return;
+        }
+        const next = cloneJsDate(
+          combineDateAndTime(plReqDateRef.current, selectedDate),
+        );
+        if (kind === "out") setPlClockOutTime(next);
+        else setPlClockInTime(next);
+      },
+    });
+  };
+
   const openPlRequestTimePicker = (kind) => {
     setPlApproverOpen(false);
     setPlReqDateModalVisible(false);
     plTimeModalKindRef.current = kind;
     plTimePickerSessionRef.current += 1;
     setPlTimeModalKind(kind);
-    setPlTimeModalVisible(true);
+    if (Platform.OS === "android") {
+      openPlAndroidDateTimePicker(kind);
+    } else {
+      setPlTimeModalVisible(true);
+    }
   };
 
   /** From GET /api/company-settings (getSettings) — loaded first on this screen. */
@@ -1424,64 +1485,17 @@ export default function TimekeepingPunch() {
   };
 
   const onPlReqDateModalChange = (event, selectedDate) => {
-    const toRequestedLocalDate = (dateValue) => {
-      if (!(dateValue instanceof Date) || Number.isNaN(dateValue.getTime())) {
-        return cloneJsDate(plReqDateRef.current);
-      }
-      return cloneJsDate(
-        new Date(
-          dateValue.getFullYear(),
-          dateValue.getMonth(),
-          dateValue.getDate(),
-        ),
-      );
-    };
-
-    /** Keep clock-in/out wall-clock times but align their calendar day to the requested date. */
-    const syncClockStatesToRequestedDate = (rawSelected) => {
-      if (
-        !(rawSelected instanceof Date) ||
-        Number.isNaN(rawSelected.getTime())
-      ) {
-        return;
-      }
-      const nextReqDate = toRequestedLocalDate(rawSelected);
-      setPlReqDate(nextReqDate);
-      setPlClockInTime((prev) =>
-        cloneJsDate(combineDateAndTime(nextReqDate, prev)),
-      );
-      setPlClockOutTime((prev) =>
-        cloneJsDate(combineDateAndTime(nextReqDate, prev)),
-      );
-    };
-
-    if (Platform.OS === "android") {
-      setPlReqDateModalVisible(false);
-      if (event?.type === "set" && selectedDate) {
-        syncClockStatesToRequestedDate(selectedDate);
-      }
-      return;
-    }
-    if (selectedDate) syncClockStatesToRequestedDate(selectedDate);
+    if (selectedDate) syncPlClockStatesToRequestedDate(selectedDate);
   };
 
-  const onPlTimeModalChange = (event, selectedDate) => {
+  const onPlTimeModalChange = (_event, selectedDate) => {
     const kind = plTimeModalKindRef.current;
-    /** Time wheels often return today's calendar date — lock wall-clock to the selected punch-log date. */
-    const applyTimeToRequestedDate = () => {
-      if (!selectedDate || !kind) return;
-      const next = cloneJsDate(
-        combineDateAndTime(plReqDateRef.current, selectedDate),
-      );
-      if (kind === "out") setPlClockOutTime(next);
-      else setPlClockInTime(next);
-    };
-    if (Platform.OS === "android") {
-      if (event?.type === "set") applyTimeToRequestedDate();
-      dismissPlTimePickerSheet();
-      return;
-    }
-    applyTimeToRequestedDate();
+    if (!selectedDate || !kind) return;
+    const next = cloneJsDate(
+      combineDateAndTime(plReqDateRef.current, selectedDate),
+    );
+    if (kind === "out") setPlClockOutTime(next);
+    else setPlClockInTime(next);
   };
 
   /** Prefer ref kind while sheet is open so value tracks clock-out vs clock-in even if state batches oddly. */
@@ -3509,7 +3523,11 @@ export default function TimekeepingPunch() {
                       onPress={() => {
                         dismissPlTimePickerSheet();
                         setPlApproverOpen(false);
-                        setPlReqDateModalVisible(true);
+                        if (Platform.OS === "android") {
+                          openPlAndroidDateTimePicker("date");
+                        } else {
+                          setPlReqDateModalVisible(true);
+                        }
                       }}
                     >
                       <Text className="text-slate-800">
@@ -3686,7 +3704,7 @@ export default function TimekeepingPunch() {
             </View>
           </KeyboardAvoidingView>
 
-          {plReqDateModalVisible ? (
+          {Platform.OS === "ios" && plReqDateModalVisible ? (
             <View
               pointerEvents="box-none"
               style={[
@@ -3743,7 +3761,8 @@ export default function TimekeepingPunch() {
             </View>
           ) : null}
 
-          {plTimeModalVisible &&
+          {Platform.OS === "ios" &&
+          plTimeModalVisible &&
           (plTimeModalKind === "in" || plTimeModalKind === "out") ? (
             <View
               pointerEvents="box-none"
@@ -3876,6 +3895,7 @@ export default function TimekeepingPunch() {
           </View>
         </Modal>
       )}
+
     </SafeAreaView>
   );
 }

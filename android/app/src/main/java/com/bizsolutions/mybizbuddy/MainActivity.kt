@@ -1,7 +1,10 @@
 package com.bizsolutions.mybizbuddy
 
+import android.content.Context
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.util.DisplayMetrics
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -11,6 +14,24 @@ import com.facebook.react.defaults.DefaultReactActivityDelegate
 import expo.modules.ReactActivityDelegateWrapper
 
 class MainActivity : ReactActivity() {
+  companion object {
+    private const val MAX_FONT_SCALE = 1.2f
+  }
+
+  override fun attachBaseContext(newBase: Context) {
+    val config = Configuration(newBase.resources.configuration)
+    if (config.fontScale > MAX_FONT_SCALE) {
+      config.fontScale = MAX_FONT_SCALE
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      val defaultDensity = DisplayMetrics.DENSITY_DEVICE_STABLE
+      if (config.densityDpi in 1 until defaultDensity) {
+        config.densityDpi = defaultDensity
+      }
+    }
+    super.attachBaseContext(newBase.createConfigurationContext(config))
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     // Set the theme to AppTheme BEFORE onCreate to support
     // coloring the background, status bar, and navigation bar.

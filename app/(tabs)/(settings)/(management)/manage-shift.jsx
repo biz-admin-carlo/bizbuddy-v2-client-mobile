@@ -50,9 +50,11 @@ const ManageShift = () => {
   const [endTime, setEndTime] = useState(new Date());
   const [differentialMultiplier, setDifferentialMultiplier] = useState("1.0");
 
-  // Inline time picker visibility toggles
+  // Inline time picker visibility toggles (iOS spinner in sheet)
   const [showStartTimePicker, setShowStartTimePicker] = useState(false);
   const [showEndTimePicker, setShowEndTimePicker] = useState(false);
+  /** Android: native time dialog — render outside bottom sheet ("start" | "end"). */
+  const [androidTimePicker, setAndroidTimePicker] = useState(null);
 
   // Modal state
   const [modalVisible, setModalVisible] = useState(false);
@@ -181,6 +183,7 @@ const ManageShift = () => {
       // Hide inline pickers when closing the modal
       setShowStartTimePicker(false);
       setShowEndTimePicker(false);
+      setAndroidTimePicker(null);
     });
   };
 
@@ -191,6 +194,7 @@ const ManageShift = () => {
     setDifferentialMultiplier("1.0");
     setShowStartTimePicker(false);
     setShowEndTimePicker(false);
+    setAndroidTimePicker(null);
   };
 
   const handleEditShift = () => {
@@ -386,13 +390,21 @@ const ManageShift = () => {
               Start Time <Text className="text-red-500">*</Text>
             </Text>
             <TouchableOpacity
-              onPress={() => setShowStartTimePicker(!showStartTimePicker)}
+              onPress={() => {
+                if (Platform.OS === "android") {
+                  setShowEndTimePicker(false);
+                  setAndroidTimePicker("start");
+                } else {
+                  setShowEndTimePicker(false);
+                  setShowStartTimePicker(!showStartTimePicker);
+                }
+              }}
               className="flex-row items-center bg-slate-50 rounded-lg px-4 py-3.5 border border-slate-100"
             >
               <Ionicons name="time-outline" size={18} color="#64748b" />
               <Text className="flex-1 ml-2 text-slate-700">{startTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
             </TouchableOpacity>
-            {showStartTimePicker && (
+            {Platform.OS === "ios" && showStartTimePicker && (
               <View className="mt-2">
                 <DateTimePicker
                   value={startTime}
@@ -400,7 +412,7 @@ const ManageShift = () => {
                   is24Hour={false}
                   textColor="#334155"
                   display="spinner"
-                  onChange={(event, selectedDate) => {
+                  onChange={(_event, selectedDate) => {
                     if (selectedDate) setStartTime(selectedDate);
                   }}
                   style={{ width: "100%" }}
@@ -415,13 +427,21 @@ const ManageShift = () => {
               End Time <Text className="text-red-500">*</Text>
             </Text>
             <TouchableOpacity
-              onPress={() => setShowEndTimePicker(!showEndTimePicker)}
+              onPress={() => {
+                if (Platform.OS === "android") {
+                  setShowStartTimePicker(false);
+                  setAndroidTimePicker("end");
+                } else {
+                  setShowStartTimePicker(false);
+                  setShowEndTimePicker(!showEndTimePicker);
+                }
+              }}
               className="flex-row items-center bg-slate-50 rounded-lg px-4 py-3.5 border border-slate-100"
             >
               <Ionicons name="time-outline" size={18} color="#64748b" />
               <Text className="flex-1 ml-2 text-slate-700">{endTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</Text>
             </TouchableOpacity>
-            {showEndTimePicker && (
+            {Platform.OS === "ios" && showEndTimePicker && (
               <View className="mt-2">
                 <DateTimePicker
                   value={endTime}
@@ -429,7 +449,7 @@ const ManageShift = () => {
                   is24Hour={false}
                   textColor="#334155"
                   display="spinner"
-                  onChange={(event, selectedDate) => {
+                  onChange={(_event, selectedDate) => {
                     if (selectedDate) setEndTime(selectedDate);
                   }}
                   style={{ width: "100%" }}
@@ -604,6 +624,22 @@ const ManageShift = () => {
           </View>
         )}
       </Animated.View>
+
+      {Platform.OS === "android" && androidTimePicker ? (
+        <DateTimePicker
+          value={androidTimePicker === "start" ? startTime : endTime}
+          mode="time"
+          is24Hour={false}
+          display="default"
+          onChange={(event, selectedDate) => {
+            if (event?.type === "set" && selectedDate) {
+              if (androidTimePicker === "start") setStartTime(selectedDate);
+              else setEndTime(selectedDate);
+            }
+            setAndroidTimePicker(null);
+          }}
+        />
+      ) : null}
     </SafeAreaView>
   );
 };

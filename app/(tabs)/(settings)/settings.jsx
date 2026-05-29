@@ -742,11 +742,45 @@ const Settings = () => {
             transform: [{ translateY: slideAnim }],
           }}
         >
-          {/* Header */}
-          <View
-            className="px-5 py-6 border-b"
-            style={{ borderBottomColor: "#e2e8f0", borderBottomWidth: 1 }}
-          >
+          {loading ? (
+            <View className="flex-1 justify-center items-center">
+              <ActivityIndicator size="large" color="#94a3b8" />
+              <Text className="mt-4 text-slate-400">Loading profile...</Text>
+            </View>
+          ) : error ? (
+            <View className="flex-1 justify-center items-center p-5">
+              <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
+              <Text className="text-red-700 mt-4 mb-6 text-center">
+                {error}
+              </Text>
+              <Animated.View
+                style={{ transform: [{ scale: retryButtonScale }] }}
+              >
+                <TouchableOpacity
+                  onPress={() => {
+                    animateButtonPress(retryButtonScale);
+                    setTimeout(fetchProfile, 100);
+                  }}
+                  className="bg-[#f97316] px-6 py-3 rounded-[12px]"
+                >
+                  <Text className="text-[#ffffff] font-semibold text-[16px]">
+                    Try Again
+                  </Text>
+                </TouchableOpacity>
+              </Animated.View>
+            </View>
+          ) : (
+            <ScrollView
+              className="flex-1"
+              contentContainerStyle={{ paddingBottom: 100 }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Header */}
+              <View
+                className="px-5 py-6 border-b"
+                style={{ borderBottomColor: "#e2e8f0", borderBottomWidth: 1 }}
+              >
             <View className="flex-row items-center justify-between mb-4">
               <Text className="text-[24px] font-bold text-[#1e293b]">
                 Settings
@@ -1035,74 +1069,44 @@ const Settings = () => {
                 </Animated.View>
               </View>
             )}
-          </View>
+              </View>
 
-          {/* Main Content Area */}
-          {loading ? (
-            <View className="flex-1 justify-center items-center">
-              <ActivityIndicator size="large" color="#94a3b8" />
-              <Text className="mt-4 text-slate-400">Loading profile...</Text>
-            </View>
-          ) : error ? (
-            <View className="flex-1 justify-center items-center p-5">
-              <Ionicons name="alert-circle-outline" size={48} color="#ef4444" />
-              <Text className="text-red-700 mt-4 mb-6 text-center">
-                {error}
-              </Text>
-              <Animated.View
-                style={{ transform: [{ scale: retryButtonScale }] }}
-              >
-                <TouchableOpacity
-                  onPress={() => {
-                    animateButtonPress(retryButtonScale);
-                    setTimeout(fetchProfile, 100);
-                  }}
-                  className="bg-[#f97316] px-6 py-3 rounded-[12px]"
-                >
-                  <Text className="text-[#ffffff] font-semibold text-[16px]">
-                    Try Again
+              {filteredOptions.length === 0 ? (
+                <View className="items-center p-5 py-10">
+                  <Image
+                    source={require("../../../assets/images/icon.png")}
+                    className="w-20 h-20 rounded-[16px] mb-6"
+                    resizeMode="contain"
+                  />
+                  <Text className="text-[18px] font-[500] mb-2 text-[#1e293b]">
+                    No Administrative Access
                   </Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </View>
-          ) : filteredOptions.length === 0 ? (
-            <View className="flex-1 justify-center items-center p-5">
-              <Image
-                source={require("../../../assets/images/icon.png")}
-                className="w-20 h-20 rounded-[16px] mb-6"
-                resizeMode="contain"
-              />
-              <Text className="text-[18px] font-[500] mb-2 text-[#1e293b]">
-                No Administrative Access
-              </Text>
-              <Text className="text-center text-[#64748b]">
-                {userRole === "employee"
-                  ? "You don't have access to administrative features."
-                  : userRole === "supervisor"
-                    ? "Only employee management is available for supervisors."
-                    : "No options available for your role."}
-              </Text>
-            </View>
-          ) : (
-            <ScrollView
-              className="flex-1 px-5 pt-4"
-              contentContainerStyle={{ paddingBottom: 30 }}
-              showsVerticalScrollIndicator={false}
-            >
-              {Object.keys(groupedOptions).map((groupName, groupIndex) => (
-                <View key={groupIndex} className="mb-6">
-                  <Text className="text-sm font-medium mb-3 text-slate-500 uppercase">
-                    {groupName}
+                  <Text className="text-center text-[#64748b]">
+                    {userRole === "employee"
+                      ? "You don't have access to administrative features."
+                      : userRole === "supervisor"
+                        ? "Only employee management is available for supervisors."
+                        : "No options available for your role."}
                   </Text>
-                  {groupedOptions[groupName].map((option, index) => (
-                    <OptionRow
-                      key={index}
-                      option={option}
-                      index={`${groupName}-${index}`}
-                    />
+                </View>
+              ) : (
+                <View className="px-5 pt-4">
+                  {Object.keys(groupedOptions).map((groupName, groupIndex) => (
+                    <View key={groupIndex} className="mb-6">
+                      <Text className="text-sm font-medium mb-3 text-slate-500 uppercase">
+                        {groupName}
+                      </Text>
+                      {groupedOptions[groupName].map((option, index) => (
+                        <OptionRow
+                          key={index}
+                          option={option}
+                          index={`${groupName}-${index}`}
+                        />
+                      ))}
+                    </View>
                   ))}
                 </View>
-              ))}
+              )}
             </ScrollView>
           )}
         </Animated.View>

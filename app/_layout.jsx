@@ -1,4 +1,5 @@
 // app/_layout.jsx
+import "../utils/limitFontScaling";
 import React, { useEffect, useRef, useState } from "react";
 import { Stack } from "expo-router";
 import {
