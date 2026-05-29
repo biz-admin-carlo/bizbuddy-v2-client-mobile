@@ -20,7 +20,12 @@ import {
   TextInput,
   KeyboardAvoidingView,
   AppState,
+  Keyboard,
+  TouchableWithoutFeedback,
+  StyleSheet,
 } from "react-native";
+import DateTimePicker from "@react-native-community/datetimepicker";
+import DropDownPicker from "react-native-dropdown-picker";
 import NetInfo from "@react-native-community/netinfo";
 import axios from "axios";
 import * as SecureStore from "expo-secure-store";
@@ -35,6 +40,7 @@ import {
   CLOCK_OUT_DEVIATION_COMPANY_IDS,
   DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL,
   DRIVER_AIDE_JOB_TITLES,
+  REQUEST_PUNCH_LOG_SUBMIT_PATH,
 } from "../../../config/constant";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -43,6 +49,15 @@ import {
   findSurroundingShiftBoundaries,
   getClockOutScheduleSummary,
 } from "../../../utils/timekeepingShiftUtils";
+import {
+  parseCompanyTimeZone,
+  formatCompanyCalendarDateString,
+  formatNaiveLocalDateTimeFromPickers,
+  formatNaiveLocalClockOutFromPickers,
+  buildLocalDateFromPickers,
+  getDefaultPunchLogPickerDatesLocal,
+  logCompanySettingsTimeZoneResult,
+} from "../../../utils/companyTimeZoneUtils";
 
 const PENDING_ACTIONS_KEY = "pendingPunchActions";
 const CLOCK_OUT_DEVIATION_RESPONSES_KEY = "clockOutDeviationResponses";
@@ -56,6 +71,7 @@ const devLog = (...args) => {
 
 /**
  * getSettings / GET company-settings fields used by punch:
+ * - timezone (GET /api/company-settings data) — IANA zone for shift/deviation logic
  * - shiftAssignmentWindowMinutes — assignment window (minutes)
  * - driverAideThresholdMinutes — DayCare driver/aide early/late threshold (minutes)
  * Legacy keys kept as fallbacks.
@@ -65,6 +81,7 @@ const parseCompanySettingsPunchFields = (raw) => {
     return {
       shiftAssignmentWindowMinutes: null,
       driverAideThresholdMinutes: null,
+      timeZone: null,
     };
   }
   const readNum = (...keys) => {
@@ -84,7 +101,7 @@ const parseCompanySettingsPunchFields = (raw) => {
       "ShiftAssignmentWindowMinutes",
       "WindowMinutes",
       "windowMinutes",
-      "window_minutes"
+      "window_minutes",
     ),
     driverAideThresholdMinutes: readNum(
       "driverAideThresholdMinutes",
@@ -92,8 +109,9 @@ const parseCompanySettingsPunchFields = (raw) => {
       "DriverAideThresholdMinutes",
       "ThresholdMinutes",
       "thresholdMinutes",
-      "threshold_minutes"
+      "threshold_minutes",
     ),
+    timeZone: parseCompanyTimeZone(raw),
   };
 };
 
@@ -139,14 +157,14 @@ const clearPendingActions = async () => {
 const storeClockOutDeviationResponse = async (entry) => {
   try {
     const existing = await AsyncStorage.getItem(
-      CLOCK_OUT_DEVIATION_RESPONSES_KEY
+      CLOCK_OUT_DEVIATION_RESPONSES_KEY,
     );
     const parsed = existing ? JSON.parse(existing) : [];
     const next = Array.isArray(parsed) ? parsed : [];
     next.push(entry);
     await AsyncStorage.setItem(
       CLOCK_OUT_DEVIATION_RESPONSES_KEY,
-      JSON.stringify(next)
+      JSON.stringify(next),
     );
   } catch {}
 };
@@ -222,7 +240,7 @@ const normalizeAssignedLocation = (rawLocation) => {
         loc.radiusMeters ??
         loc.radius_meters ??
         loc.allowedRadius ??
-        loc.allowedRadiusMeters
+        loc.allowedRadiusMeters,
     ) ?? 500;
 
   return {
@@ -237,6 +255,29 @@ const normalizeAssignedLocation = (rawLocation) => {
     radius,
   };
 };
+
+const combineDateAndTime = (date, time) => {
+  const combined = new Date(date);
+  combined.setHours(time.getHours());
+  combined.setMinutes(time.getMinutes());
+  combined.setSeconds(time.getSeconds());
+  combined.setMilliseconds(time.getMilliseconds());
+  return combined;
+};
+
+/** Native UIDatePicker may mutate the `value` Date in place — never reuse one instance for multiple pickers or state fields. */
+const cloneJsDate = (d) =>
+  d instanceof Date && Number.isFinite(d.getTime())
+    ? new Date(d.getTime())
+    : new Date();
+
+/**
+ * iOS `UIDatePicker` in time mode still ties `value` to a calendar day. Using the requested punch
+ * date (often in the past) makes the wheel behave like “today on that old day” and caps selectable
+ * times relative to the clock (e.g. nothing after ~8 AM). Anchor to a fixed local calendar date so
+ * the full day is scrollable; `onChange` still merges hours onto `plReqDate` via `combineDateAndTime`.
+ */
+const IOS_PL_REQ_LOG_TIME_PICKER_ANCHOR_DATE = new Date(2000, 0, 1);
 
 export default function TimekeepingPunch() {
   const insets = useSafeAreaInsets();
@@ -269,7 +310,8 @@ export default function TimekeepingPunch() {
   const [isLocationRestricted, setIsLocationRestricted] = useState(false);
   const [assignedLocations, setAssignedLocations] = useState([]);
   const [isWithinPunchLocation, setIsWithinPunchLocation] = useState(true);
-  const [punchLocationErrorMessage, setPunchLocationErrorMessage] = useState("");
+  const [punchLocationErrorMessage, setPunchLocationErrorMessage] =
+    useState("");
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -284,19 +326,25 @@ export default function TimekeepingPunch() {
   // Bottom-sheet modals
   const [networkModalVisible, setNetworkModalVisible] = useState(false);
   const [locationModalVisible, setLocationModalVisible] = useState(false);
-  const [subscriptionModalVisible, setSubscriptionModalVisible] = useState(false);
+  const [subscriptionModalVisible, setSubscriptionModalVisible] =
+    useState(false);
   const [clockOutDeviationModalVisible, setClockOutDeviationModalVisible] =
     useState(false);
-  const [clockOutDeviationDetails, setClockOutDeviationDetails] = useState(null);
+  const [clockOutDeviationDetails, setClockOutDeviationDetails] =
+    useState(null);
   // When clock-out is deferred for deviation modal: payload to send when user picks Regular or Driver/Aide
   const [pendingClockOutPayload, setPendingClockOutPayload] = useState(null);
   // Clock-in early modal (for allowed company, non–driver/aide): early clock-in vs driverAideThresholdMinutes from /api/company-settings
-  const [clockInEarlyModalVisible, setClockInEarlyModalVisible] = useState(false);
+  const [clockInEarlyModalVisible, setClockInEarlyModalVisible] =
+    useState(false);
   const [clockInEarlyDetails, setClockInEarlyDetails] = useState(null);
   const [pendingClockInPayload, setPendingClockInPayload] = useState(null);
-  const [noScheduledShiftClockInModalVisible, setNoScheduledShiftClockInModalVisible] =
-    useState(false);
-  const [noScheduledShiftClockInNotes, setNoScheduledShiftClockInNotes] = useState("");
+  const [
+    noScheduledShiftClockInModalVisible,
+    setNoScheduledShiftClockInModalVisible,
+  ] = useState(false);
+  const [noScheduledShiftClockInNotes, setNoScheduledShiftClockInNotes] =
+    useState("");
   const [clockOutConfirmModalVisible, setClockOutConfirmModalVisible] =
     useState(false);
   const [clockOutConfirmSchedule, setClockOutConfirmSchedule] = useState(null);
@@ -305,9 +353,54 @@ export default function TimekeepingPunch() {
   const pendingClockOutAfterConfirmRef = useRef(null);
   const executeOnlineClockOutRef = useRef(null);
 
+  // Request punch log (correction / missing punch) modal
+  const [punchLogRequestModalVisible, setPunchLogRequestModalVisible] =
+    useState(false);
+  const [plReqDate, setPlReqDate] = useState(() => new Date());
+  const plReqDateRef = useRef(plReqDate);
+  plReqDateRef.current = plReqDate;
+  const [plClockInTime, setPlClockInTime] = useState(() => new Date());
+  const [plClockOutTime, setPlClockOutTime] = useState(() => new Date());
+  const [plApproverOpen, setPlApproverOpen] = useState(false);
+  const [plApproverItems, setPlApproverItems] = useState([]);
+  const [plApproverValue, setPlApproverValue] = useState("");
+  const [plReason, setPlReason] = useState("");
+  const [plDescription, setPlDescription] = useState("");
+  const [plSubmitting, setPlSubmitting] = useState(false);
+  const [plApproversLoading, setPlApproversLoading] = useState(false);
+  const [plReqDateModalVisible, setPlReqDateModalVisible] = useState(false);
+  const [plTimeModalVisible, setPlTimeModalVisible] = useState(false);
+  /** "in" | "out" — clock times use calendar day of requested date (out may roll to next day if earlier than in). */
+  const [plTimeModalKind, setPlTimeModalKind] = useState(null);
+  /** Ref mirrors kind so Android native picker callbacks always see the correct target (in vs out). */
+  const plTimeModalKindRef = useRef(null);
+  /** Bumps when opening time picker so iOS remounts UIDatePicker (avoids stale wheel / wrong callback). */
+  const plTimePickerSessionRef = useRef(0);
+
+  /** Clock-out applies to the calendar day after the requested date (overnight shift). */
+  const [plClockOutCrossesNextDay, setPlClockOutCrossesNextDay] =
+    useState(false);
+
+  const dismissPlTimePickerSheet = () => {
+    plTimeModalKindRef.current = null;
+    setPlTimeModalVisible(false);
+    setPlTimeModalKind(null);
+  };
+
+  const openPlRequestTimePicker = (kind) => {
+    setPlApproverOpen(false);
+    setPlReqDateModalVisible(false);
+    plTimeModalKindRef.current = kind;
+    plTimePickerSessionRef.current += 1;
+    setPlTimeModalKind(kind);
+    setPlTimeModalVisible(true);
+  };
+
   /** From GET /api/company-settings (getSettings) — loaded first on this screen. */
   const companySettingsShiftAssignmentWindowMinutesRef = useRef(null);
   const companySettingsDriverAideThresholdMinutesRef = useRef(null);
+  /** IANA zone from GET /api/company-settings → data.timezone */
+  const companySettingsTimeZoneRef = useRef(null);
   /** From GET /api/employment-details/me — used for time-in / time-out (driver vs non-driver). */
   const employmentDetailsIsDriverRef = useRef(null);
   /** Time In/Out stays disabled until company-settings and employment-details (first load) finish. */
@@ -349,12 +442,15 @@ export default function TimekeepingPunch() {
           setSessionElapsed(Math.floor((Date.now() - ti.getTime()) / 1000));
           if (Array.isArray(activeLog.coffeeBreaks)) {
             setCoffeeBreakCount(activeLog.coffeeBreaks.length);
-            const lastCoffee = activeLog.coffeeBreaks[activeLog.coffeeBreaks.length - 1];
+            const lastCoffee =
+              activeLog.coffeeBreaks[activeLog.coffeeBreaks.length - 1];
             if (lastCoffee && !lastCoffee.end) {
               setIsCoffeeBreakActive(true);
               const cStart = new Date(lastCoffee.start);
               setCoffeeBreakStartTime(cStart);
-              setTotalCoffeeTime(Math.floor((Date.now() - cStart.getTime()) / 1000));
+              setTotalCoffeeTime(
+                Math.floor((Date.now() - cStart.getTime()) / 1000),
+              );
             } else {
               setIsCoffeeBreakActive(false);
               setCoffeeBreakCount(0);
@@ -367,11 +463,17 @@ export default function TimekeepingPunch() {
             setCoffeeBreakStartTime(null);
             setTotalCoffeeTime(0);
           }
-          if (activeLog.lunchBreak && activeLog.lunchBreak.start && !activeLog.lunchBreak.end) {
+          if (
+            activeLog.lunchBreak &&
+            activeLog.lunchBreak.start &&
+            !activeLog.lunchBreak.end
+          ) {
             setIsLunchBreakActive(true);
             const lStart = new Date(activeLog.lunchBreak.start);
             setLunchBreakStartTime(lStart);
-            setTotalLunchTime(Math.floor((Date.now() - lStart.getTime()) / 1000));
+            setTotalLunchTime(
+              Math.floor((Date.now() - lStart.getTime()) / 1000),
+            );
           } else {
             setIsLunchBreakActive(false);
             setLunchBreakStartTime(null);
@@ -387,7 +489,7 @@ export default function TimekeepingPunch() {
   useFocusEffect(
     useCallback(() => {
       fetchAndSyncActiveTimelog();
-    }, [fetchAndSyncActiveTimelog])
+    }, [fetchAndSyncActiveTimelog]),
   );
 
   useEffect(() => {
@@ -409,11 +511,15 @@ export default function TimekeepingPunch() {
           setSessionElapsed(elapsed);
         }
         if (isCoffeeBreakActive && coffeeBreakStartTime) {
-          const coffeeElapsed = Math.floor((Date.now() - coffeeBreakStartTime.getTime()) / 1000);
+          const coffeeElapsed = Math.floor(
+            (Date.now() - coffeeBreakStartTime.getTime()) / 1000,
+          );
           setTotalCoffeeTime(coffeeElapsed);
         }
         if (isLunchBreakActive && lunchBreakStartTime) {
-          const lunchElapsed = Math.floor((Date.now() - lunchBreakStartTime.getTime()) / 1000);
+          const lunchElapsed = Math.floor(
+            (Date.now() - lunchBreakStartTime.getTime()) / 1000,
+          );
           setTotalLunchTime(lunchElapsed);
         }
       }, 1000);
@@ -424,7 +530,14 @@ export default function TimekeepingPunch() {
     return () => {
       if (masterTimerRef.current) clearInterval(masterTimerRef.current);
     };
-  }, [isTimeIn, punchTime, isCoffeeBreakActive, coffeeBreakStartTime, isLunchBreakActive, lunchBreakStartTime]);
+  }, [
+    isTimeIn,
+    punchTime,
+    isCoffeeBreakActive,
+    coffeeBreakStartTime,
+    isLunchBreakActive,
+    lunchBreakStartTime,
+  ]);
 
   const fetchCompanySettingsForPunch = useCallback(async () => {
     try {
@@ -435,37 +548,46 @@ export default function TimekeepingPunch() {
       }
       const settingsRes = await axios.get(
         `${API_BASE_URL}/api/company-settings`,
-        { headers: { Authorization: `Bearer ${token}` } }
+        { headers: { Authorization: `Bearer ${token}` } },
       );
+      logCompanySettingsTimeZoneResult(settingsRes, "punch:company-settings");
       const raw =
         settingsRes?.data?.data ??
         settingsRes?.data?.settings ??
         settingsRes?.data ??
         {};
-      const { shiftAssignmentWindowMinutes, driverAideThresholdMinutes } =
-        parseCompanySettingsPunchFields(raw);
+      const {
+        shiftAssignmentWindowMinutes,
+        driverAideThresholdMinutes,
+        timeZone,
+      } = parseCompanySettingsPunchFields(raw);
 
       devLog("company-settings fetched", {
         shiftAssignmentWindowMinutes,
         driverAideThresholdMinutes,
+        timeZone,
         httpStatus: settingsRes?.status,
+        responseData: settingsRes?.data,
       });
 
       companySettingsShiftAssignmentWindowMinutesRef.current =
         shiftAssignmentWindowMinutes;
       companySettingsDriverAideThresholdMinutesRef.current =
         driverAideThresholdMinutes;
+      companySettingsTimeZoneRef.current = timeZone;
 
       devLog("company-settings stored (refs)", {
         shiftAssignmentWindowMinutes:
           companySettingsShiftAssignmentWindowMinutesRef.current,
         driverAideThresholdMinutes:
           companySettingsDriverAideThresholdMinutesRef.current,
+        timeZone: companySettingsTimeZoneRef.current,
       });
     } catch (e) {
       devLog("company-settings fetch failed", e?.message ?? String(e));
       companySettingsShiftAssignmentWindowMinutesRef.current = null;
       companySettingsDriverAideThresholdMinutesRef.current = null;
+      companySettingsTimeZoneRef.current = null;
     }
   }, []);
 
@@ -553,9 +675,7 @@ export default function TimekeepingPunch() {
 
     if (!locationEnabled) {
       setIsWithinPunchLocation(false);
-      setPunchLocationErrorMessage(
-        "Enable location services to punch in/out."
-      );
+      setPunchLocationErrorMessage("Enable location services to punch in/out.");
       return;
     }
 
@@ -584,7 +704,7 @@ export default function TimekeepingPunch() {
           currentLat,
           currentLng,
           loc.latitude,
-          loc.longitude
+          loc.longitude,
         );
         if (!nearest || metersAway < nearest.metersAway) {
           nearest = { ...loc, metersAway };
@@ -603,7 +723,7 @@ export default function TimekeepingPunch() {
         const roundedRadius = Math.round(nearest?.radius ?? 0);
         setIsWithinPunchLocation(false);
         setPunchLocationErrorMessage(
-          `You are outside the punch area (${roundedDistance}m away; allowed ${roundedRadius}m).`
+          `You are outside the punch area (${roundedDistance}m away; allowed ${roundedRadius}m).`,
         );
       }
     } catch (error) {
@@ -647,7 +767,7 @@ export default function TimekeepingPunch() {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   // Animate "On the Clock" if isTimeIn
@@ -665,7 +785,7 @@ export default function TimekeepingPunch() {
             duration: 1000,
             useNativeDriver: true,
           }),
-        ])
+        ]),
       ).start();
     } else {
       pulseAnim.setValue(1);
@@ -710,7 +830,9 @@ export default function TimekeepingPunch() {
             setIsTimeIn(true);
             const actualIn = new Date(data.data.timeIn);
             setPunchTime(actualIn);
-            setSessionElapsed(Math.floor((Date.now() - actualIn.getTime()) / 1000));
+            setSessionElapsed(
+              Math.floor((Date.now() - actualIn.getTime()) / 1000),
+            );
           } else if (data.type === "timeOut") {
             resetAllStates();
           } else if (data.type === "coffeeBreakStart") {
@@ -789,8 +911,17 @@ export default function TimekeepingPunch() {
   // Animate button press
   const animateButtonPress = (scaleRef) => {
     Animated.sequence([
-      Animated.timing(scaleRef, { toValue: 0.95, duration: 70, useNativeDriver: true }),
-      Animated.spring(scaleRef, { toValue: 1, friction: 3, tension: 40, useNativeDriver: true }),
+      Animated.timing(scaleRef, {
+        toValue: 0.95,
+        duration: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleRef, {
+        toValue: 1,
+        friction: 3,
+        tension: 40,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
 
@@ -823,7 +954,10 @@ export default function TimekeepingPunch() {
     try {
       if (!companySettingsFetched) return;
       if (isLocationRestricted && !isWithinPunchLocation) {
-        Alert.alert("Outside Punch Location", "You must be inside your assigned punch location to continue.");
+        Alert.alert(
+          "Outside Punch Location",
+          "You must be inside your assigned punch location to continue.",
+        );
         return;
       }
       if (isTimeIn && (isCoffeeBreakActive || isLunchBreakActive)) {
@@ -836,14 +970,20 @@ export default function TimekeepingPunch() {
       // If user is location restricted, we DO NOT allow offline punching.
       if (isLocationRestricted && !wifiConnected) {
         setLoading(false);
-        Alert.alert("Cannot Punch Offline", "You are location-restricted and must be online with location enabled to Time In or Time Out.");
+        Alert.alert(
+          "Cannot Punch Offline",
+          "You are location-restricted and must be online with location enabled to Time In or Time Out.",
+        );
         return;
       }
 
       // If offline + not pro => block
       if (!wifiConnected && (subscriptionPlan || "").toLowerCase() !== "pro") {
         setLoading(false);
-        Alert.alert("Offline Punch Not Allowed", "Your plan requires internet connection for punching.");
+        Alert.alert(
+          "Offline Punch Not Allowed",
+          "Your plan requires internet connection for punching.",
+        );
         return;
       }
 
@@ -858,7 +998,10 @@ export default function TimekeepingPunch() {
       // If location is restricted but location is missing => block
       if (isLocationRestricted && (!location.latitude || !location.longitude)) {
         setLoading(false);
-        Alert.alert("Location Required", "Location services are disabled. Please enable location to Time In/Out.");
+        Alert.alert(
+          "Location Required",
+          "Location services are disabled. Please enable location to Time In/Out.",
+        );
         return;
       }
 
@@ -876,12 +1019,15 @@ export default function TimekeepingPunch() {
           ? { ...payload, punchType: "DRIVER_AIDE" }
           : payload;
       if (!isTimeIn && isDriverEmployment) {
-        devLog("Time-in payload: forcing DRIVER_AIDE from employment isDriver=true");
+        devLog(
+          "Time-in payload: forcing DRIVER_AIDE from employment isDriver=true",
+        );
       }
 
       // If user is offline and plan=pro => store offline
       if (!wifiConnected) {
-        const offlinePayload = endpoint === "/time-in" ? baseTimeInPayload : payload;
+        const offlinePayload =
+          endpoint === "/time-in" ? baseTimeInPayload : payload;
         await storePendingAction({ endpoint, payload: offlinePayload });
         Alert.alert("Offline Mode", "Your punch action is saved locally.");
 
@@ -908,15 +1054,23 @@ export default function TimekeepingPunch() {
 
         if (isTimeIn) {
           try {
-            const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
+            const shiftsRes = await axios.get(
+              `${API_BASE_URL}/api/usershifts`,
+              {
+                headers: { Authorization: `Bearer ${token}` },
+              },
+            );
             const userShifts = shiftsRes?.data?.data;
-            console.log("Timekeeping punch userShifts (clock-out confirm):", userShifts);
+            console.log(
+              "Timekeeping punch userShifts (clock-out confirm):",
+              userShifts,
+            );
             const windows = Array.isArray(userShifts)
               ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
               : [];
-            setClockOutConfirmSchedule(getClockOutScheduleSummary(windows, new Date()));
+            setClockOutConfirmSchedule(
+              getClockOutScheduleSummary(windows, new Date()),
+            );
           } catch (e) {
             devLog("Clock-out confirm schedule fetch error:", e?.message);
             setClockOutConfirmSchedule({ status: "no_shifts" });
@@ -937,7 +1091,10 @@ export default function TimekeepingPunch() {
             devLog("Demo: forcing no-scheduled-shift clock-in modal");
             let demoTimeInPayload = { ...payload };
             try {
-              const demoEarly = await checkClockInEarly({ token, clockInAt: new Date() });
+              const demoEarly = await checkClockInEarly({
+                token,
+                clockInAt: new Date(),
+              });
               if (demoEarly?.addPunchTypeAM) {
                 demoTimeInPayload = { ...payload, punchType: "DRIVER_AIDE_AM" };
               }
@@ -957,7 +1114,10 @@ export default function TimekeepingPunch() {
           }
           // Time-in: allowed company + non–driver/aide — early clock-in vs driverAideThresholdMinutes from /api/company-settings
           try {
-            clockInEarlyCheck = await checkClockInEarly({ token, clockInAt: new Date() });
+            clockInEarlyCheck = await checkClockInEarly({
+              token,
+              clockInAt: new Date(),
+            });
             devLog("Time-in check:", {
               showModal: clockInEarlyCheck?.showModal,
               addPunchTypeAM: clockInEarlyCheck?.addPunchTypeAM,
@@ -983,7 +1143,9 @@ export default function TimekeepingPunch() {
               devLog("Time-in payload: punchType = DRIVER_AIDE_AM");
             } else if (clockInEarlyCheck.useRegularPunch) {
               timeInPayload = { ...payload, punchType: "REGULAR" };
-              devLog("Time-in payload: punchType = REGULAR (non-driver / not early)");
+              devLog(
+                "Time-in payload: punchType = REGULAR (non-driver / not early)",
+              );
             }
             if (clockInEarlyCheck.hasScheduledShift === false) {
               devLog("Showing no-scheduled-shift clock-in modal");
@@ -1006,7 +1168,10 @@ export default function TimekeepingPunch() {
 
         const url = `${API_BASE_URL}/api/timelogs/time-in`;
         const body = timeInPayload;
-        devLog("Punch request:", "/time-in", { punchType: body.punchType, localTimestamp: body.localTimestamp });
+        devLog("Punch request:", "/time-in", {
+          punchType: body.punchType,
+          localTimestamp: body.localTimestamp,
+        });
         try {
           const res = await axios.post(url, body, {
             headers: { Authorization: `Bearer ${token}` },
@@ -1053,11 +1218,17 @@ export default function TimekeepingPunch() {
         return;
       }
       if (isLocationRestricted && !wifiConnected) {
-        Alert.alert("Offline Break Not Allowed", "You are location-restricted and must be online with location enabled.");
+        Alert.alert(
+          "Offline Break Not Allowed",
+          "You are location-restricted and must be online with location enabled.",
+        );
         return;
       }
       if (!wifiConnected) {
-        Alert.alert("Offline Break Not Allowed", "Coffee breaks can only be done when online.");
+        Alert.alert(
+          "Offline Break Not Allowed",
+          "Coffee breaks can only be done when online.",
+        );
         return;
       }
       animateButtonPress(coffeeButtonScale);
@@ -1069,11 +1240,16 @@ export default function TimekeepingPunch() {
       // If location is missing but user restricted => block
       if (isLocationRestricted && (!location.latitude || !location.longitude)) {
         setLoading(false);
-        Alert.alert("Location Required", "Please enable location services to start/end a break.");
+        Alert.alert(
+          "Location Required",
+          "Please enable location services to start/end a break.",
+        );
         return;
       }
 
-      const endpoint = isCoffeeBreakActive ? "/coffee-break/end" : "/coffee-break/start";
+      const endpoint = isCoffeeBreakActive
+        ? "/coffee-break/end"
+        : "/coffee-break/start";
       const payload = { deviceInfo, location };
 
       try {
@@ -1117,11 +1293,17 @@ export default function TimekeepingPunch() {
         return;
       }
       if (isLocationRestricted && !wifiConnected) {
-        Alert.alert("Offline Break Not Allowed", "You are location-restricted and must be online with location enabled.");
+        Alert.alert(
+          "Offline Break Not Allowed",
+          "You are location-restricted and must be online with location enabled.",
+        );
         return;
       }
       if (!wifiConnected) {
-        Alert.alert("Offline Break Not Allowed", "Lunch breaks can only be done when online.");
+        Alert.alert(
+          "Offline Break Not Allowed",
+          "Lunch breaks can only be done when online.",
+        );
         return;
       }
       animateButtonPress(lunchButtonScale);
@@ -1132,11 +1314,16 @@ export default function TimekeepingPunch() {
 
       if (isLocationRestricted && (!location.latitude || !location.longitude)) {
         setLoading(false);
-        Alert.alert("Location Required", "Please enable location services to start/end a lunch break.");
+        Alert.alert(
+          "Location Required",
+          "Please enable location services to start/end a lunch break.",
+        );
         return;
       }
 
-      const endpoint = isLunchBreakActive ? "/lunch-break/end" : "/lunch-break/start";
+      const endpoint = isLunchBreakActive
+        ? "/lunch-break/end"
+        : "/lunch-break/start";
       const payload = { deviceInfo, location };
 
       try {
@@ -1178,8 +1365,7 @@ export default function TimekeepingPunch() {
     else if (type === "subscription") setSubscriptionModalVisible(true);
     else if (type === "clockOutDeviation")
       setClockOutDeviationModalVisible(true);
-    else if (type === "clockOutConfirm")
-      setClockOutConfirmModalVisible(true);
+    else if (type === "clockOutConfirm") setClockOutConfirmModalVisible(true);
     else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
     else if (type === "noScheduledShiftClockIn")
       setNoScheduledShiftClockInModalVisible(true);
@@ -1237,11 +1423,308 @@ export default function TimekeepingPunch() {
     });
   };
 
+  const onPlReqDateModalChange = (event, selectedDate) => {
+    const toRequestedLocalDate = (dateValue) => {
+      if (!(dateValue instanceof Date) || Number.isNaN(dateValue.getTime())) {
+        return cloneJsDate(plReqDateRef.current);
+      }
+      return cloneJsDate(
+        new Date(
+          dateValue.getFullYear(),
+          dateValue.getMonth(),
+          dateValue.getDate(),
+        ),
+      );
+    };
+
+    /** Keep clock-in/out wall-clock times but align their calendar day to the requested date. */
+    const syncClockStatesToRequestedDate = (rawSelected) => {
+      if (
+        !(rawSelected instanceof Date) ||
+        Number.isNaN(rawSelected.getTime())
+      ) {
+        return;
+      }
+      const nextReqDate = toRequestedLocalDate(rawSelected);
+      setPlReqDate(nextReqDate);
+      setPlClockInTime((prev) =>
+        cloneJsDate(combineDateAndTime(nextReqDate, prev)),
+      );
+      setPlClockOutTime((prev) =>
+        cloneJsDate(combineDateAndTime(nextReqDate, prev)),
+      );
+    };
+
+    if (Platform.OS === "android") {
+      setPlReqDateModalVisible(false);
+      if (event?.type === "set" && selectedDate) {
+        syncClockStatesToRequestedDate(selectedDate);
+      }
+      return;
+    }
+    if (selectedDate) syncClockStatesToRequestedDate(selectedDate);
+  };
+
+  const onPlTimeModalChange = (event, selectedDate) => {
+    const kind = plTimeModalKindRef.current;
+    /** Time wheels often return today's calendar date — lock wall-clock to the selected punch-log date. */
+    const applyTimeToRequestedDate = () => {
+      if (!selectedDate || !kind) return;
+      const next = cloneJsDate(
+        combineDateAndTime(plReqDateRef.current, selectedDate),
+      );
+      if (kind === "out") setPlClockOutTime(next);
+      else setPlClockInTime(next);
+    };
+    if (Platform.OS === "android") {
+      if (event?.type === "set") applyTimeToRequestedDate();
+      dismissPlTimePickerSheet();
+      return;
+    }
+    applyTimeToRequestedDate();
+  };
+
+  /** Prefer ref kind while sheet is open so value tracks clock-out vs clock-in even if state batches oddly. */
+  const effectivePlTimeModalKind =
+    plTimeModalVisible &&
+    (plTimeModalKindRef.current === "in" ||
+      plTimeModalKindRef.current === "out")
+      ? plTimeModalKindRef.current
+      : plTimeModalKind;
+
+  const plTimeModalValue =
+    effectivePlTimeModalKind === "out" ? plClockOutTime : plClockInTime;
+
+  const fetchPlApprovers = useCallback(async () => {
+    setPlApproversLoading(true);
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        Alert.alert("Authentication", "Please sign in again.");
+        return;
+      }
+      const res = await fetch(`${API_BASE_URL}/api/leaves/approvers`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.data)) {
+        const items = data.data.map((approver) => {
+          const firstName = approver.profile?.firstName || "";
+          const lastName = approver.profile?.lastName || "";
+          const fullName = `${firstName} ${lastName}`.trim();
+          return {
+            label: fullName || approver.username || `User ${approver.id}`,
+            value: String(approver.id),
+          };
+        });
+        setPlApproverItems(items);
+      } else {
+        Alert.alert("Error", data?.message || "Failed to fetch approvers.");
+      }
+    } catch (e) {
+      console.error("fetchPlApprovers", e);
+      Alert.alert("Error", "Could not load approvers.");
+    } finally {
+      setPlApproversLoading(false);
+    }
+  }, []);
+
+  const openPunchLogRequestModal = () => {
+    const defaults = getDefaultPunchLogPickerDatesLocal();
+    setPlReqDate(cloneJsDate(defaults.reqDate));
+    setPlClockInTime(cloneJsDate(defaults.clockIn));
+    setPlClockOutTime(cloneJsDate(defaults.clockOut));
+    setPlReason("");
+    setPlDescription("");
+    setPlApproverValue("");
+    setPlClockOutCrossesNextDay(false);
+    setPlReqDateModalVisible(false);
+    dismissPlTimePickerSheet();
+    setPlApproverOpen(false);
+    setPunchLogRequestModalVisible(true);
+    fetchPlApprovers();
+  };
+
+  const closePunchLogRequestModal = () => {
+    Keyboard.dismiss();
+    setPlReqDateModalVisible(false);
+    dismissPlTimePickerSheet();
+    setPlApproverOpen(false);
+    setPunchLogRequestModalVisible(false);
+  };
+
+  const submitPunchLogRequest = async () => {
+    const nowMs = Date.now();
+
+    const trimmedApprover = String(plApproverValue ?? "").trim();
+    if (!trimmedApprover) {
+      Alert.alert(
+        "Choose an approver",
+        "Pick someone from the Approver list—they need to approve this punch log.",
+      );
+      return;
+    }
+
+    if (
+      !Number.isFinite(plReqDate.getTime()) ||
+      !Number.isFinite(plClockInTime.getTime()) ||
+      !Number.isFinite(plClockOutTime.getTime())
+    ) {
+      Alert.alert(
+        "Update your times",
+        "Close this screen and open Request punch log again, then choose the date and clock-in/out times.",
+      );
+      return;
+    }
+
+    const requestedDate = formatCompanyCalendarDateString(plReqDate);
+    const requestedClockIn = formatNaiveLocalDateTimeFromPickers(
+      plReqDate,
+      plClockInTime,
+    );
+    const requestedClockOut = formatNaiveLocalClockOutFromPickers(
+      plReqDate,
+      plClockOutTime,
+      plClockOutCrossesNextDay,
+    );
+    const clockInLocal = buildLocalDateFromPickers(plReqDate, plClockInTime);
+    const clockOutLocal = buildLocalDateFromPickers(
+      plReqDate,
+      plClockOutTime,
+      plClockOutCrossesNextDay,
+    );
+
+    if (
+      !requestedDate ||
+      !requestedClockIn ||
+      !requestedClockOut ||
+      !clockInLocal ||
+      !clockOutLocal
+    ) {
+      Alert.alert(
+        "Update your times",
+        "Something went wrong combining your date and times. Please pick them again.",
+      );
+      return;
+    }
+
+    if (clockInLocal.getTime() > nowMs || clockOutLocal.getTime() > nowMs) {
+      Alert.alert(
+        "Nothing in the future",
+        "Requested clock-in and clock-out must be at or before the current time. Change the date or times so nothing is in the future.",
+      );
+      return;
+    }
+
+    const diffMs = clockOutLocal.getTime() - clockInLocal.getTime();
+    const estimatedDuration = Math.round(diffMs / 60000);
+    const estimatedNetHours =
+      Math.round((estimatedDuration / 60) * 1000) / 1000;
+
+    const reasonTrim = plReason.trim();
+    const descriptionTrim = plDescription.trim();
+    const payload = {
+      requestedDate,
+      requestedClockIn,
+      requestedClockOut,
+      approverId: trimmedApprover,
+      reason: reasonTrim,
+      description: descriptionTrim,
+      estimatedDuration,
+      estimatedNetHours,
+    };
+
+    const submitUrl = `${API_BASE_URL}${REQUEST_PUNCH_LOG_SUBMIT_PATH}`;
+    console.log("[BizBuddy Punch] request punch log submit", {
+      method: "POST",
+      url: submitUrl,
+    });
+    console.log(
+      "[BizBuddy Punch] request punch log req body",
+      JSON.stringify(payload, null, 2),
+    );
+    devLog("request punch log submit", {
+      url: submitUrl,
+      reqBody: payload,
+    });
+
+    setPlSubmitting(true);
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        Alert.alert("Authentication", "Please sign in again.");
+        return;
+      }
+
+      const res = await axios.post(submitUrl, payload, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      Alert.alert(
+        "Submitted",
+        res.data?.message || "Your punch log request was sent.",
+      );
+      closePunchLogRequestModal();
+    } catch (err) {
+      const submitUrl = `${API_BASE_URL}${REQUEST_PUNCH_LOG_SUBMIT_PATH}`;
+      const status = err?.response?.status;
+      const responseData = err?.response?.data;
+      console.error("[BizBuddy Punch] request punch log submit failed", {
+        url: submitUrl,
+        payload,
+        status,
+        statusText: err?.response?.statusText,
+        responseData,
+        axiosMessage: err?.message,
+        code: err?.code,
+      });
+      const rawServerMsg = String(
+        responseData?.message ||
+          responseData?.error ||
+          responseData?.details ||
+          "",
+      ).trim();
+      const axiosMsg = String(err?.message ?? "").toLowerCase();
+      let friendlyBody =
+        rawServerMsg ||
+        (axiosMsg.includes("network") || err?.code === "ERR_NETWORK"
+          ? "Check your connection and try again."
+          : axiosMsg.includes("timeout") || err?.code === "ECONNABORTED"
+            ? "The request took too long. Try again in a moment."
+            : "We couldn't send your punch log request. Please try again.");
+
+      if (status === 401 || status === 403) {
+        friendlyBody =
+          rawServerMsg ||
+          "Your session may have expired. Sign in again and retry.";
+      } else if (status === 404) {
+        friendlyBody = rawServerMsg || "This action isn't available right now.";
+      } else if (status === 409) {
+        friendlyBody =
+          rawServerMsg ||
+          "A punch log for this date may already exist. Check your requests or pick another date.";
+      } else if (status >= 500) {
+        friendlyBody =
+          rawServerMsg ||
+          "Our servers had a problem. Please try again in a little while.";
+      }
+
+      Alert.alert("Couldn't submit", friendlyBody);
+    } finally {
+      setPlSubmitting(false);
+    }
+  };
+
   // Returns { showModal: true, details } when clock-out needs the type-selection modal.
   const checkClockOutDeviation = async ({ token, clockOutAt }) => {
     try {
       if (!token) return { showModal: false };
-      if (!(clockOutAt instanceof Date) || !Number.isFinite(clockOutAt.getTime()))
+      if (
+        !(clockOutAt instanceof Date) ||
+        !Number.isFinite(clockOutAt.getTime())
+      )
         return { showModal: false };
 
       const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
@@ -1251,13 +1734,18 @@ export default function TimekeepingPunch() {
         profRes?.data?.data?.company ||
         profRes?.data?.data?.profile?.company ||
         null;
-      const companyId = company?.id || company?._id || company?.companyId || null;
+      const companyId =
+        company?.id || company?._id || company?.companyId || null;
 
       const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
-        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(Boolean)
+        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(
+            Boolean,
+          )
         : [];
       if (!companyId || !allowedCompanyIds.includes(String(companyId).trim())) {
-        devLog("checkClockOutDeviation: company outside allowlist", { companyId });
+        devLog("checkClockOutDeviation: company outside allowlist", {
+          companyId,
+        });
         return { showModal: false };
       }
 
@@ -1265,8 +1753,12 @@ export default function TimekeepingPunch() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const userShifts = shiftsRes?.data?.data;
-      console.log("Timekeeping punch userShifts (clock-out deviation check):", userShifts);
-      if (!Array.isArray(userShifts) || userShifts.length === 0) return { showModal: false };
+      console.log(
+        "Timekeeping punch userShifts (clock-out deviation check):",
+        userShifts,
+      );
+      if (!Array.isArray(userShifts) || userShifts.length === 0)
+        return { showModal: false };
 
       const windows = userShifts
         .map(buildShiftWindowFromUserShift)
@@ -1293,7 +1785,7 @@ export default function TimekeepingPunch() {
         try {
           const settingsRes = await axios.get(
             `${API_BASE_URL}/api/company-settings`,
-            { headers: { Authorization: `Bearer ${token}` } }
+            { headers: { Authorization: `Bearer ${token}` } },
           );
           const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
           const parsed = parseCompanySettingsPunchFields(raw);
@@ -1309,10 +1801,13 @@ export default function TimekeepingPunch() {
             companySettingsShiftAssignmentWindowMinutesRef.current =
               parsed.shiftAssignmentWindowMinutes;
           }
+          if (parsed.timeZone) {
+            companySettingsTimeZoneRef.current = parsed.timeZone;
+          }
         } catch (e) {
           devLog(
             "checkClockOutDeviation: company-settings fetch failed, using fallback threshold",
-            e?.message
+            e?.message,
           );
         }
       }
@@ -1369,8 +1864,8 @@ export default function TimekeepingPunch() {
    * - Companies outside CLOCK_OUT_DEVIATION_COMPANY_IDS: punch REGULAR with no clock-in
    *   deviation modals (early Driver/Aide vs Regular, nor no-scheduled-shift notes).
    * - If employment `isDriver === false` in an allowed company: show Driver/Aide (AM) vs Regular
-   *   modal when clock-in is >= driverAideThresholdMinutes before the next shift start; otherwise
-   *   default punchType REGULAR.
+   *   modal when clock-in is >= driverAideThresholdMinutes before the next shift start, except when
+   *   minutesEarly <= shiftAssignmentWindowMinutes (assignment window bypass -> default REGULAR).
    * - If employment `isDriver === true`: skip that modal (no automatic DRIVER_AIDE_AM).
    * - If `isDriver` is unknown (null): legacy allowed-company + job-title rules (DRIVER_AIDE_AM default).
    */
@@ -1394,39 +1889,59 @@ export default function TimekeepingPunch() {
       const data = profRes?.data?.data ?? {};
       const profile = data?.profile ?? data;
       const company = data?.company ?? profile?.company ?? null;
-      const companyId = company?.id ?? company?._id ?? company?.companyId ?? null;
-      const jobTitle = (profile?.jobTitle ?? profile?.job_title ?? profile?.title ?? "").toString().trim();
+      const companyId =
+        company?.id ?? company?._id ?? company?.companyId ?? null;
+      const jobTitle = (
+        profile?.jobTitle ??
+        profile?.job_title ??
+        profile?.title ??
+        ""
+      )
+        .toString()
+        .trim();
 
       const shiftsRes = await axios.get(`${API_BASE_URL}/api/usershifts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const userShifts = shiftsRes?.data?.data;
-      console.log("Timekeeping punch userShifts (clock-in early check):", userShifts);
+      console.log(
+        "Timekeeping punch userShifts (clock-in early check):",
+        userShifts,
+      );
       const windows = Array.isArray(userShifts)
         ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
         : [];
       const hasScheduledShift = windows.length > 0;
       const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
-        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(Boolean)
+        ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(
+            Boolean,
+          )
         : [];
 
       if (!companyId || !allowedCompanyIds.includes(String(companyId).trim())) {
-        devLog("checkClockInEarly: company outside allowlist, REGULAR, skip deviation modals", {
-          companyId,
-        });
+        devLog(
+          "checkClockInEarly: company outside allowlist, REGULAR, skip deviation modals",
+          {
+            companyId,
+          },
+        );
         return baseResult({ hasScheduledShift: true, useRegularPunch: true });
       }
 
       const resolveCompanySettingsThresholds = async () => {
         let threshold = Number(CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES) || 45;
         let assignmentWindow = null;
-        const cachedDriverAide = companySettingsDriverAideThresholdMinutesRef.current;
+        const cachedDriverAide =
+          companySettingsDriverAideThresholdMinutesRef.current;
         const cachedAssignmentWindow =
           companySettingsShiftAssignmentWindowMinutesRef.current;
         if (Number.isFinite(cachedDriverAide) && cachedDriverAide > 0) {
-          devLog("checkClockInEarly: using driverAideThresholdMinutes from company-settings cache", {
-            threshold: cachedDriverAide,
-          });
+          devLog(
+            "checkClockInEarly: using driverAideThresholdMinutes from company-settings cache",
+            {
+              threshold: cachedDriverAide,
+            },
+          );
           threshold = cachedDriverAide;
         }
         if (
@@ -1435,13 +1950,17 @@ export default function TimekeepingPunch() {
         ) {
           assignmentWindow = cachedAssignmentWindow;
         }
-        if (Number.isFinite(threshold) && threshold > 0 && assignmentWindow != null) {
+        if (
+          Number.isFinite(threshold) &&
+          threshold > 0 &&
+          assignmentWindow != null
+        ) {
           return { threshold, assignmentWindow };
         }
         try {
           const settingsRes = await axios.get(
             `${API_BASE_URL}/api/company-settings`,
-            { headers: { Authorization: `Bearer ${token}` } }
+            { headers: { Authorization: `Bearer ${token}` } },
           );
           const raw = settingsRes?.data?.data ?? settingsRes?.data ?? {};
           const parsed = parseCompanySettingsPunchFields(raw);
@@ -1458,10 +1977,13 @@ export default function TimekeepingPunch() {
               parsed.shiftAssignmentWindowMinutes;
             assignmentWindow = parsed.shiftAssignmentWindowMinutes;
           }
+          if (parsed.timeZone) {
+            companySettingsTimeZoneRef.current = parsed.timeZone;
+          }
         } catch (e) {
           devLog(
             "checkClockInEarly: company-settings fetch failed, using fallback threshold",
-            e?.message
+            e?.message,
           );
         }
         return { threshold, assignmentWindow };
@@ -1471,23 +1993,32 @@ export default function TimekeepingPunch() {
 
       if (isDriverEmployment === false) {
         if (!hasScheduledShift) {
-          devLog("checkClockInEarly: isDriver false, no scheduled shift", { jobTitle });
-          return baseResult({ hasScheduledShift: false, useRegularPunch: true });
+          devLog("checkClockInEarly: isDriver false, no scheduled shift", {
+            jobTitle,
+          });
+          return baseResult({
+            hasScheduledShift: false,
+            useRegularPunch: true,
+          });
         }
         const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
         const nextShiftStart = boundaries?.nextShiftStart;
         if (!nextShiftStart) {
-          devLog("checkClockInEarly: isDriver false, no next shift start", { jobTitle });
+          devLog("checkClockInEarly: isDriver false, no next shift start", {
+            jobTitle,
+          });
           return baseResult({ hasScheduledShift: true, useRegularPunch: true });
         }
-        const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
+        const minutesEarly =
+          (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
         const { threshold, assignmentWindow } =
           await resolveCompanySettingsThresholds();
         const bypassModalByAssignmentWindow =
           Number.isFinite(assignmentWindow) &&
           assignmentWindow > 0 &&
-          minutesEarly >= assignmentWindow;
-        const showModal = !bypassModalByAssignmentWindow && minutesEarly >= threshold;
+          minutesEarly <= assignmentWindow;
+        const showModal =
+          !bypassModalByAssignmentWindow && minutesEarly >= threshold;
         devLog("checkClockInEarly (isDriver false):", {
           companyId,
           jobTitle,
@@ -1499,11 +2030,11 @@ export default function TimekeepingPunch() {
         });
         if (bypassModalByAssignmentWindow) {
           devLog(
-            "checkClockInEarly: bypass modal, use REGULAR (isDriver false + assignment window reached)",
+            "checkClockInEarly: bypass modal, use REGULAR (isDriver false + within assignment window)",
             {
               minutesEarly: Math.floor(minutesEarly),
               shiftAssignmentWindowMinutes: assignmentWindow,
-            }
+            },
           );
           return baseResult({ hasScheduledShift: true, useRegularPunch: true });
         }
@@ -1526,30 +2057,50 @@ export default function TimekeepingPunch() {
       }
 
       if (isDriverEmployment === true) {
-        devLog("checkClockInEarly: isDriver true, skip early Driver/Aide vs Regular modal", {
+        devLog(
+          "checkClockInEarly: isDriver true, skip early Driver/Aide vs Regular modal",
+          {
+            jobTitle,
+          },
+        );
+        return baseResult({ hasScheduledShift });
+      }
+
+      const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES)
+        ? DRIVER_AIDE_JOB_TITLES
+        : [];
+      if (
+        driverAideTitles.some(
+          (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase(),
+        )
+      ) {
+        devLog("checkClockInEarly: driver/aide job title, skip (legacy)", {
           jobTitle,
         });
         return baseResult({ hasScheduledShift });
       }
 
-      const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
-      if (driverAideTitles.some((t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase())) {
-        devLog("checkClockInEarly: driver/aide job title, skip (legacy)", { jobTitle });
-        return baseResult({ hasScheduledShift });
-      }
-
       const addPunchTypeAM = true;
       if (!hasScheduledShift) {
-        return baseResult({ addPunchTypeAM: true, hasScheduledShift: false, useRegularPunch: false });
+        return baseResult({
+          addPunchTypeAM: true,
+          hasScheduledShift: false,
+          useRegularPunch: false,
+        });
       }
 
       const boundaries = findSurroundingShiftBoundaries(windows, clockInAt);
       const nextShiftStart = boundaries?.nextShiftStart;
       if (!nextShiftStart) {
-        return baseResult({ addPunchTypeAM: true, hasScheduledShift: true, useRegularPunch: false });
+        return baseResult({
+          addPunchTypeAM: true,
+          hasScheduledShift: true,
+          useRegularPunch: false,
+        });
       }
 
-      const minutesEarly = (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
+      const minutesEarly =
+        (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
       const { threshold } = await resolveCompanySettingsThresholds();
 
       const showModal = minutesEarly >= threshold;
@@ -1601,11 +2152,21 @@ export default function TimekeepingPunch() {
         const profRes = await axios.get(`${API_BASE_URL}/api/account/profile`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        const profile = profRes?.data?.data?.profile ?? profRes?.data?.data ?? {};
-        const jobTitle = (profile.jobTitle ?? profile.job_title ?? profile.title ?? "").toString().trim();
-        const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES) ? DRIVER_AIDE_JOB_TITLES : [];
+        const profile =
+          profRes?.data?.data?.profile ?? profRes?.data?.data ?? {};
+        const jobTitle = (
+          profile.jobTitle ??
+          profile.job_title ??
+          profile.title ??
+          ""
+        )
+          .toString()
+          .trim();
+        const driverAideTitles = Array.isArray(DRIVER_AIDE_JOB_TITLES)
+          ? DRIVER_AIDE_JOB_TITLES
+          : [];
         const isDriverAideJob = driverAideTitles.some(
-          (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase()
+          (t) => String(t).trim().toLowerCase() === jobTitle.toLowerCase(),
         );
         const isDriverEmployment = employmentDetailsIsDriverRef.current;
         devLog("Time-out check:", {
@@ -1618,7 +2179,10 @@ export default function TimekeepingPunch() {
           devLog("Time-out payload: punchType = DRIVER_AIDE (isDriver=true)");
         } else if (isDriverEmployment === false) {
           const clockOutAt = new Date();
-          const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
+          const deviationCheck = await checkClockOutDeviation({
+            token,
+            clockOutAt,
+          });
           devLog("Clock-out deviation check (isDriver=false):", {
             showModal: deviationCheck?.showModal,
             minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
@@ -1640,11 +2204,15 @@ export default function TimekeepingPunch() {
           devLog("Time-out payload: punchType = REGULAR (isDriver=false)");
         } else {
           const clockOutAt = new Date();
-          const deviationCheck = await checkClockOutDeviation({ token, clockOutAt });
+          const deviationCheck = await checkClockOutDeviation({
+            token,
+            clockOutAt,
+          });
           devLog("Clock-out deviation check:", {
             showModal: deviationCheck?.showModal,
             minutesAfterEnd: deviationCheck?.details?.minutesAfterEnd,
-            minutesBeforeNextStart: deviationCheck?.details?.minutesBeforeNextStart,
+            minutesBeforeNextStart:
+              deviationCheck?.details?.minutesBeforeNextStart,
           });
           if (deviationCheck.showModal && deviationCheck.details) {
             devLog("Showing clock-out deviation modal");
@@ -1716,7 +2284,8 @@ export default function TimekeepingPunch() {
               Clock out?
             </Text>
             <Text className="text-base text-slate-600 text-center px-2 leading-5">
-              You are about to record your time out. Confirm to finish your shift.
+              You are about to record your time out. Confirm to finish your
+              shift.
             </Text>
           </View>
 
@@ -1759,7 +2328,11 @@ export default function TimekeepingPunch() {
             <View className="bg-amber-50 rounded-2xl p-5 mb-6 border border-amber-200 shadow-sm">
               <View className="flex-row items-center mb-2">
                 <View className="w-8 h-8 rounded-full bg-amber-100 items-center justify-center mr-3">
-                  <Ionicons name="alert-circle-outline" size={18} color="#d97706" />
+                  <Ionicons
+                    name="alert-circle-outline"
+                    size={18}
+                    color="#d97706"
+                  />
                 </View>
                 <Text className="text-sm font-semibold text-amber-900 uppercase tracking-wide">
                   Past scheduled end
@@ -1775,7 +2348,8 @@ export default function TimekeepingPunch() {
                   hour12: true,
                 })}
                 .
-                {Number.isFinite(s.minutesPastScheduledEnd) && s.minutesPastScheduledEnd > 0
+                {Number.isFinite(s.minutesPastScheduledEnd) &&
+                s.minutesPastScheduledEnd > 0
                   ? ` (${s.minutesPastScheduledEnd} minute${s.minutesPastScheduledEnd === 1 ? "" : "s"} after scheduled end)`
                   : ""}
               </Text>
@@ -1785,7 +2359,8 @@ export default function TimekeepingPunch() {
           {s?.status === "not_in_shift" && (
             <View className="bg-slate-50 rounded-2xl p-4 mb-6 border border-slate-200">
               <Text className="text-sm text-slate-600 text-center leading-5">
-                You have shifts on your schedule, but this time is not inside a scheduled shift window.
+                You have shifts on your schedule, but this time is not inside a
+                scheduled shift window.
               </Text>
             </View>
           )}
@@ -1807,7 +2382,9 @@ export default function TimekeepingPunch() {
             className="py-3.5 rounded-2xl items-center justify-center bg-slate-100 border border-slate-200"
             activeOpacity={0.85}
           >
-            <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
+            <Text className="text-slate-700 font-semibold text-base">
+              Cancel
+            </Text>
           </TouchableOpacity>
         </ScrollView>
       );
@@ -1840,13 +2417,17 @@ export default function TimekeepingPunch() {
             <Text className="text-sm text-slate-500 text-center px-2 leading-5 mt-3">
               Choose how to record this time-in:{" "}
               <Text className="font-semibold text-slate-700">Regular</Text> or{" "}
-              <Text className="font-semibold text-slate-700">Driver / Aide (AM)</Text> (
-              <Text className="font-mono text-xs">DRIVER_AIDE_AM</Text>).
+              <Text className="font-semibold text-slate-700">
+                Driver / Aide (AM)
+              </Text>{" "}
+              (<Text className="font-mono text-xs">DRIVER_AIDE_AM</Text>).
             </Text>
           </View>
           <View className="bg-slate-50 rounded-2xl p-5 mb-6 border border-slate-200 shadow-sm">
             <View className="mb-4">
-              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">Clock-In Time</Text>
+              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                Clock-In Time
+              </Text>
               <Text className="text-lg font-bold text-slate-900">
                 {d?.clockInAt
                   ? new Date(d.clockInAt).toLocaleString("en-US", {
@@ -1861,7 +2442,9 @@ export default function TimekeepingPunch() {
             </View>
             <View className="h-px bg-slate-200 my-4" />
             <View>
-              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">Scheduled Shift Start</Text>
+              <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-1">
+                Scheduled Shift Start
+              </Text>
               <Text className="text-base font-semibold text-slate-800">
                 {d?.scheduledShiftStart
                   ? new Date(d.scheduledShiftStart).toLocaleString("en-US", {
@@ -1902,7 +2485,7 @@ export default function TimekeepingPunch() {
                         localTimestamp: pending.localTimestamp,
                         punchType: "REGULAR",
                       },
-                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                      { headers: { Authorization: `Bearer ${pending.token}` } },
                     );
                     if (res.status === 200 || res.status === 201) {
                       Alert.alert("Success", res.data.message);
@@ -1922,7 +2505,8 @@ export default function TimekeepingPunch() {
                   } catch (err) {
                     Alert.alert(
                       "Error",
-                      err?.response?.data?.message || "Punch failed. Please try again."
+                      err?.response?.data?.message ||
+                        "Punch failed. Please try again.",
                     );
                   }
                   return;
@@ -1935,7 +2519,9 @@ export default function TimekeepingPunch() {
               <View className="w-14 h-14 rounded-full bg-slate-200 items-center justify-center mb-2">
                 <Ionicons name="time-outline" size={28} color="#475569" />
               </View>
-              <Text className="text-slate-700 font-semibold text-sm text-center">Regular punch</Text>
+              <Text className="text-slate-700 font-semibold text-sm text-center">
+                Regular punch
+              </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -1952,7 +2538,7 @@ export default function TimekeepingPunch() {
                         localTimestamp: pending.localTimestamp,
                         punchType: "DRIVER_AIDE_AM",
                       },
-                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                      { headers: { Authorization: `Bearer ${pending.token}` } },
                     );
                     if (res.status === 200 || res.status === 201) {
                       Alert.alert("Success", res.data.message);
@@ -1972,7 +2558,8 @@ export default function TimekeepingPunch() {
                   } catch (err) {
                     Alert.alert(
                       "Error",
-                      err?.response?.data?.message || "Punch failed. Please try again."
+                      err?.response?.data?.message ||
+                        "Punch failed. Please try again.",
                     );
                   }
                   return;
@@ -2024,7 +2611,7 @@ export default function TimekeepingPunch() {
           const res = await axios.post(
             `${API_BASE_URL}/api/timelogs/time-in`,
             reqBody,
-            { headers: { Authorization: `Bearer ${pending.token}` } }
+            { headers: { Authorization: `Bearer ${pending.token}` } },
           );
           if (res.status === 200 || res.status === 201) {
             Alert.alert("Success", res.data.message);
@@ -2044,7 +2631,7 @@ export default function TimekeepingPunch() {
         } catch (err) {
           Alert.alert(
             "Error",
-            err?.response?.data?.message || "Punch failed. Please try again."
+            err?.response?.data?.message || "Punch failed. Please try again.",
           );
         }
       };
@@ -2077,7 +2664,8 @@ export default function TimekeepingPunch() {
                 No shift on your schedule
               </Text>
               <Text className="text-base text-slate-500 text-center mt-2.5 leading-6 px-1">
-                Nothing is assigned for you right now. You can still clock in—add a short note if your team should know why.
+                Nothing is assigned for you right now. You can still clock
+                in—add a short note if your team should know why.
               </Text>
             </View>
 
@@ -2085,7 +2673,12 @@ export default function TimekeepingPunch() {
               className="flex-row rounded-2xl p-4 mb-5 border"
               style={{ backgroundColor: "#fffbeb", borderColor: "#fde68a" }}
             >
-              <Ionicons name="information-circle" size={22} color="#d97706" style={{ marginTop: 1 }} />
+              <Ionicons
+                name="information-circle"
+                size={22}
+                color="#d97706"
+                style={{ marginTop: 1 }}
+              />
               <Text className="flex-1 ml-3 text-sm text-amber-950 leading-5">
                 Your time-in will be recorded the same as a normal punch.
               </Text>
@@ -2137,7 +2730,9 @@ export default function TimekeepingPunch() {
               className="py-3.5 rounded-2xl items-center justify-center bg-slate-100 border border-slate-200"
               activeOpacity={0.85}
             >
-              <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
+              <Text className="text-slate-700 font-semibold text-base">
+                Cancel
+              </Text>
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -2202,7 +2797,11 @@ export default function TimekeepingPunch() {
             <View className="mb-4">
               <View className="flex-row items-center mb-2">
                 <View className="w-8 h-8 rounded-full bg-blue-100 items-center justify-center mr-3">
-                  <Ionicons name="arrow-down-circle-outline" size={18} color="#3b82f6" />
+                  <Ionicons
+                    name="arrow-down-circle-outline"
+                    size={18}
+                    color="#3b82f6"
+                  />
                 </View>
                 <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
                   Last Shift Ended
@@ -2235,7 +2834,11 @@ export default function TimekeepingPunch() {
             <View>
               <View className="flex-row items-center mb-2">
                 <View className="w-8 h-8 rounded-full bg-green-100 items-center justify-center mr-3">
-                  <Ionicons name="arrow-up-circle-outline" size={18} color="#10b981" />
+                  <Ionicons
+                    name="arrow-up-circle-outline"
+                    size={18}
+                    color="#10b981"
+                  />
                 </View>
                 <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
                   Next Shift Starts
@@ -2282,15 +2885,19 @@ export default function TimekeepingPunch() {
                     const res = await axios.post(
                       `${API_BASE_URL}/api/timelogs/time-out`,
                       reqBody,
-                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                      { headers: { Authorization: `Bearer ${pending.token}` } },
                     );
                     if (res.status === 200 || res.status === 201) {
                       if (d?.clockOutAt) {
                         await storeClockOutDeviationResponse({
                           ...d,
                           clockOutAt: new Date(d.clockOutAt).toISOString(),
-                          lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
-                          nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                          lastShiftEnd: d?.lastShiftEnd
+                            ? new Date(d.lastShiftEnd).toISOString()
+                            : null,
+                          nextShiftStart: d?.nextShiftStart
+                            ? new Date(d.nextShiftStart).toISOString()
+                            : null,
                           workedAsAide: false,
                           recordedAt: new Date().toISOString(),
                         });
@@ -2302,7 +2909,8 @@ export default function TimekeepingPunch() {
                   } catch (err) {
                     Alert.alert(
                       "Error",
-                      err?.response?.data?.message || "Punch failed. Please try again."
+                      err?.response?.data?.message ||
+                        "Punch failed. Please try again.",
                     );
                   }
                   return;
@@ -2311,8 +2919,12 @@ export default function TimekeepingPunch() {
                   await storeClockOutDeviationResponse({
                     ...d,
                     clockOutAt: new Date(d.clockOutAt).toISOString(),
-                    lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
-                    nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                    lastShiftEnd: d?.lastShiftEnd
+                      ? new Date(d.lastShiftEnd).toISOString()
+                      : null,
+                    nextShiftStart: d?.nextShiftStart
+                      ? new Date(d.nextShiftStart).toISOString()
+                      : null,
                     workedAsAide: false,
                     recordedAt: new Date().toISOString(),
                   });
@@ -2325,7 +2937,9 @@ export default function TimekeepingPunch() {
               <View className="w-14 h-14 rounded-full bg-slate-200 items-center justify-center mb-2">
                 <Ionicons name="time-outline" size={28} color="#475569" />
               </View>
-              <Text className="text-slate-700 font-semibold text-sm text-center">Regular punch</Text>
+              <Text className="text-slate-700 font-semibold text-sm text-center">
+                Regular punch
+              </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2343,15 +2957,19 @@ export default function TimekeepingPunch() {
                     const res = await axios.post(
                       `${API_BASE_URL}/api/timelogs/time-out`,
                       reqBody,
-                      { headers: { Authorization: `Bearer ${pending.token}` } }
+                      { headers: { Authorization: `Bearer ${pending.token}` } },
                     );
                     if (res.status === 200 || res.status === 201) {
                       if (d?.clockOutAt) {
                         await storeClockOutDeviationResponse({
                           ...d,
                           clockOutAt: new Date(d.clockOutAt).toISOString(),
-                          lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
-                          nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                          lastShiftEnd: d?.lastShiftEnd
+                            ? new Date(d.lastShiftEnd).toISOString()
+                            : null,
+                          nextShiftStart: d?.nextShiftStart
+                            ? new Date(d.nextShiftStart).toISOString()
+                            : null,
                           workedAsAide: true,
                           recordedAt: new Date().toISOString(),
                         });
@@ -2363,7 +2981,8 @@ export default function TimekeepingPunch() {
                   } catch (err) {
                     Alert.alert(
                       "Error",
-                      err?.response?.data?.message || "Punch failed. Please try again."
+                      err?.response?.data?.message ||
+                        "Punch failed. Please try again.",
                     );
                   }
                   return;
@@ -2372,8 +2991,12 @@ export default function TimekeepingPunch() {
                   await storeClockOutDeviationResponse({
                     ...d,
                     clockOutAt: new Date(d.clockOutAt).toISOString(),
-                    lastShiftEnd: d?.lastShiftEnd ? new Date(d.lastShiftEnd).toISOString() : null,
-                    nextShiftStart: d?.nextShiftStart ? new Date(d.nextShiftStart).toISOString() : null,
+                    lastShiftEnd: d?.lastShiftEnd
+                      ? new Date(d.lastShiftEnd).toISOString()
+                      : null,
+                    nextShiftStart: d?.nextShiftStart
+                      ? new Date(d.nextShiftStart).toISOString()
+                      : null,
                     workedAsAide: true,
                     recordedAt: new Date().toISOString(),
                   });
@@ -2393,7 +3016,9 @@ export default function TimekeepingPunch() {
               <View className="w-14 h-14 rounded-full bg-amber-400 items-center justify-center mb-2">
                 <Ionicons name="person-outline" size={28} color="#fff" />
               </View>
-              <Text className="text-amber-800 font-semibold text-sm text-center">Driver / Aide</Text>
+              <Text className="text-amber-800 font-semibold text-sm text-center">
+                Driver / Aide
+              </Text>
             </TouchableOpacity>
           </View>
         </ScrollView>
@@ -2403,19 +3028,29 @@ export default function TimekeepingPunch() {
     if (networkModalVisible) {
       return (
         <View className="p-5">
-          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">Network Details</Text>
+          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">
+            Network Details
+          </Text>
           <View className="bg-slate-50 rounded-xl p-4 mb-6">
             <View className="flex-row items-center mb-4">
               <View className="w-10 h-10 rounded-full bg-orange-100 items-center justify-center mr-3">
                 <Ionicons name="wifi" size={20} color="#f97316" />
               </View>
-              <Text className="text-lg font-semibold text-slate-700">{wifiConnected ? "Connected" : "Disconnected"}</Text>
+              <Text className="text-lg font-semibold text-slate-700">
+                {wifiConnected ? "Connected" : "Disconnected"}
+              </Text>
             </View>
             <Text className="text-base text-slate-700">
-              Internet is required to sync time logs unless you have Pro (time in/out only). Location-restricted users must also have location enabled.
+              Internet is required to sync time logs unless you have Pro (time
+              in/out only). Location-restricted users must also have location
+              enabled.
             </Text>
           </View>
-          <TouchableOpacity onPress={closeModal} className="bg-orange-400 py-3.5 rounded-xl items-center justify-center" activeOpacity={0.8}>
+          <TouchableOpacity
+            onPress={closeModal}
+            className="bg-orange-400 py-3.5 rounded-xl items-center justify-center"
+            activeOpacity={0.8}
+          >
             <Text className="text-white font-bold text-base">Close</Text>
           </TouchableOpacity>
         </View>
@@ -2423,17 +3058,30 @@ export default function TimekeepingPunch() {
     } else if (locationModalVisible) {
       return (
         <View className="p-5">
-          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">Location Services</Text>
+          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">
+            Location Services
+          </Text>
           <View className="bg-slate-50 rounded-xl p-4 mb-6">
             <View className="flex-row items-center mb-4">
-              <View className={`w-10 h-10 rounded-full ${locationEnabled ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-3`}>
+              <View
+                className={`w-10 h-10 rounded-full ${locationEnabled ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-3`}
+              >
                 <Ionicons name="location" size={20} color="#f97316" />
               </View>
-              <Text className="text-lg font-semibold text-slate-700">{locationEnabled ? "Enabled" : "Disabled"}</Text>
+              <Text className="text-lg font-semibold text-slate-700">
+                {locationEnabled ? "Enabled" : "Disabled"}
+              </Text>
             </View>
-            <Text className="text-base text-slate-700">We only request your location for Time In/Out if needed. This is not continuous tracking.</Text>
+            <Text className="text-base text-slate-700">
+              We only request your location for Time In/Out if needed. This is
+              not continuous tracking.
+            </Text>
           </View>
-          <TouchableOpacity onPress={closeModal} className="bg-orange-400 py-3.5 rounded-xl items-center justify-center" activeOpacity={0.8}>
+          <TouchableOpacity
+            onPress={closeModal}
+            className="bg-orange-400 py-3.5 rounded-xl items-center justify-center"
+            activeOpacity={0.8}
+          >
             <Text className="text-white font-bold text-base">Close</Text>
           </TouchableOpacity>
         </View>
@@ -2441,21 +3089,35 @@ export default function TimekeepingPunch() {
     } else if (subscriptionModalVisible) {
       return (
         <View className="p-5">
-          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">Package Details</Text>
+          <Text className="text-xl font-bold text-slate-800 mb-4 text-center">
+            Package Details
+          </Text>
           <View className="bg-slate-50 rounded-xl p-4 mb-6">
             <View className="flex-row items-center mb-4">
               <View className="w-10 h-10 rounded-full bg-orange-100 items-center justify-center mr-3">
                 <Ionicons name="pricetag-outline" size={20} color="#f97316" />
               </View>
-              <Text className="text-lg font-semibold text-slate-700">{subscriptionPlan || "Loading..."}</Text>
+              <Text className="text-lg font-semibold text-slate-700">
+                {subscriptionPlan || "Loading..."}
+              </Text>
             </View>
             {subscriptionPlan && subscriptionPlan.toLowerCase() === "pro" ? (
-              <Text className="text-base text-slate-700">As a Pro user, you can do offline time in/out (unless you're location-restricted).</Text>
+              <Text className="text-base text-slate-700">
+                As a Pro user, you can do offline time in/out (unless you're
+                location-restricted).
+              </Text>
             ) : (
-              <Text className="text-base text-slate-700">Your current package does not allow offline punching. Please remain connected.</Text>
+              <Text className="text-base text-slate-700">
+                Your current package does not allow offline punching. Please
+                remain connected.
+              </Text>
             )}
           </View>
-          <TouchableOpacity onPress={closeModal} className="bg-orange-400 py-3.5 rounded-xl items-center justify-center" activeOpacity={0.8}>
+          <TouchableOpacity
+            onPress={closeModal}
+            className="bg-orange-400 py-3.5 rounded-xl items-center justify-center"
+            activeOpacity={0.8}
+          >
             <Text className="text-white font-bold text-base">Close</Text>
           </TouchableOpacity>
         </View>
@@ -2465,13 +3127,22 @@ export default function TimekeepingPunch() {
   };
 
   const isPunchLocationBlocked = isLocationRestricted && !isWithinPunchLocation;
-  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 28) : insets.bottom;
-  const mainScrollBottomPadding = Platform.OS === "android" ? androidBottomInset + 40 : 32;
-  const modalContentBottomPadding = Platform.OS === "android" ? androidBottomInset + 16 : Math.max(insets.bottom, 20);
-  const modalSheetBottomPadding = Platform.OS === "android" ? androidBottomInset + 8 : 0;
+  const androidBottomInset =
+    Platform.OS === "android" ? Math.max(insets.bottom, 28) : insets.bottom;
+  const mainScrollBottomPadding =
+    Platform.OS === "android" ? androidBottomInset + 40 : 32;
+  const modalContentBottomPadding =
+    Platform.OS === "android"
+      ? androidBottomInset + 16
+      : Math.max(insets.bottom, 20);
+  const modalSheetBottomPadding =
+    Platform.OS === "android" ? androidBottomInset + 8 : 0;
 
   return (
-    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: insets.top + 60 }}>
+    <SafeAreaView
+      className="flex-1 bg-white"
+      style={{ paddingTop: insets.top + 60 }}
+    >
       <Animated.View
         style={{
           flex: 1,
@@ -2482,58 +3153,102 @@ export default function TimekeepingPunch() {
       >
         <ScrollView
           className="flex-1"
-          contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 16, paddingBottom: mainScrollBottomPadding }}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
+          contentContainerStyle={{
+            paddingHorizontal: 16,
+            paddingTop: 16,
+            paddingBottom: mainScrollBottomPadding,
+          }}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+          }
         >
           {/* Status cards */}
           <View className="flex-row justify-between mb-6 gap-2">
             {/* Network */}
-            <TouchableOpacity className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80" onPress={() => openModal("network")}>
+            <TouchableOpacity
+              className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80"
+              onPress={() => openModal("network")}
+            >
               <View className="flex-row items-center">
-                <View className={`w-7 h-7 rounded-full ${wifiConnected ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-2`}>
-                  <Ionicons name="wifi" size={16} color={wifiConnected ? "#fb923c" : "#94a3b8"} />
+                <View
+                  className={`w-7 h-7 rounded-full ${wifiConnected ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-2`}
+                >
+                  <Ionicons
+                    name="wifi"
+                    size={16}
+                    color={wifiConnected ? "#fb923c" : "#94a3b8"}
+                  />
                 </View>
                 <View>
                   <Text className="text-xs text-slate-500">Network</Text>
-                  <Text className="text-sm font-medium text-slate-700">{wifiConnected ? "Connected" : "Disconnected"}</Text>
+                  <Text className="text-sm font-medium text-slate-700">
+                    {wifiConnected ? "Connected" : "Disconnected"}
+                  </Text>
                 </View>
               </View>
             </TouchableOpacity>
 
             {/* Location */}
-            <TouchableOpacity className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80" onPress={() => openModal("location")}>
+            <TouchableOpacity
+              className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80"
+              onPress={() => openModal("location")}
+            >
               <View className="flex-row items-center">
-                <View className={`w-7 h-7 rounded-full ${locationEnabled ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-2`}>
-                  <Ionicons name="location" size={16} color={locationEnabled ? "#fb923c" : "#94a3b8"} />
+                <View
+                  className={`w-7 h-7 rounded-full ${locationEnabled ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-2`}
+                >
+                  <Ionicons
+                    name="location"
+                    size={16}
+                    color={locationEnabled ? "#fb923c" : "#94a3b8"}
+                  />
                 </View>
                 <View>
                   <Text className="text-xs text-slate-500">Location</Text>
-                  <Text className="text-sm font-medium text-slate-700">{locationEnabled ? "Enabled" : "Disabled"}</Text>
+                  <Text className="text-sm font-medium text-slate-700">
+                    {locationEnabled ? "Enabled" : "Disabled"}
+                  </Text>
                 </View>
               </View>
             </TouchableOpacity>
 
             {/* Subscription/Package */}
-            <TouchableOpacity className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80" onPress={() => openModal("subscription")}>
+            <TouchableOpacity
+              className="flex-1 bg-slate-50 rounded-xl p-2 active:opacity-80"
+              onPress={() => openModal("subscription")}
+            >
               <View className="flex-row items-center">
                 <View className="w-7 h-7 rounded-full bg-orange-100 items-center justify-center mr-2">
                   <Ionicons name="pricetag-outline" size={16} color="#fb923c" />
                 </View>
                 <View>
                   <Text className="text-xs text-slate-500">Package</Text>
-                  <Text className="text-sm font-medium text-slate-700">{subscriptionPlan || "Loading..."}</Text>
+                  <Text className="text-sm font-medium text-slate-700">
+                    {subscriptionPlan || "Loading..."}
+                  </Text>
                 </View>
               </View>
             </TouchableOpacity>
           </View>
 
           {/* Main status card */}
-          <Animated.View className="bg-slate-50 rounded-xl p-5 mb-6 " style={{ transform: [{ scale: pulseAnim }] }}>
+          <Animated.View
+            className="bg-slate-50 rounded-xl p-5 mb-6 "
+            style={{ transform: [{ scale: pulseAnim }] }}
+          >
             <View className="items-center mb-4">
-              <View className={`w-16 h-16 rounded-full items-center justify-center mb-2 ${isTimeIn ? "bg-orange-100" : "bg-slate-100"}`}>
-                <Ionicons name="time-outline" size={32} color={isTimeIn ? "#fb923c" : "#94a3b8"} />
+              <View
+                className={`w-16 h-16 rounded-full items-center justify-center mb-2 ${isTimeIn ? "bg-orange-100" : "bg-slate-100"}`}
+              >
+                <Ionicons
+                  name="time-outline"
+                  size={32}
+                  color={isTimeIn ? "#fb923c" : "#94a3b8"}
+                />
               </View>
-              <Text className="text-2xl font-bold text-slate-800">{isTimeIn ? "On the Clock" : "Off the Clock"}</Text>
+              <Text className="text-2xl font-bold text-slate-800">
+                {isTimeIn ? "On the Clock" : "Off the Clock"}
+              </Text>
               {punchTime && (
                 <Text className="text-sm text-slate-500 mt-1">
                   {isTimeIn ? "Timed in at: " : "Timed out at: "}
@@ -2551,9 +3266,13 @@ export default function TimekeepingPunch() {
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
                   <Feather name="clock" size={16} color="#f97316" />
-                  <Text className="ml-2 text-sm font-medium text-slate-700">Session Time</Text>
+                  <Text className="ml-2 text-sm font-medium text-slate-700">
+                    Session Time
+                  </Text>
                 </View>
-                <Text className="text-base font-semibold text-slate-800">{formatTime(sessionElapsed)}</Text>
+                <Text className="text-base font-semibold text-slate-800">
+                  {formatTime(sessionElapsed)}
+                </Text>
               </View>
             </View>
 
@@ -2562,14 +3281,22 @@ export default function TimekeepingPunch() {
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
                   <Feather name="coffee" size={16} color="#f97316" />
-                  <Text className="ml-2 text-sm font-medium text-slate-700">Coffee Break</Text>
+                  <Text className="ml-2 text-sm font-medium text-slate-700">
+                    Coffee Break
+                  </Text>
                 </View>
                 <View className="flex-row items-center">
-                  <Text className="text-base font-semibold text-slate-800">{formatTime(totalCoffeeTime)}</Text>
-                  {isCoffeeBreakActive && <View className="ml-2 w-2 h-2 rounded-full bg-orange-400" />}
+                  <Text className="text-base font-semibold text-slate-800">
+                    {formatTime(totalCoffeeTime)}
+                  </Text>
+                  {isCoffeeBreakActive && (
+                    <View className="ml-2 w-2 h-2 rounded-full bg-orange-400" />
+                  )}
                 </View>
               </View>
-              <Text className="text-xs text-slate-500 mt-1">{coffeeBreakCount}/2 breaks used</Text>
+              <Text className="text-xs text-slate-500 mt-1">
+                {coffeeBreakCount}/2 breaks used
+              </Text>
             </View>
 
             {/* Lunch */}
@@ -2577,28 +3304,48 @@ export default function TimekeepingPunch() {
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
                   <Feather name="coffee" size={16} color="#f97316" />
-                  <Text className="ml-2 text-sm font-medium text-slate-700">Lunch Break</Text>
+                  <Text className="ml-2 text-sm font-medium text-slate-700">
+                    Lunch Break
+                  </Text>
                 </View>
                 <View className="flex-row items-center">
-                  <Text className="text-base font-semibold text-slate-800">{formatTime(totalLunchTime)}</Text>
-                  {isLunchBreakActive && <View className="ml-2 w-2 h-2 rounded-full bg-orange-400" />}
+                  <Text className="text-base font-semibold text-slate-800">
+                    {formatTime(totalLunchTime)}
+                  </Text>
+                  {isLunchBreakActive && (
+                    <View className="ml-2 w-2 h-2 rounded-full bg-orange-400" />
+                  )}
                 </View>
               </View>
             </View>
           </Animated.View>
 
+          <TouchableOpacity
+            onPress={openPunchLogRequestModal}
+            className="mb-4 py-3 rounded-xl border border-orange-300 bg-orange-50 flex-row items-center justify-center active:opacity-80"
+            activeOpacity={0.85}
+          >
+            <Ionicons name="document-text-outline" size={20} color="#ea580c" />
+            <Text className="text-orange-600 font-semibold ml-2">
+              Request Punch Log
+            </Text>
+          </TouchableOpacity>
+
           {/* Time In/Out button */}
           {isPunchLocationBlocked && (
             <View className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2">
               <Text className="text-sm text-red-700">
-                {punchLocationErrorMessage || "You are outside your assigned punch location."}
+                {punchLocationErrorMessage ||
+                  "You are outside your assigned punch location."}
               </Text>
             </View>
           )}
           <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
             <TouchableOpacity
               onPress={handlePunch}
-              disabled={loading || !companySettingsFetched || isPunchLocationBlocked}
+              disabled={
+                loading || !companySettingsFetched || isPunchLocationBlocked
+              }
               className={`py-4 rounded-lg items-center justify-center mb-4 ${
                 isPunchLocationBlocked
                   ? "bg-slate-300"
@@ -2638,15 +3385,23 @@ export default function TimekeepingPunch() {
               >
                 <TouchableOpacity
                   onPress={handleCoffeeBreak}
-                  disabled={loading || (!isCoffeeBreakActive && coffeeBreakCount >= 2)}
+                  disabled={
+                    loading || (!isCoffeeBreakActive && coffeeBreakCount >= 2)
+                  }
                   className={`py-3.5 rounded-lg items-center justify-center ${
-                    isCoffeeBreakActive ? "bg-slate-500" : coffeeBreakCount >= 2 ? "bg-slate-300" : "bg-orange-400"
+                    isCoffeeBreakActive
+                      ? "bg-slate-500"
+                      : coffeeBreakCount >= 2
+                        ? "bg-slate-300"
+                        : "bg-orange-400"
                   }`}
                   activeOpacity={0.8}
                 >
                   <View className="flex-row items-center">
                     <Feather name="coffee" size={16} color="#fff" />
-                    <Text className="text-white font-semibold ml-2">{isCoffeeBreakActive ? "End Coffee" : "Coffee Break"}</Text>
+                    <Text className="text-white font-semibold ml-2">
+                      {isCoffeeBreakActive ? "End Coffee" : "Coffee Break"}
+                    </Text>
                   </View>
                 </TouchableOpacity>
               </Animated.View>
@@ -2661,15 +3416,23 @@ export default function TimekeepingPunch() {
               >
                 <TouchableOpacity
                   onPress={handleLunchBreak}
-                  disabled={loading || (!isLunchBreakActive && totalLunchTime > 0)}
+                  disabled={
+                    loading || (!isLunchBreakActive && totalLunchTime > 0)
+                  }
                   className={`py-3.5 rounded-lg items-center justify-center ${
-                    isLunchBreakActive ? "bg-slate-500" : totalLunchTime > 0 ? "bg-slate-300" : "bg-orange-400"
+                    isLunchBreakActive
+                      ? "bg-slate-500"
+                      : totalLunchTime > 0
+                        ? "bg-slate-300"
+                        : "bg-orange-400"
                   }`}
                   activeOpacity={0.8}
                 >
                   <View className="flex-row items-center">
                     <Feather name="coffee" size={16} color="#fff" />
-                    <Text className="text-white font-semibold ml-2">{isLunchBreakActive ? "End Lunch" : "Lunch Break"}</Text>
+                    <Text className="text-white font-semibold ml-2">
+                      {isLunchBreakActive ? "End Lunch" : "Lunch Break"}
+                    </Text>
                   </View>
                 </TouchableOpacity>
               </Animated.View>
@@ -2677,6 +3440,381 @@ export default function TimekeepingPunch() {
           )}
         </ScrollView>
       </Animated.View>
+
+      <Modal
+        visible={punchLogRequestModalVisible}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        onRequestClose={closePunchLogRequestModal}
+      >
+        <View style={{ flex: 1 }}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === "ios" ? 48 : 0}
+          >
+            <View style={{ flex: 1, justifyContent: "flex-end" }}>
+              <TouchableOpacity
+                style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.45)" }}
+                activeOpacity={1}
+                onPress={closePunchLogRequestModal}
+              />
+              <TouchableWithoutFeedback
+                onPress={Keyboard.dismiss}
+                accessible={false}
+              >
+                <View
+                  className="bg-white rounded-t-2xl"
+                  style={{
+                    maxHeight: height * 0.92,
+                    paddingBottom: modalContentBottomPadding,
+                  }}
+                >
+                  <View className="flex-row items-center justify-between px-4 pt-3 pb-2 border-b border-slate-100">
+                    <Text className="text-lg font-bold text-slate-800">
+                      Request punch log
+                    </Text>
+                    <TouchableOpacity
+                      onPress={closePunchLogRequestModal}
+                      hitSlop={12}
+                    >
+                      <Ionicons name="close" size={26} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView
+                    keyboardShouldPersistTaps="handled"
+                    nestedScrollEnabled
+                    scrollEnabled={
+                      !(plReqDateModalVisible || plTimeModalVisible)
+                    }
+                    contentContainerStyle={{
+                      paddingHorizontal: 16,
+                      paddingTop: 12,
+                      paddingBottom: 24,
+                    }}
+                  >
+                    <Text className="text-sm text-slate-500 mb-4">
+                      Submit missing or corrected times for approval. Date and
+                      times are sent as you pick them on this device (local
+                      time, no timezone conversion). Clock-in and clock-out must
+                      not be in the future.
+                    </Text>
+
+                    <Text className="text-base font-semibold text-slate-800 mb-2">
+                      Requested date <Text className="text-red-500">*</Text>
+                    </Text>
+                    <TouchableOpacity
+                      className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
+                      onPress={() => {
+                        dismissPlTimePickerSheet();
+                        setPlApproverOpen(false);
+                        setPlReqDateModalVisible(true);
+                      }}
+                    >
+                      <Text className="text-slate-800">
+                        {plReqDate.toLocaleDateString()}
+                      </Text>
+                      <Ionicons
+                        name="calendar-outline"
+                        size={18}
+                        color="#6B7280"
+                      />
+                    </TouchableOpacity>
+
+                    <Text className="text-base font-semibold text-slate-800 mb-2">
+                      Requested clock-in <Text className="text-red-500">*</Text>
+                    </Text>
+                    <TouchableOpacity
+                      className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
+                      onPress={() => openPlRequestTimePicker("in")}
+                    >
+                      <Text className="text-slate-800">
+                        {plClockInTime.toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </Text>
+                      <Ionicons name="time-outline" size={18} color="#6B7280" />
+                    </TouchableOpacity>
+
+                    <Text className="text-base font-semibold text-slate-800 mb-2">
+                      Requested clock-out{" "}
+                      <Text className="text-red-500">*</Text>
+                    </Text>
+                    <TouchableOpacity
+                      className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
+                      onPress={() => openPlRequestTimePicker("out")}
+                    >
+                      <Text className="text-slate-800">
+                        {plClockOutTime.toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </Text>
+                      <Ionicons name="time-outline" size={18} color="#6B7280" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      className="flex-row items-center mb-4 py-1"
+                      onPress={() =>
+                        setPlClockOutCrossesNextDay((prev) => !prev)
+                      }
+                      activeOpacity={0.7}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{
+                        checked: plClockOutCrossesNextDay,
+                      }}
+                    >
+                      <View
+                        className={`w-6 h-6 rounded border mr-3 items-center justify-center ${
+                          plClockOutCrossesNextDay
+                            ? "bg-orange-500 border-orange-500"
+                            : "border-slate-300 bg-white"
+                        }`}
+                      >
+                        {plClockOutCrossesNextDay ? (
+                          <Ionicons name="checkmark" size={16} color="#fff" />
+                        ) : null}
+                      </View>
+                      <Text className="text-slate-700 flex-shrink">
+                        Clock-out crosses next day?
+                      </Text>
+                    </TouchableOpacity>
+
+                    <Text className="text-xs text-slate-500 mb-1">
+                      Clock-in will be sent as local time (e.g.{" "}
+                      {formatNaiveLocalDateTimeFromPickers(
+                        plReqDate,
+                        plClockInTime,
+                      ) ?? "—"}
+                      ). Turn on{" "}
+                      <Text className="font-medium text-slate-600">
+                        Clock-out crosses next day?
+                      </Text>{" "}
+                      if out-time is on the next calendar day.
+                    </Text>
+
+                    <View className="mb-4 mt-2" style={{ zIndex: 8000 }}>
+                      <Text className="text-base font-semibold text-slate-800 mb-2">
+                        Approver <Text className="text-red-500">*</Text>
+                      </Text>
+                      {plApproversLoading ? (
+                        <ActivityIndicator color="#ea580c" />
+                      ) : (
+                        <DropDownPicker
+                          open={plApproverOpen}
+                          value={plApproverValue}
+                          items={plApproverItems}
+                          setOpen={(open) => {
+                            setPlApproverOpen(open);
+                            if (open) {
+                              setPlReqDateModalVisible(false);
+                              dismissPlTimePickerSheet();
+                              Keyboard.dismiss();
+                            }
+                          }}
+                          setValue={setPlApproverValue}
+                          setItems={setPlApproverItems}
+                          placeholder="Select approver"
+                          textStyle={{ color: "#374151" }}
+                          style={{
+                            borderColor: "#F1F5F9",
+                            backgroundColor: "#F8FAFC",
+                            minHeight: 50,
+                          }}
+                          dropDownContainerStyle={{
+                            borderColor: "#F1F5F9",
+                            backgroundColor: "#F9FAFB",
+                            maxHeight: 220,
+                          }}
+                          placeholderStyle={{ color: "#9CA3AF" }}
+                          zIndex={8000}
+                          zIndexInverse={6000}
+                          listMode="SCROLLVIEW"
+                          nestedScrollEnabled
+                          scrollViewProps={{ nestedScrollEnabled: true }}
+                          autoScroll={false}
+                        />
+                      )}
+                    </View>
+
+                    <View style={{ zIndex: 1 }}>
+                      <Text className="text-base font-semibold text-slate-800 mb-2">
+                        Reason (optional)
+                      </Text>
+                      <TextInput
+                        className="border border-slate-200 rounded-lg px-3 py-3 text-slate-800 mb-4 bg-white"
+                        placeholder="e.g. Forgot to clock in"
+                        placeholderTextColor="#94a3b8"
+                        multiline
+                        value={plReason}
+                        onChangeText={setPlReason}
+                        style={{ minHeight: 72, textAlignVertical: "top" }}
+                      />
+
+                      <Text className="text-base font-semibold text-slate-800 mb-2">
+                        Description (optional)
+                      </Text>
+                      <TextInput
+                        className="border border-slate-200 rounded-lg px-3 py-3 text-slate-800 mb-4 bg-white"
+                        placeholder="e.g. Was on site from opening"
+                        placeholderTextColor="#94a3b8"
+                        multiline
+                        value={plDescription}
+                        onChangeText={setPlDescription}
+                        style={{ minHeight: 80, textAlignVertical: "top" }}
+                      />
+
+                      <TouchableOpacity
+                        onPress={submitPunchLogRequest}
+                        disabled={plSubmitting || plApproversLoading}
+                        className={`py-3.5 rounded-xl items-center ${plSubmitting || plApproversLoading ? "bg-slate-300" : "bg-orange-400"}`}
+                      >
+                        {plSubmitting ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <Text className="text-white font-bold">
+                            Submit request
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  </ScrollView>
+                </View>
+              </TouchableWithoutFeedback>
+            </View>
+          </KeyboardAvoidingView>
+
+          {plReqDateModalVisible ? (
+            <View
+              pointerEvents="box-none"
+              style={[
+                StyleSheet.absoluteFillObject,
+                {
+                  zIndex: 50000,
+                  elevation: Platform.OS === "android" ? 48 : 0,
+                  justifyContent: "center",
+                  paddingHorizontal: 24,
+                },
+              ]}
+            >
+              <TouchableOpacity
+                style={[
+                  StyleSheet.absoluteFillObject,
+                  { backgroundColor: "rgba(15,23,42,0.55)" },
+                ]}
+                activeOpacity={1}
+                onPress={() => setPlReqDateModalVisible(false)}
+              />
+              <View
+                style={{
+                  backgroundColor: "#fff",
+                  borderRadius: 16,
+                  padding: 16,
+                  width: "100%",
+                  maxWidth: 400,
+                  alignSelf: "center",
+                  zIndex: 50001,
+                  elevation: Platform.OS === "android" ? 49 : 0,
+                }}
+              >
+                <Text className="text-lg font-bold text-slate-800 mb-2 text-center">
+                  Requested date
+                </Text>
+                <DateTimePicker
+                  value={plReqDate}
+                  mode="date"
+                  display={Platform.OS === "ios" ? "spinner" : "default"}
+                  onChange={onPlReqDateModalChange}
+                  themeVariant={Platform.OS === "ios" ? "light" : undefined}
+                  textColor={Platform.OS === "ios" ? "#0f172a" : undefined}
+                  style={Platform.OS === "ios" ? { width: "100%" } : undefined}
+                />
+                {Platform.OS === "ios" && (
+                  <TouchableOpacity
+                    onPress={() => setPlReqDateModalVisible(false)}
+                    className="bg-orange-400 py-3 rounded-xl items-center mt-2"
+                  >
+                    <Text className="text-white font-bold">Done</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          ) : null}
+
+          {plTimeModalVisible &&
+          (plTimeModalKind === "in" || plTimeModalKind === "out") ? (
+            <View
+              pointerEvents="box-none"
+              style={[
+                StyleSheet.absoluteFillObject,
+                {
+                  zIndex: 50000,
+                  elevation: Platform.OS === "android" ? 48 : 0,
+                  justifyContent: "center",
+                  paddingHorizontal: 24,
+                },
+              ]}
+            >
+              <TouchableOpacity
+                style={[
+                  StyleSheet.absoluteFillObject,
+                  { backgroundColor: "rgba(15,23,42,0.55)" },
+                ]}
+                activeOpacity={1}
+                onPress={dismissPlTimePickerSheet}
+              />
+              <View
+                style={{
+                  backgroundColor: "#fff",
+                  borderRadius: 16,
+                  padding: 16,
+                  width: "100%",
+                  maxWidth: 400,
+                  alignSelf: "center",
+                  zIndex: 50001,
+                  elevation: Platform.OS === "android" ? 49 : 0,
+                }}
+              >
+                <Text className="text-lg font-bold text-slate-800 mb-2 text-center">
+                  {plTimeModalKind === "out"
+                    ? "Clock out time"
+                    : "Clock in time"}
+                </Text>
+                <DateTimePicker
+                  key={`pl-request-time-${plTimeModalKind}-${plTimePickerSessionRef.current}`}
+                  value={
+                    Platform.OS === "ios"
+                      ? cloneJsDate(
+                          combineDateAndTime(
+                            IOS_PL_REQ_LOG_TIME_PICKER_ANCHOR_DATE,
+                            plTimeModalValue,
+                          ),
+                        )
+                      : plTimeModalValue
+                  }
+                  mode="time"
+                  display={Platform.OS === "ios" ? "spinner" : "default"}
+                  is24Hour={Platform.OS === "android" ? true : undefined}
+                  onChange={onPlTimeModalChange}
+                  themeVariant={Platform.OS === "ios" ? "light" : undefined}
+                  textColor={Platform.OS === "ios" ? "#0f172a" : undefined}
+                  style={Platform.OS === "ios" ? { width: "100%" } : undefined}
+                />
+                {Platform.OS === "ios" && (
+                  <TouchableOpacity
+                    onPress={dismissPlTimePickerSheet}
+                    className="bg-orange-400 py-3 rounded-xl items-center mt-2"
+                  >
+                    <Text className="text-white font-bold">Done</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          ) : null}
+        </View>
+      </Modal>
 
       {/* Bottom-sheet modals */}
       {(networkModalVisible ||
@@ -2686,7 +3824,12 @@ export default function TimekeepingPunch() {
         clockOutConfirmModalVisible ||
         clockInEarlyModalVisible ||
         noScheduledShiftClockInModalVisible) && (
-        <Modal transparent animationType="none" visible onRequestClose={closeModal}>
+        <Modal
+          transparent
+          animationType="none"
+          visible
+          onRequestClose={closeModal}
+        >
           <View style={{ flex: 1 }}>
             <Animated.View
               style={{
@@ -2715,7 +3858,10 @@ export default function TimekeepingPunch() {
                 paddingBottom: modalSheetBottomPadding,
               }}
             >
-              <View style={{ alignItems: "center", paddingVertical: 12 }} {...modalPanResponder.panHandlers}>
+              <View
+                style={{ alignItems: "center", paddingVertical: 12 }}
+                {...modalPanResponder.panHandlers}
+              >
                 <View
                   style={{
                     width: 40,

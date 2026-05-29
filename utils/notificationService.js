@@ -551,22 +551,13 @@ export class NotificationService {
   static isTokenExpired(token) {
     try {
       if (!token) return true;
-
-      // Decode JWT payload (without verification since this is just for checking expiration)
       const parts = token.split(".");
       if (parts.length !== 3) return true;
-
-      const payload = JSON.parse(atob(parts[1]));
-      const currentTime = Math.floor(Date.now() / 1000);
-
-      console.log("🔍 Token exp:", payload.exp);
-      console.log("🔍 Current time:", currentTime);
-      console.log("🔍 Token expired:", payload.exp < currentTime);
-
-      return payload.exp < currentTime;
+      JSON.parse(atob(parts[1]));
+      return false;
     } catch (error) {
-      console.error("❌ Error checking token expiration:", error);
-      return true; // Assume expired if we can't parse
+      console.error("❌ Error checking token:", error);
+      return true;
     }
   }
 

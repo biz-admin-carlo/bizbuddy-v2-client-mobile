@@ -24,6 +24,11 @@ import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../../config/constant";
+import {
+  formatLeaveBoundaryLabel,
+  formatLeaveDateTimeLabel,
+  normalizeLeaveRecord,
+} from "../../../../utils/dateOnlyUtils";
 
 const { height } = Dimensions.get("window");
 
@@ -65,18 +70,6 @@ const LeaveStatusBadge = ({ status }) => {
       <Text className={`text-xs font-medium ${textColor}`}>{status}</Text>
     </View>
   );
-};
-
-const formatDateTime = (dateString) => {
-  const date = new Date(dateString);
-  return date.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
 };
 
 const FilterOption = ({ label, isActive, onPress }) => {
@@ -287,8 +280,11 @@ export default function ManageLeaves() {
       });
       const data = await res.json();
       if (res.ok) {
-        setApproverLeaves(data.data);
-        applyFiltersAndSort(data.data, activeFilter, sortOption);
+        const rows = Array.isArray(data.data)
+          ? data.data.map(normalizeLeaveRecord)
+          : [];
+        setApproverLeaves(rows);
+        applyFiltersAndSort(rows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leaves.");
       }
@@ -618,19 +614,19 @@ export default function ManageLeaves() {
               <View className="flex-row items-center mb-1">
                 <Ionicons name="time-outline" size={16} color="#6B7280" />
                 <Text className="text-gray-600 text-sm ml-2">
-                  Submitted: {formatDateTime(item.createdAt)}
+                  Submitted: {formatLeaveDateTimeLabel(item.createdAt)}
                 </Text>
               </View>
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
                 <Text className="text-gray-600 text-sm ml-2">
-                  Start: {formatDateTime(item.startDate)}
+                  Start: {formatLeaveBoundaryLabel(item, "start")}
                 </Text>
               </View>
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
                 <Text className="text-gray-600 text-sm ml-2">
-                  End: {formatDateTime(item.endDate)}
+                  End: {formatLeaveBoundaryLabel(item, "end")}
                 </Text>
               </View>
               <View className="flex-row items-center">

@@ -16,31 +16,21 @@ import {
   Dimensions,
   Platform,
   TouchableOpacity,
+  Modal,
+  ScrollView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { API_BASE_URL } from "../../../config/constant";
+import {
+  formatLeaveBoundaryLabel,
+  formatLeaveDateTimeLabel,
+  normalizeLeaveRecord,
+} from "../../../utils/dateOnlyUtils";
 import { Ionicons } from "@expo/vector-icons";
 
 const { height } = Dimensions.get("window");
-
-/**
- * Formats a DateTime string (e.g., "2025-03-17 08:00:32+08")
- * into a user-friendly local string with date AND time,
- * e.g. "Mar 17, 2025, 8:00 AM"
- */
-const formatDateTime = (dateString) => {
-  const date = new Date(dateString);
-  return date.toLocaleString("en-US", {
-    month: "short", // e.g., "Mar"
-    day: "numeric", // e.g., "17"
-    year: "numeric", // e.g., "2025"
-    hour: "2-digit", // e.g., "08"
-    minute: "2-digit", // e.g., "00"
-    hour12: true, // show AM/PM
-  });
-};
 
 /**
  * A small sub-component to display a status badge with an icon.
@@ -155,6 +145,27 @@ const SortOption = ({ label, icon, onPress, isActive }) => {
 /**
  * A small sub-component displayed when there's no data.
  */
+const DetailRow = ({ icon, label, value }) => (
+  <View className="flex-row items-start mb-4">
+    <View className="w-9 h-9 rounded-full bg-slate-100 items-center justify-center mr-3">
+      <Ionicons name={icon} size={18} color="#64748b" />
+    </View>
+    <View className="flex-1">
+      <Text className="text-xs font-medium text-slate-500 mb-0.5">{label}</Text>
+      <Text className="text-slate-800 text-base leading-snug">{value}</Text>
+    </View>
+  </View>
+);
+
+const resolveLeaveTypeLabel = (item) =>
+  item?.leaveType ?? item?.type ?? item?.leavePolicy?.name ?? "Leave";
+
+const resolvePaidLabel = (item) => {
+  if (item?.isPaid === true) return "Paid leave";
+  if (item?.isPaid === false) return "Unpaid leave";
+  return null;
+};
+
 const EmptyListComponent = ({ activeFilter }) => (
   <View className="flex-1 justify-center items-center py-10">
     <View className="w-16 h-16 rounded-full bg-slate-100 items-center justify-center mb-4">
@@ -180,6 +191,8 @@ export default function LeavesApproval() {
   const [activeFilter, setActiveFilter] = useState("all");
   const [sortModalVisible, setSortModalVisible] = useState(false);
   const [sortOption, setSortOption] = useState("newest");
+  const [detailModalVisible, setDetailModalVisible] = useState(false);
+  const [selectedLeave, setSelectedLeave] = useState(null);
   const router = useRouter();
 
   // Animations
@@ -229,8 +242,11 @@ export default function LeavesApproval() {
       });
       const data = await res.json();
       if (res.ok) {
-        setLeaves(data.data);
-        applyFiltersAndSort(data.data, activeFilter, sortOption);
+        const rows = Array.isArray(data.data)
+          ? data.data.map(normalizeLeaveRecord)
+          : [];
+        setLeaves(rows);
+        applyFiltersAndSort(rows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leave logs.");
       }
@@ -378,6 +394,16 @@ export default function LeavesApproval() {
     ]).start();
   };
 
+  const openLeaveDetail = (item) => {
+    setSelectedLeave(item);
+    setDetailModalVisible(true);
+  };
+
+  const closeLeaveDetail = () => {
+    setDetailModalVisible(false);
+    setSelectedLeave(null);
+  };
+
   /**
    * Chooses an icon for the leave type.
    */
@@ -423,7 +449,14 @@ export default function LeavesApproval() {
 
     return (
       <Animated.View style={{ transform: [{ scale: itemScaleAnim }] }}>
-        <TouchableOpacity onPress={animateItemPress} activeOpacity={0.9} className="mb-4 rounded-xl overflow-hidden bg-white">
+        <TouchableOpacity
+          onPress={() => {
+            animateItemPress();
+            openLeaveDetail(item);
+          }}
+          activeOpacity={0.9}
+          className="mb-4 rounded-xl overflow-hidden bg-white"
+        >
           <View className="p-2 bg-slate-50 rounded-lg">
             {/* Row: Leave Type + Status Badge */}
             <View className="flex-row justify-between items-center pb-4 border-b border-slate-200">
@@ -441,17 +474,17 @@ export default function LeavesApproval() {
               {/* CreatedAt */}
               <View className="flex-row items-center mb-1">
                 <Ionicons name="time-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2">Submitted: {formatDateTime(item.createdAt)}</Text>
+                <Text className="text-slate-600 text-sm ml-2">Submitted: {formatLeaveDateTimeLabel(item.createdAt)}</Text>
               </View>
               {/* Start Date/Time */}
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2 ">Start: {formatDateTime(item.startDate)}</Text>
+                <Text className="text-slate-600 text-sm ml-2 ">Start: {formatLeaveBoundaryLabel(item, "start")}</Text>
               </View>
               {/* End Date/Time */}
               <View className="flex-row items-center mb-1">
                 <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2">End: {formatDateTime(item.endDate)}</Text>
+                <Text className="text-slate-600 text-sm ml-2">End: {formatLeaveBoundaryLabel(item, "end")}</Text>
               </View>
               {/* Reason */}
               <View className="flex-row items-center">
@@ -535,6 +568,133 @@ export default function LeavesApproval() {
           />
         )}
       </Animated.View>
+
+      {/* Leave detail modal */}
+      <Modal
+        visible={detailModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeLeaveDetail}
+      >
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity
+            style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.45)" }]}
+            activeOpacity={1}
+            onPress={closeLeaveDetail}
+          />
+          <View
+            className="bg-white rounded-t-3xl"
+            style={{
+              maxHeight: height * 0.88,
+              paddingBottom: Platform.OS === "ios" ? 34 : 24,
+            }}
+          >
+            {selectedLeave ? (
+              <>
+                <View className="items-center py-3">
+                  <View className="w-10 h-1 bg-slate-200 rounded-full" />
+                </View>
+
+                <View className="flex-row justify-between items-start px-5 pb-4 border-b border-slate-100">
+                  <View className="flex-row items-center flex-1 pr-3">
+                    <View className="w-12 h-12 rounded-full bg-orange-100 items-center justify-center mr-3">
+                      <Ionicons
+                        name={getLeaveTypeIcon(resolveLeaveTypeLabel(selectedLeave))}
+                        size={24}
+                        color="#f97316"
+                      />
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-xl font-bold text-slate-800">
+                        {resolveLeaveTypeLabel(selectedLeave)}
+                      </Text>
+                      <Text className="text-slate-500 text-sm mt-0.5">Leave request details</Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity onPress={closeLeaveDetail} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                    <Ionicons name="close" size={26} color="#64748b" />
+                  </TouchableOpacity>
+                </View>
+
+                <View className="px-5 py-3 border-b border-slate-100">
+                  <LeaveStatusBadge status={selectedLeave.status || "pending"} />
+                </View>
+
+                <ScrollView
+                  className="px-5 pt-4"
+                  showsVerticalScrollIndicator={false}
+                  bounces={false}
+                >
+                  <DetailRow
+                    icon="time-outline"
+                    label="Submitted"
+                    value={formatLeaveDateTimeLabel(selectedLeave.createdAt)}
+                  />
+                  <DetailRow
+                    icon="play-outline"
+                    label="Start"
+                    value={formatLeaveBoundaryLabel(selectedLeave, "start")}
+                  />
+                  <DetailRow
+                    icon="stop-outline"
+                    label="End"
+                    value={formatLeaveBoundaryLabel(selectedLeave, "end")}
+                  />
+                  {resolvePaidLabel(selectedLeave) ? (
+                    <DetailRow
+                      icon="card-outline"
+                      label="Pay type"
+                      value={resolvePaidLabel(selectedLeave)}
+                    />
+                  ) : null}
+                  <DetailRow
+                    icon="document-text-outline"
+                    label="Reason"
+                    value={
+                      selectedLeave.leaveReason?.trim()
+                        ? selectedLeave.leaveReason
+                        : "No reason provided"
+                    }
+                  />
+                  {selectedLeave.approver?.email ? (
+                    <DetailRow
+                      icon="person-outline"
+                      label="Approver"
+                      value={selectedLeave.approver.email}
+                    />
+                  ) : null}
+                  <DetailRow
+                    icon="chatbubble-outline"
+                    label="Approver comments"
+                    value={
+                      selectedLeave.approverComments?.trim()
+                        ? selectedLeave.approverComments
+                        : "No comments yet"
+                    }
+                  />
+                  {selectedLeave.id != null ? (
+                    <DetailRow
+                      icon="finger-print-outline"
+                      label="Request ID"
+                      value={String(selectedLeave.id)}
+                    />
+                  ) : null}
+                </ScrollView>
+
+                <View className="px-5 pt-2">
+                  <TouchableOpacity
+                    onPress={closeLeaveDetail}
+                    activeOpacity={0.85}
+                    className="bg-orange-500 rounded-xl py-3.5 items-center"
+                  >
+                    <Text className="text-white font-semibold text-base">Close</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
 
       {/* Sort Modal */}
       {sortModalVisible && (

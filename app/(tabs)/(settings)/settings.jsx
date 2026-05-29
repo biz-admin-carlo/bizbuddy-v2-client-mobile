@@ -26,7 +26,12 @@ import * as LocalAuthentication from "expo-local-authentication";
 import * as Location from "expo-location";
 import { API_BASE_URL, WEBSITE_URL } from "../../../config/constant";
 import useTutorialStore from "../../../store/tutorialStore";
-import { isTokenExpired } from "../../../store/useAuthStore";
+import useAuthStore, { getTokenCompanyId } from "../../../store/useAuthStore";
+import {
+  findVerifiedSessionToken,
+  persistCompanySessionToken,
+} from "../../../utils/authTokenStorage";
+import { verifySessionToken } from "../../../utils/authSession";
 import {
   MaterialIcons,
   Ionicons,
@@ -38,6 +43,20 @@ import io from "socket.io-client";
 // Same as your department page, define a min and max offset
 const { height } = Dimensions.get("window");
 const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
+
+/** Newest saved JWT that still passes server verification (for enabling biometric). */
+async function resolveActiveSessionTokenForBiometric() {
+  const verified = await findVerifiedSessionToken((t) =>
+    verifySessionToken(t, { strict: true }),
+  );
+  if (verified?.token) return verified.token;
+  const mem = useAuthStore.getState().token;
+  if (mem) {
+    const check = await verifySessionToken(mem, { strict: true });
+    if (check.valid) return mem;
+  }
+  return null;
+}
 
 const Settings = () => {
   const router = useRouter();
@@ -53,6 +72,7 @@ const Settings = () => {
   const [settingUpBiometric, setSettingUpBiometric] = useState(false);
   const [requestingLocationPermission, setRequestingLocationPermission] =
     useState(false);
+  const [deviceSectionExpanded, setDeviceSectionExpanded] = useState(false);
 
   // Instead of starting from 'height', we'll start from a partial off-screen
   // position to allow partial expansions as in the department page.
@@ -289,27 +309,20 @@ const Settings = () => {
       if (biometricEnabled) {
         await SecureStore.deleteItemAsync(BIOMETRIC_ENABLED_KEY);
         setBiometricEnabled(false);
-        Alert.alert("Biometric Disabled", "Biometric sign-in has been turned off for this device.", [{ text: "OK" }]);
+        Alert.alert(
+          "Biometric Disabled",
+          "Biometric sign-in has been turned off for this device.",
+          [{ text: "OK" }],
+        );
         return;
       }
 
-      // Check if user has a valid token
-      const token = await SecureStore.getItemAsync("token");
+      // Need a logged-in session (any company): vault, saved token, or in-memory store
+      const token = await resolveActiveSessionTokenForBiometric();
       if (!token) {
         Alert.alert(
           "No Active Session",
-          "Please sign in first before setting up biometric authentication.",
-          [{ text: "OK" }],
-        );
-        setSettingUpBiometric(false);
-        return;
-      }
-
-      // Check if token is expired
-      if (isTokenExpired(token)) {
-        Alert.alert(
-          "Session Expired",
-          "Your session has expired. Please sign in again before setting up biometric authentication.",
+          "Please sign in first. After you sign in, Face ID can be used on the sign-in screen for any company you have saved on this device.",
           [{ text: "OK" }],
         );
         setSettingUpBiometric(false);
@@ -341,9 +354,23 @@ const Settings = () => {
       if (result.success) {
         await SecureStore.setItemAsync(BIOMETRIC_ENABLED_KEY, "true");
         setBiometricEnabled(true);
+
+        try {
+          const active = await resolveActiveSessionTokenForBiometric();
+          if (active) {
+            await SecureStore.setItemAsync("token", active);
+            const cid = getTokenCompanyId(active);
+            if (cid) {
+              await persistCompanySessionToken(cid, active);
+            }
+          }
+        } catch (syncErr) {
+          console.warn("Biometric enable: session sync skipped", syncErr);
+        }
+
         Alert.alert(
           "Success",
-          "Face ID has been set up successfully! You can now use biometric authentication to sign in.",
+          "Face ID is enabled. On the sign-in screen you can use it for any company you have previously signed into on this device (each company keeps its own saved session).",
           [{ text: "OK" }],
         );
       } else {
@@ -397,7 +424,8 @@ const Settings = () => {
         return;
       }
 
-      const permissionResult = await Location.requestForegroundPermissionsAsync();
+      const permissionResult =
+        await Location.requestForegroundPermissionsAsync();
       if (permissionResult.granted) {
         Alert.alert("Success", "Location permission has been enabled.");
         return;
@@ -656,7 +684,7 @@ const Settings = () => {
         <TouchableOpacity
           onPress={handlePress}
           activeOpacity={0.8}
-          className="flex-row items-center bg-[#ffffff] border border-[#e2e8f0] rounded-[12px] px-4 py-4 mb-4"
+          className="flex-row items-start bg-[#ffffff] border border-[#e2e8f0] rounded-[12px] px-4 py-4 mb-4"
           style={{
             opacity: locked ? 0.7 : 1,
             ...Platform.select({
@@ -672,23 +700,35 @@ const Settings = () => {
             }),
           }}
         >
-          <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
+          <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3 mt-0.5">
             {getIconComponent(icon, iconType)}
           </View>
-          <Text className="text-medium font-semibold text-slate-700 flex-1">
+          <Text
+            className="text-medium font-semibold text-slate-700 flex-1 leading-6"
+            style={{ flexShrink: 1 }}
+          >
             {title}
           </Text>
           {locked ? (
-            <View className="bg-[#ffedd5] rounded-[16px] p-1.5">
+            <View className="bg-[#ffedd5] rounded-[16px] p-1.5 ml-2 mt-1">
               <MaterialIcons name="lock" size={16} color="#f97316" />
             </View>
           ) : (
-            <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+            <Ionicons
+              name="chevron-forward"
+              size={20}
+              color="#94a3b8"
+              style={{ marginLeft: 8, marginTop: 4 }}
+            />
           )}
         </TouchableOpacity>
       </Animated.View>
     );
   };
+
+  const deviceSettingsChevron = deviceSectionExpanded
+    ? "chevron-up"
+    : "chevron-down";
 
   return (
     <>
@@ -750,42 +790,51 @@ const Settings = () => {
                 },
               })}
             >
-              <View className="flex-row items-center mb-3">
-                <View className="w-14 h-14 rounded-full bg-orange-400 items-center justify-center mr-3">
+              <View className="flex-row items-start mb-3">
+                <View className="w-14 h-14 rounded-full bg-orange-400 items-center justify-center mr-3 mt-0.5">
                   <Text className="text-white text-[18px] font-bold">
                     {firstName.charAt(0).toUpperCase()}
                     {lastName.charAt(0).toUpperCase()}
                   </Text>
                 </View>
 
-                <View className="ml-1">
-                  <Text className="text-xl font-bold text-slate-700 capitalize ">
+                <View className="ml-1 flex-1" style={{ minWidth: 0 }}>
+                  <Text
+                    className="text-xl font-bold text-slate-700 capitalize"
+                    style={{ flexShrink: 1 }}
+                  >
                     {firstName} {lastName}
                   </Text>
-                  <View className="flex-row items-center mt-1">
+                  <View className="flex-row flex-wrap items-center mt-1">
                     <View className="bg-orange-400 rounded-[12px] px-2 py-0.5 mr-2">
                       <Text className="text-[12px] text-white font-[500]">
                         {userRole.charAt(0).toUpperCase() + userRole.slice(1)}
                       </Text>
                     </View>
-                    <Text className="text-[14px] text-[#64748b]">
+                    <Text
+                      className="text-[14px] text-[#64748b]"
+                      style={{ flexShrink: 1 }}
+                    >
                       {companyName}
                     </Text>
                   </View>
                 </View>
               </View>
 
-              <View className="p-3 rounded-[8px] bg-orange-100 flex-row items-center">
+              <View className="p-3 rounded-[8px] bg-orange-100 flex-row items-start">
                 <Ionicons
                   name="star"
                   size={18}
                   color="#f97316"
-                  style={{ marginRight: 8 }}
+                  style={{ marginRight: 8, marginTop: 2 }}
                 />
                 <Text className="text-orange-700 text-[14px] flex-1">
                   <Text className="font-bold">{subscriptionPlan}</Text>
                 </Text>
-                <TouchableOpacity onPress={() => Linking.openURL(WEBSITE_URL)}>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(WEBSITE_URL)}
+                  style={{ marginLeft: 8, marginTop: 2 }}
+                >
                   <Text className="text-[12px] text-orange-700 font-bold">
                     Web
                   </Text>
@@ -797,7 +846,7 @@ const Settings = () => {
             <TouchableOpacity
               onPress={replayTutorial}
               activeOpacity={0.85}
-              className="mt-3 flex-row items-center bg-orange-50 border border-orange-100 rounded-[12px] px-4 py-4"
+              className="mt-3 flex-row items-start bg-orange-50 border border-orange-100 rounded-[12px] px-4 py-4"
               style={Platform.select({
                 ios: {
                   shadowColor: "#000",
@@ -808,7 +857,7 @@ const Settings = () => {
                 android: { elevation: 2 },
               })}
             >
-              <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
+              <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3 mt-0.5">
                 <Ionicons
                   name="help-circle-outline"
                   size={20}
@@ -823,84 +872,55 @@ const Settings = () => {
                   Replay the guided tour with tips
                 </Text>
               </View>
-              <Ionicons name="play-circle" size={20} color="#f97316" />
+              <Ionicons
+                name="play-circle"
+                size={20}
+                color="#f97316"
+                style={{ marginTop: 4, marginLeft: 8 }}
+              />
             </TouchableOpacity>
 
-            {/* Biometric Setup Button - Always visible */}
-            <Animated.View
-              style={{ transform: [{ scale: biometricButtonScale }] }}
+            {/* Device settings: Face ID + Location (collapsible) */}
+            <TouchableOpacity
+              onPress={() => setDeviceSectionExpanded((o) => !o)}
+              activeOpacity={0.85}
+              className="mt-3 flex-row items-start bg-slate-100 border border-slate-200 rounded-[12px] px-4 py-3"
+              style={Platform.select({
+                ios: {
+                  shadowColor: "#000",
+                  shadowOffset: { width: 0, height: 1 },
+                  shadowOpacity: 0.05,
+                  shadowRadius: 2,
+                },
+                android: { elevation: 2 },
+              })}
             >
-              <TouchableOpacity
-                onPress={handleSetupBiometric}
-                disabled={
-                  settingUpBiometric ||
-                  (!biometricAvailable && !(Platform.OS === "ios" && __DEV__))
-                }
-                activeOpacity={0.85}
-                className="mt-3 flex-row items-center bg-slate-50 border border-slate-200 rounded-[12px] px-4 py-4"
-                style={[
-                  Platform.select({
-                    ios: {
-                      shadowColor: "#000",
-                      shadowOffset: { width: 0, height: 1 },
-                      shadowOpacity: 0.05,
-                      shadowRadius: 2,
-                    },
-                    android: { elevation: 2 },
-                  }),
-                  !biometricAvailable &&
-                    !(Platform.OS === "ios" && __DEV__) && { opacity: 0.6 },
-                ]}
-              >
-                <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3">
-                  {settingUpBiometric ? (
-                    <ActivityIndicator size="small" color="#ffffff" />
-                  ) : (
-                    <Ionicons
-                      name="finger-print-outline"
-                      size={20}
-                      color="#ffffff"
-                    />
-                  )}
-                </View>
-                <View className="flex-1">
-                  <Text className="text-medium font-semibold text-slate-800">
-                    {settingUpBiometric
-                      ? "Setting up Face ID..."
-                      : biometricEnabled
-                        ? "Disable Face ID"
-                        : "Set Up Face ID"}
-                  </Text>
-                  <Text className="text-[12px] text-slate-600 mt-0.5">
-                    {settingUpBiometric
-                      ? "Please authenticate with Face ID"
-                      : biometricEnabled
-                        ? "Face ID is enabled on this device"
-                        : biometricAvailable || (Platform.OS === "ios" && __DEV__)
-                          ? "Enable biometric authentication for quick sign in"
-                        : "Biometric authentication not available on this device"}
-                  </Text>
-                </View>
-                {!settingUpBiometric &&
-                  (biometricAvailable ||
-                    (Platform.OS === "ios" && __DEV__)) && (
-                    <Ionicons
-                      name="chevron-forward"
-                      size={20}
-                      color="#94a3b8"
-                    />
-                  )}
-              </TouchableOpacity>
-            </Animated.View>
+              <View className="w-10 h-10 rounded-md bg-slate-700 items-center justify-center mr-3 mt-0.5">
+                <Ionicons
+                  name="hardware-chip-outline"
+                  size={20}
+                  color="#ffffff"
+                />
+              </View>
+              <View className="flex-1">
+                <Text className="text-medium font-semibold text-slate-800">
+                  Device settings
+                </Text>
+                <Text className="text-[12px] text-slate-600 mt-0.5">
+                  Face ID, location, and permissions on this device
+                </Text>
+              </View>
+              <Ionicons
+                name={deviceSettingsChevron}
+                size={22}
+                color="#64748b"
+                style={{ marginTop: 4, marginLeft: 8 }}
+              />
+            </TouchableOpacity>
 
-            <Animated.View
-              style={{ transform: [{ scale: locationButtonScale }] }}
-            >
-              <TouchableOpacity
-                onPress={handleLocationSettings}
-                disabled={requestingLocationPermission}
-                activeOpacity={0.85}
-                className="mt-3 flex-row items-center bg-slate-50 border border-slate-200 rounded-[12px] px-4 py-4"
+            {deviceSectionExpanded && (
+              <View
+                className="mt-2 rounded-[12px] border border-slate-200 overflow-hidden bg-white"
                 style={Platform.select({
                   ios: {
                     shadowColor: "#000",
@@ -911,28 +931,110 @@ const Settings = () => {
                   android: { elevation: 2 },
                 })}
               >
-                <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3">
-                  {requestingLocationPermission ? (
-                    <ActivityIndicator size="small" color="#ffffff" />
-                  ) : (
-                    <Ionicons name="location-outline" size={20} color="#ffffff" />
-                  )}
-                </View>
-                <View className="flex-1">
-                  <Text className="text-medium font-semibold text-slate-800">
-                    {requestingLocationPermission
-                      ? "Checking location access..."
-                      : "Location Settings"}
-                  </Text>
-                  <Text className="text-[12px] text-slate-600 mt-0.5">
-                    Re-prompt location permission or open system settings
-                  </Text>
-                </View>
-                {!requestingLocationPermission && (
-                  <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
-                )}
-              </TouchableOpacity>
-            </Animated.View>
+                {/* Face ID */}
+                <Animated.View
+                  style={{ transform: [{ scale: biometricButtonScale }] }}
+                >
+                  <TouchableOpacity
+                    onPress={handleSetupBiometric}
+                    disabled={
+                      settingUpBiometric ||
+                      (!biometricAvailable &&
+                        !(Platform.OS === "ios" && __DEV__))
+                    }
+                    activeOpacity={0.85}
+                    className="flex-row items-start bg-slate-50 px-4 py-4 border-b border-slate-200"
+                    style={[
+                      !biometricAvailable &&
+                        !(Platform.OS === "ios" && __DEV__) && { opacity: 0.6 },
+                    ]}
+                  >
+                    <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3 mt-0.5">
+                      {settingUpBiometric ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <Ionicons
+                          name="finger-print-outline"
+                          size={20}
+                          color="#ffffff"
+                        />
+                      )}
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-medium font-semibold text-slate-800">
+                        {settingUpBiometric
+                          ? "Setting up Face ID..."
+                          : biometricEnabled
+                            ? "Disable Face ID"
+                            : "Set Up Face ID"}
+                      </Text>
+                      <Text className="text-[12px] text-slate-600 mt-0.5">
+                        {settingUpBiometric
+                          ? "Please authenticate with Face ID"
+                          : biometricEnabled
+                            ? "Face ID is enabled on this device"
+                            : biometricAvailable ||
+                                (Platform.OS === "ios" && __DEV__)
+                              ? "Use Face ID on sign-in for any company saved on this device"
+                              : "Biometric authentication not available on this device"}
+                      </Text>
+                    </View>
+                    {!settingUpBiometric &&
+                      (biometricAvailable ||
+                        (Platform.OS === "ios" && __DEV__)) && (
+                        <Ionicons
+                          name="chevron-forward"
+                          size={20}
+                          color="#94a3b8"
+                          style={{ marginTop: 4, marginLeft: 8 }}
+                        />
+                      )}
+                  </TouchableOpacity>
+                </Animated.View>
+
+                {/* Location */}
+                <Animated.View
+                  style={{ transform: [{ scale: locationButtonScale }] }}
+                >
+                  <TouchableOpacity
+                    onPress={handleLocationSettings}
+                    disabled={requestingLocationPermission}
+                    activeOpacity={0.85}
+                    className="flex-row items-start bg-slate-50 px-4 py-4"
+                  >
+                    <View className="w-10 h-10 rounded-md bg-slate-600 items-center justify-center mr-3 mt-0.5">
+                      {requestingLocationPermission ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <Ionicons
+                          name="location-outline"
+                          size={20}
+                          color="#ffffff"
+                        />
+                      )}
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-medium font-semibold text-slate-800">
+                        {requestingLocationPermission
+                          ? "Checking location access..."
+                          : "Location Settings"}
+                      </Text>
+                      <Text className="text-[12px] text-slate-600 mt-0.5">
+                        Re-prompt location permission or open system settings
+                      </Text>
+                    </View>
+                    {!requestingLocationPermission && (
+                      <Ionicons
+                        name="chevron-forward"
+                        size={20}
+                        color="#94a3b8"
+                        style={{ marginTop: 4, marginLeft: 8 }}
+                      />
+                    )}
+                  </TouchableOpacity>
+                </Animated.View>
+              </View>
+            )}
           </View>
 
           {/* Main Content Area */}

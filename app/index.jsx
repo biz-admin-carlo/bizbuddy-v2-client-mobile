@@ -19,6 +19,9 @@ import { getNativeAppVersion } from "../utils/versionCheck";
 export default function Index() {
   const router = useRouter();
   const [deviceVersion, setDeviceVersion] = useState(null);
+  const displayVersion = String(deviceVersion || VERSION).startsWith("v")
+    ? deviceVersion || VERSION
+    : `v${deviceVersion || VERSION}`;
 
   useEffect(() => {
     const initApp = async () => {
@@ -72,9 +75,7 @@ export default function Index() {
             Your business companion
           </Text>
 
-          <Text className="text-xs mb-8 text-slate-600">
-            Version {deviceVersion || VERSION}
-          </Text>
+          <Text className="text-xs mb-8 text-slate-600">Version {displayVersion}</Text>
 
           <ActivityIndicator size="large" color="#f97316" />
           <Text className="mt-4 text-slate-600">

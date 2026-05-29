@@ -30,12 +30,19 @@ import {
   FontAwesome5,
   Feather,
 } from "@expo/vector-icons";
+import { getInstallationId } from "../../utils/deviceId";
 import { NotificationService } from "../../utils/notificationService";
 import NotificationPermissionModal from "../../components/NotificationPermissionModal";
 import { useNotificationPermission } from "../../hooks/useNotificationPermission";
 import { useNotifications } from "../../hooks/useNotifications";
 
 const { height } = Dimensions.get("window");
+
+/** Prefer SecureStore so API calls match the token written by `login` (avoids stale Zustand vs disk). */
+const resolveAuthToken = async () => {
+  const stored = await SecureStore.getItemAsync("token");
+  return stored || useAuthStore.getState().token;
+};
 
 const formatAwayDuration = (lastActiveAt, status) => {
   if (status !== "away" || !lastActiveAt) return "";
@@ -195,8 +202,16 @@ const Profile = () => {
         useNativeDriver: true,
       }),
     ]).start();
-    fetchProfile();
   }, []);
+
+  useEffect(() => {
+    if (!token) {
+      setProfile(null);
+      setLoading(false);
+      return;
+    }
+    fetchProfile();
+  }, [token]);
 
   // Show notification modal when profile loads (after login)
   useEffect(() => {
@@ -381,7 +396,7 @@ const Profile = () => {
   const fetchProfile = async () => {
     setLoading(true);
     try {
-      const currentToken = token || (await SecureStore.getItemAsync("token"));
+      const currentToken = await resolveAuthToken();
       if (!currentToken) {
         Alert.alert("Session expired", "Please sign in again.");
         router.replace("(auth)/signin");
@@ -391,8 +406,14 @@ const Profile = () => {
         headers: { Authorization: `Bearer ${currentToken}` },
       });
       const data = await response.json();
-      if (response.ok) {
+      if (response.ok && data.data?.user && data.data?.profile) {
         setProfile(data.data);
+      } else if (response.ok) {
+        setProfile(null);
+        Alert.alert(
+          "Error",
+          "Your profile could not be loaded (unexpected response). Please try again or sign in with your password.",
+        );
       } else {
         Alert.alert("Error", data.message || "Failed to fetch profile.");
       }
@@ -408,7 +429,7 @@ const Profile = () => {
   };
 
   const updatePresenceToOffline = async () => {
-    const currentToken = token || (await SecureStore.getItemAsync("token"));
+    const currentToken = await resolveAuthToken();
     if (!currentToken) return;
     try {
       await fetch(`${API_BASE_URL}/api/presence`, {
@@ -432,7 +453,7 @@ const Profile = () => {
     setUpdating(true);
     setUpdateError("");
     try {
-      const currentToken = token || (await SecureStore.getItemAsync("token"));
+      const currentToken = await resolveAuthToken();
       if (!currentToken) {
         Alert.alert("Session expired", "Please sign in again.");
         router.replace("(auth)/signin");
@@ -474,7 +495,7 @@ const Profile = () => {
     setPassUpdating(true);
     setPassError("");
     try {
-      const currentToken = token || (await SecureStore.getItemAsync("token"));
+      const currentToken = await resolveAuthToken();
       if (!currentToken) {
         Alert.alert("Session expired", "Please sign in again.");
         router.replace("(auth)/signin");
@@ -525,13 +546,15 @@ const Profile = () => {
     setSigningOut(true);
     try {
       await updatePresenceToOffline();
-      const currentToken = token || (await SecureStore.getItemAsync("token"));
+      const currentToken = await resolveAuthToken();
+      const deviceId = await getInstallationId();
       const response = await fetch(`${API_BASE_URL}/api/account/sign-out`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${currentToken}`,
         },
+        body: JSON.stringify({ deviceId }),
       });
       if (response.ok) {
         await logout();
@@ -877,6 +900,29 @@ const Profile = () => {
           </View>
         </ScrollView>
       </Animated.View>
+
+      {/* BizBuddy AI chat — future feature; re-enable with Tabs.Screen in (tabs)/_layout.jsx */}
+      {/*
+      <TouchableOpacity
+        onPress={() => router.push("/(tabs)/ai-chats")}
+        activeOpacity={0.85}
+        className="absolute right-5 items-center justify-center bg-orange-400 rounded-full"
+        style={{
+          bottom: Platform.OS === "ios" ? 38 : 26,
+          width: 62,
+          height: 62,
+          borderWidth: 1,
+          borderColor: "rgba(255,255,255,0.55)",
+          shadowColor: "#fb923c",
+          shadowOffset: { width: 0, height: 0 },
+          shadowOpacity: 0.65,
+          shadowRadius: 14,
+          elevation: 12,
+        }}
+      >
+        <Ionicons name="chatbubbles-outline" size={24} color="#ffffff" />
+      </TouchableOpacity>
+      */}
 
       {/* 
         --------------------------------------------------------

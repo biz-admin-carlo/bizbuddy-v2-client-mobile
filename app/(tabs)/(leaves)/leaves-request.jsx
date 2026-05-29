@@ -26,6 +26,7 @@ import { useRouter, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../config/constant";
+import { formatLocalTimeHms } from "../../../utils/dateOnlyUtils";
 
 const { height } = Dimensions.get("window");
 
@@ -38,8 +39,6 @@ const combineDateAndTime = (date, time) => {
   combined.setMilliseconds(time.getMilliseconds());
   return combined;
 };
-
-const formatDateOnly = (date) => date.toISOString().split("T")[0];
 
 /** Pull an array of balance rows from typical API wrapper shapes */
 const extractBalancesList = (payload) => {
@@ -443,10 +442,18 @@ const SubmitLeaves = () => {
       }
 
       // Include leaveReason in the payload
+      const startIso = combinedStart.toISOString();
+      const endIso = combinedEnd.toISOString();
       const payload = {
         type: leaveType,
-        fromDate: formatDateOnly(combinedStart),
-        toDate: formatDateOnly(combinedEnd),
+        fromDate: startIso,
+        toDate: endIso,
+        startDate: startIso,
+        endDate: endIso,
+        fromTime: formatLocalTimeHms(combinedStart),
+        toTime: formatLocalTimeHms(combinedEnd),
+        startTime: formatLocalTimeHms(combinedStart),
+        endTime: formatLocalTimeHms(combinedEnd),
         approverId: approverValue,
         leaveReason,
         isPaid: isPaidLeave,

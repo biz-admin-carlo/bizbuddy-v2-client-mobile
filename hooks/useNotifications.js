@@ -1,10 +1,27 @@
 // hooks/useNotifications.js
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL } from "../config/constant";
 import io from "socket.io-client";
 import useNotificationStore from "../store/notificationStore";
+import useAuthStore from "../store/useAuthStore";
+import { isSessionInvalidResponse } from "../utils/authSession";
+import { removeStoredSessionToken } from "../utils/authTokenStorage";
+
+async function getAuthToken() {
+  const fromStore = useAuthStore.getState().token;
+  if (fromStore) return fromStore;
+  return SecureStore.getItemAsync("token");
+}
+
+function parseJsonErrorBody(errorText) {
+  try {
+    return JSON.parse(errorText);
+  } catch {
+    return null;
+  }
+}
 
 // Set to true to always use mock notifications (for testing)
 const USE_MOCK_NOTIFICATIONS = false;
@@ -295,6 +312,7 @@ const getMockNotifications = () => {
 };
 
 export const useNotifications = () => {
+  const { token, forceLogout } = useAuthStore();
   const {
     notifications,
     unreadCount,
@@ -304,6 +322,18 @@ export const useNotifications = () => {
     setLoading,
   } = useNotificationStore();
   const socketRef = useRef(null);
+
+  const handleSessionInvalid = useCallback(
+    async (authToken) => {
+      setNotifications([]);
+      setUnreadCount(0);
+      if (authToken) {
+        await removeStoredSessionToken(authToken);
+      }
+      await forceLogout();
+    },
+    [forceLogout, setNotifications, setUnreadCount],
+  );
 
   const fetchNotifications = async (seen = null) => {
     // Always use mock notifications if flag is set (for testing)
@@ -317,8 +347,8 @@ export const useNotifications = () => {
     }
 
     try {
-      const token = await SecureStore.getItemAsync("token");
-      if (!token) {
+      const authToken = await getAuthToken();
+      if (!authToken) {
         // Use mock notifications when no token
         const mockNotifications = getMockNotifications();
         setNotifications(mockNotifications);
@@ -338,7 +368,7 @@ export const useNotifications = () => {
       console.log("[Notifications] Fetching from:", url);
       const response = await fetch(url, {
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
         },
       });
@@ -364,11 +394,16 @@ export const useNotifications = () => {
       // Check if response is ok before parsing
       if (!response.ok) {
         const errorText = await response.text();
+        const errorData = parseJsonErrorBody(errorText);
         console.error(
           "[Notifications] API error:",
           response.status,
           errorText.substring(0, 200),
         );
+        if (isSessionInvalidResponse(response, errorData)) {
+          await handleSessionInvalid(authToken);
+          return;
+        }
         throw new Error(
           `API returned ${response.status}: ${errorText.substring(0, 100)}`,
         );
@@ -428,7 +463,7 @@ export const useNotifications = () => {
               `${API_BASE_URL}/api/notifications?seen=false`,
               {
                 headers: {
-                  Authorization: `Bearer ${token}`,
+                  Authorization: `Bearer ${authToken}`,
                   "Content-Type": "application/json",
                 },
               },
@@ -440,7 +475,7 @@ export const useNotifications = () => {
                 `${API_BASE_URL}/notifications?seen=false`,
                 {
                   headers: {
-                    Authorization: `Bearer ${token}`,
+                    Authorization: `Bearer ${authToken}`,
                     "Content-Type": "application/json",
                   },
                 },
@@ -514,7 +549,15 @@ export const useNotifications = () => {
         setUnreadCount(unread);
       }
     } catch (error) {
-      // If endpoint doesn't exist or error occurs, use mock notifications
+      const msg = String(error?.message || "");
+      if (
+        msg.includes("TOKEN_VERSION_MISMATCH") ||
+        msg.toLowerCase().includes("session ended")
+      ) {
+        const stale = await getAuthToken();
+        await handleSessionInvalid(stale);
+        return;
+      }
       console.error(
         "[Notifications] Error fetching notifications, using mocks:",
         error.message,
@@ -531,7 +574,7 @@ export const useNotifications = () => {
 
   const markAsSeen = async (notificationId) => {
     try {
-      const token = await SecureStore.getItemAsync("token");
+      const authToken = await getAuthToken();
 
       // Optimistically update local state
       const now = new Date().toISOString();
@@ -545,7 +588,7 @@ export const useNotifications = () => {
       // Decrement unread count optimistically
       setUnreadCount((prev) => Math.max(0, prev - 1));
 
-      if (!token) {
+      if (!authToken) {
         console.warn("[Notifications] No token, updated local state only");
         return;
       }
@@ -556,7 +599,7 @@ export const useNotifications = () => {
         {
           method: "PUT",
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
         },
@@ -572,7 +615,7 @@ export const useNotifications = () => {
           {
             method: "PUT",
             headers: {
-              Authorization: `Bearer ${token}`,
+              Authorization: `Bearer ${authToken}`,
               "Content-Type": "application/json",
             },
           },
@@ -581,6 +624,11 @@ export const useNotifications = () => {
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
+        const errorData = parseJsonErrorBody(errorText);
+        if (isSessionInvalidResponse(response, errorData)) {
+          await handleSessionInvalid(authToken);
+          return;
+        }
         throw new Error(
           `API returned ${response.status}: ${errorText.substring(0, 100)}`,
         );
@@ -617,7 +665,7 @@ export const useNotifications = () => {
 
   const markAllAsSeen = async () => {
     try {
-      const token = await SecureStore.getItemAsync("token");
+      const authToken = await getAuthToken();
 
       // Optimistically update local state
       const now = new Date().toISOString();
@@ -627,7 +675,7 @@ export const useNotifications = () => {
       );
       setUnreadCount(0);
 
-      if (!token) {
+      if (!authToken) {
         console.warn("[Notifications] No token, updated local state only");
         return;
       }
@@ -638,7 +686,7 @@ export const useNotifications = () => {
         {
           method: "PUT",
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
         },
@@ -646,6 +694,11 @@ export const useNotifications = () => {
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "");
+        const errorData = parseJsonErrorBody(errorText);
+        if (isSessionInvalidResponse(response, errorData)) {
+          await handleSessionInvalid(authToken);
+          return;
+        }
         throw new Error(
           `API returned ${response.status}: ${errorText.substring(0, 100)}`,
         );
@@ -669,6 +722,12 @@ export const useNotifications = () => {
   };
 
   useEffect(() => {
+    if (!token) {
+      setNotifications([]);
+      setUnreadCount(0);
+      return undefined;
+    }
+
     fetchNotifications();
 
     // Set up socket for real-time updates
@@ -715,11 +774,11 @@ export const useNotifications = () => {
       if (socketRef.current) socketRef.current.disconnect();
       clearInterval(interval);
     };
-  }, []);
+  }, [token]);
 
   const deleteNotification = async (notificationId) => {
     try {
-      const token = await SecureStore.getItemAsync("token");
+      const authToken = await getAuthToken();
 
       // Get the notification before deleting to check if it was unread
       const notificationToDelete = notifications.find(
@@ -736,7 +795,7 @@ export const useNotifications = () => {
         setUnreadCount((count) => Math.max(0, count - 1));
       }
 
-      if (!token) {
+      if (!authToken) {
         console.warn("[Notifications] No token, updated local state only");
         return;
       }
@@ -747,7 +806,7 @@ export const useNotifications = () => {
         {
           method: "DELETE",
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
         },
@@ -763,7 +822,7 @@ export const useNotifications = () => {
           {
             method: "DELETE",
             headers: {
-              Authorization: `Bearer ${token}`,
+              Authorization: `Bearer ${authToken}`,
               "Content-Type": "application/json",
             },
           },
@@ -772,6 +831,11 @@ export const useNotifications = () => {
 
       if (!response.ok && response.status !== 404) {
         const errorText = await response.text().catch(() => "");
+        const errorData = parseJsonErrorBody(errorText);
+        if (isSessionInvalidResponse(response, errorData)) {
+          await handleSessionInvalid(authToken);
+          return;
+        }
         throw new Error(
           `API returned ${response.status}: ${errorText.substring(0, 100)}`,
         );

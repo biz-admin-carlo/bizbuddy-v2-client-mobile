@@ -28,6 +28,7 @@ import useTutorialStore from "../../store/tutorialStore";
 import TutorialOverlay from "../../components/TutorialOverlay";
 import FeedbackFloatingPill from "../../components/FeedbackFloatingPill";
 import { useNotifications } from "../../hooks/useNotifications";
+import { useSessionGuard } from "../../hooks/useSessionGuard";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import io from "socket.io-client";
 
@@ -245,6 +246,7 @@ const NotificationIcon = ({ color, size, focused }) => {
 const TabsLayout = () => {
   const insets = useSafeAreaInsets();
   const { token } = useAuthStore();
+  useSessionGuard();
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
   const router = useRouter();
@@ -610,6 +612,14 @@ const TabsLayout = () => {
                   focused={focused}
                 />
               ),
+            }}
+          />
+          {/* Keep AI chats route hidden until feature launch */}
+          <Tabs.Screen
+            name="ai-chats"
+            options={{
+              headerShown: false,
+              href: null,
             }}
           />
           {/* Keep notifications route hidden from the tab bar */}
