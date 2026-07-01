@@ -41,6 +41,8 @@ import {
   CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES,
   CLOCK_OUT_DEVIATION_COMPANY_IDS,
   DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL,
+  NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
+  TIME_IN_PUNCH_TYPE_OPTIONS,
   DRIVER_AIDE_JOB_TITLES,
   REQUEST_PUNCH_LOG_SUBMIT_PATH,
 } from "../../../config/constant";
@@ -50,6 +52,7 @@ import {
   buildShiftWindowFromUserShift,
   findSurroundingShiftBoundaries,
   getClockOutScheduleSummary,
+  hasRelevantScheduledShiftForClockIn,
 } from "../../../utils/timekeepingShiftUtils";
 import {
   parseCompanyTimeZone,
@@ -58,6 +61,7 @@ import {
   formatNaiveLocalClockOutFromPickers,
   buildLocalDateFromPickers,
   getDefaultPunchLogPickerDatesLocal,
+  inferClockOutCrossesNextDayFromPickers,
   logCompanySettingsTimeZoneResult,
 } from "../../../utils/companyTimeZoneUtils";
 
@@ -345,8 +349,10 @@ export default function TimekeepingPunch() {
     noScheduledShiftClockInModalVisible,
     setNoScheduledShiftClockInModalVisible,
   ] = useState(false);
-  const [noScheduledShiftClockInNotes, setNoScheduledShiftClockInNotes] =
-    useState("");
+  const [noScheduledShiftClockInPunchType, setNoScheduledShiftClockInPunchType] =
+    useState(null);
+  const [noScheduledShiftPunchTypeOpen, setNoScheduledShiftPunchTypeOpen] =
+    useState(false);
   const [clockOutConfirmModalVisible, setClockOutConfirmModalVisible] =
     useState(false);
   const [clockOutConfirmSchedule, setClockOutConfirmSchedule] = useState(null);
@@ -561,6 +567,15 @@ export default function TimekeepingPunch() {
     });
     return () => sub.remove();
   }, [fetchAndSyncActiveTimelog]);
+
+  useEffect(() => {
+    if (!noScheduledShiftClockInModalVisible) return;
+    const suggested = pendingClockInPayload?.punchType;
+    const isAllowed = TIME_IN_PUNCH_TYPE_OPTIONS.some(
+      (o) => o.value === suggested,
+    );
+    setNoScheduledShiftClockInPunchType(isAllowed ? suggested : null);
+  }, [noScheduledShiftClockInModalVisible, pendingClockInPayload]);
 
   // Single interval for session + break timers
   useEffect(() => {
@@ -1428,8 +1443,10 @@ export default function TimekeepingPunch() {
       setClockOutDeviationModalVisible(true);
     else if (type === "clockOutConfirm") setClockOutConfirmModalVisible(true);
     else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
-    else if (type === "noScheduledShiftClockIn")
+    else if (type === "noScheduledShiftClockIn") {
+      setNoScheduledShiftPunchTypeOpen(false);
       setNoScheduledShiftClockInModalVisible(true);
+    }
 
     modalYAnim.setValue(height);
     Animated.parallel([
@@ -1471,7 +1488,8 @@ export default function TimekeepingPunch() {
       setClockInEarlyDetails(null);
       setPendingClockInPayload(null);
       setNoScheduledShiftClockInModalVisible(false);
-      setNoScheduledShiftClockInNotes("");
+      setNoScheduledShiftClockInPunchType(null);
+      setNoScheduledShiftPunchTypeOpen(false);
       setClockOutConfirmModalVisible(false);
       setClockOutConfirmSchedule(null);
       setPendingClockOutConfirmPayload(null);
@@ -1626,6 +1644,25 @@ export default function TimekeepingPunch() {
       Alert.alert(
         "Nothing in the future",
         "Requested clock-in and clock-out must be at or before the current time. Change the date or times so nothing is in the future.",
+      );
+      return;
+    }
+
+    if (
+      !plClockOutCrossesNextDay &&
+      inferClockOutCrossesNextDayFromPickers(plClockInTime, plClockOutTime)
+    ) {
+      Alert.alert(
+        "Overnight shift",
+        "Clock-out is earlier than clock-in on the same day. Turn on “Clock-out crosses next day?” before submitting.",
+      );
+      return;
+    }
+
+    if (clockOutLocal.getTime() <= clockInLocal.getTime()) {
+      Alert.alert(
+        "Check your times",
+        "Clock-out must be after clock-in. Adjust the times or turn on “Clock-out crosses next day?”.",
       );
       return;
     }
@@ -1876,12 +1913,13 @@ export default function TimekeepingPunch() {
   /**
    * Time-in early flow:
    * - Companies outside CLOCK_OUT_DEVIATION_COMPANY_IDS: punch REGULAR with no clock-in
-   *   deviation modals (early Driver/Aide vs Regular, nor no-scheduled-shift notes).
+   *   deviation modals (early Driver/Aide vs Regular, nor no-scheduled-shift punch type picker).
    * - If employment `isDriver === false` in an allowed company: show Driver/Aide (AM) vs Regular
    *   modal when clock-in is >= driverAideThresholdMinutes before the next shift start, except when
    *   minutesEarly <= shiftAssignmentWindowMinutes (assignment window bypass -> default REGULAR).
    * - If employment `isDriver === true`: skip that modal (no automatic DRIVER_AIDE_AM).
    * - If `isDriver` is unknown (null): legacy allowed-company + job-title rules (DRIVER_AIDE_AM default).
+   * - `hasScheduledShift`: in an active shift or next shift within NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES (12h).
    */
   const checkClockInEarly = async ({ token, clockInAt }) => {
     const baseResult = (over = {}) => ({
@@ -1925,7 +1963,16 @@ export default function TimekeepingPunch() {
       const windows = Array.isArray(userShifts)
         ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
         : [];
-      const hasScheduledShift = windows.length > 0;
+      const hasScheduledShift = hasRelevantScheduledShiftForClockIn(
+        windows,
+        clockInAt,
+        NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
+      );
+      devLog("checkClockInEarly: schedule relevance", {
+        shiftWindowCount: windows.length,
+        hasScheduledShift,
+        lookaheadMinutes: NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
+      });
       const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
         ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(
             Boolean,
@@ -2020,8 +2067,12 @@ export default function TimekeepingPunch() {
         if (!nextShiftStart) {
           devLog("checkClockInEarly: isDriver false, no next shift start", {
             jobTitle,
+            hasScheduledShift,
           });
-          return baseResult({ hasScheduledShift: true, useRegularPunch: true });
+          return baseResult({
+            hasScheduledShift,
+            useRegularPunch: true,
+          });
         }
         const minutesEarly =
           (nextShiftStart.getTime() - clockInAt.getTime()) / 60000;
@@ -2108,7 +2159,7 @@ export default function TimekeepingPunch() {
       if (!nextShiftStart) {
         return baseResult({
           addPunchTypeAM: true,
-          hasScheduledShift: true,
+          hasScheduledShift,
           useRegularPunch: false,
         });
       }
@@ -2609,19 +2660,20 @@ export default function TimekeepingPunch() {
           closeModal();
           return;
         }
+        if (!noScheduledShiftClockInPunchType) {
+          Alert.alert(
+            "Punch type required",
+            "Select a punch type before clocking in.",
+          );
+          return;
+        }
         try {
           const reqBody = {
             deviceInfo: pending.deviceInfo,
             location: pending.location,
             localTimestamp: pending.localTimestamp,
+            punchType: noScheduledShiftClockInPunchType,
           };
-          if (pending.punchType) {
-            reqBody.punchType = pending.punchType;
-          }
-          const trimmedNotes = noScheduledShiftClockInNotes.trim();
-          if (trimmedNotes) {
-            reqBody.remarks = trimmedNotes;
-          }
           const res = await axios.post(
             `${API_BASE_URL}/api/timelogs/time-in`,
             reqBody,
@@ -2679,7 +2731,7 @@ export default function TimekeepingPunch() {
               </Text>
               <Text className="text-base text-slate-500 text-center mt-2.5 leading-6 px-1">
                 Nothing is assigned for you right now. You can still clock
-                in—add a short note if your team should know why.
+                in—choose the punch type that applies.
               </Text>
             </View>
 
@@ -2694,33 +2746,44 @@ export default function TimekeepingPunch() {
                 style={{ marginTop: 1 }}
               />
               <Text className="flex-1 ml-3 text-sm text-amber-950 leading-5">
-                Your time-in will be recorded the same as a normal punch.
+                Your time-in will be saved with the punch type you select below.
               </Text>
             </View>
 
-            <View className="mb-6">
+            <View className="mb-6" style={{ zIndex: 9000 }}>
               <Text className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
-                Note (optional)
+                Punch type <Text className="text-red-500">*</Text>
               </Text>
-              <TextInput
-                multiline
-                value={noScheduledShiftClockInNotes}
-                onChangeText={setNoScheduledShiftClockInNotes}
-                placeholder="e.g. covering for Juan, training, on-call…"
-                placeholderTextColor="#94a3b8"
+              <DropDownPicker
+                open={noScheduledShiftPunchTypeOpen}
+                value={noScheduledShiftClockInPunchType}
+                items={TIME_IN_PUNCH_TYPE_OPTIONS}
+                setOpen={(open) => {
+                  setNoScheduledShiftPunchTypeOpen(open);
+                  if (open) Keyboard.dismiss();
+                }}
+                setValue={setNoScheduledShiftClockInPunchType}
+                setItems={() => {}}
+                placeholder="Select punch type"
+                textStyle={{ color: "#0f172a", fontSize: 16 }}
                 style={{
                   backgroundColor: "#ffffff",
-                  borderWidth: 1,
                   borderColor: "#e2e8f0",
                   borderRadius: 14,
-                  paddingHorizontal: 14,
-                  paddingVertical: 12,
-                  fontSize: 16,
-                  color: "#0f172a",
-                  minHeight: 100,
-                  maxHeight: 160,
-                  textAlignVertical: "top",
+                  minHeight: 52,
                 }}
+                dropDownContainerStyle={{
+                  borderColor: "#e2e8f0",
+                  backgroundColor: "#ffffff",
+                  borderRadius: 14,
+                }}
+                placeholderStyle={{ color: "#94a3b8" }}
+                zIndex={9000}
+                zIndexInverse={8000}
+                listMode="SCROLLVIEW"
+                nestedScrollEnabled
+                scrollViewProps={{ nestedScrollEnabled: true }}
+                autoScroll={false}
               />
             </View>
 

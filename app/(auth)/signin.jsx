@@ -19,14 +19,15 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import useAuthStore, {
-  getTokenEmail,
+  getTokenUserId,
   getTokenVersion,
-  LAST_SIGN_IN_EMAIL_KEY,
-  LAST_COMPANY_ID_KEY,
+  LAST_SIGN_IN_USER_ID_KEY,
+  persistSignInContext,
 } from "../../store/useAuthStore";
 import {
   findAnyValidSessionToken,
   findVerifiedSessionToken,
+  getDistinctVaultUserIds,
   removeStoredSessionToken,
   resolveSessionTokenForCompanyId,
   syncLegacyTokenIntoPerCompanyStore,
@@ -52,6 +53,23 @@ const { width } = Dimensions.get("window");
 const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 /** After device biometric: pick company when user has multiple companies. */
 const STEP_BIOMETRIC_COMPANY = 3;
+
+async function fetchAccountEmailForToken(token) {
+  if (!token) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/account/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const email = data?.data?.user?.email ?? data?.user?.email;
+    if (typeof email !== "string") return null;
+    const normalized = email.trim().toLowerCase();
+    return normalized.includes("@") ? normalized : null;
+  } catch {
+    return null;
+  }
+}
 
 /** API may return companies as `data`, nested array, or a single user object. */
 function normalizeCompaniesFromEmailResponse(json) {
@@ -271,7 +289,17 @@ export default function SignIn() {
   };
 
   const handleBiometricSignIn = async () => {
-    const session = await findAnyValidSessionToken();
+    const vaultUserIds = await getDistinctVaultUserIds();
+    const lastUserId = await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY);
+
+    if (vaultUserIds.length > 1 && !lastUserId) {
+      setError(
+        "Multiple accounts are saved on this device. Sign in with your email first."
+      );
+      return;
+    }
+
+    const session = await findAnyValidSessionToken({ userId: lastUserId });
     if (!session?.token) {
       setError("No saved credentials. Please sign in using email first.");
       return;
@@ -286,8 +314,9 @@ export default function SignIn() {
     });
 
     if (result.success) {
-      const active = await findVerifiedSessionToken((token) =>
-        verifySessionToken(token, { strict: true })
+      const active = await findVerifiedSessionToken(
+        (token) => verifySessionToken(token, { strict: true }),
+        { userId: lastUserId || getTokenUserId(session.token) },
       );
       if (!active?.token) {
         await forceLogout();
@@ -298,14 +327,15 @@ export default function SignIn() {
         return;
       }
 
+      const activeUserId = getTokenUserId(active.token);
+
       setError(null);
       setBioCompanyLoading(true);
       try {
-        const storedEmail = await SecureStore.getItemAsync(LAST_SIGN_IN_EMAIL_KEY);
-        const emailForLookup =
-          (storedEmail && storedEmail.trim().toLowerCase()) || getTokenEmail(active.token);
+        const emailForLookup = await fetchAccountEmailForToken(active.token);
 
         if (!emailForLookup) {
+          await persistSignInContext(active.token, null, active.companyId);
           await login(active.token, true, active.companyId);
           router.replace("(tabs)/profile");
           return;
@@ -319,7 +349,24 @@ export default function SignIn() {
         const data = await res.json();
         const companies = normalizeCompaniesFromEmailResponse(data);
         if (!res.ok || companies.length === 0) {
+          await persistSignInContext(active.token, emailForLookup, active.companyId);
           await login(active.token, true, active.companyId);
+          router.replace("(tabs)/profile");
+          return;
+        }
+
+        if (companies.length === 1) {
+          const onlyCompanyId = String(companies[0].companyId);
+          const companyToken = await resolveSessionTokenForCompanyId(
+            onlyCompanyId,
+            { userId: activeUserId },
+          );
+          const tokenToUse = companyToken || active.token;
+          if (!(await ensureSavedSessionStillValid(tokenToUse))) {
+            return;
+          }
+          await persistSignInContext(tokenToUse, emailForLookup, onlyCompanyId);
+          await login(tokenToUse, true, onlyCompanyId);
           router.replace("(tabs)/profile");
           return;
         }
@@ -331,8 +378,9 @@ export default function SignIn() {
         setSavedToken(active.token);
       } catch (e) {
         console.error("Biometric company lookup error:", e);
-        const fallback = await findVerifiedSessionToken((token) =>
-          verifySessionToken(token, { strict: true })
+        const fallback = await findVerifiedSessionToken(
+          (token) => verifySessionToken(token, { strict: true }),
+          { userId: activeUserId },
         );
         if (fallback?.token) {
           await login(fallback.token, true, fallback.companyId);
@@ -361,7 +409,12 @@ export default function SignIn() {
     setLoading(true);
     try {
       const picked = String(selectedCompanyId);
-      const sessionToken = await resolveSessionTokenForCompanyId(picked);
+      const preferredUserId =
+        getTokenUserId(savedToken) ||
+        (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
+      const sessionToken = await resolveSessionTokenForCompanyId(picked, {
+        userId: preferredUserId,
+      });
 
       if (sessionToken) {
         if (!(await ensureSavedSessionStillValid(sessionToken))) {
@@ -386,7 +439,12 @@ export default function SignIn() {
     setSelectedCompanyId(companyId);
     setError(null);
     const picked = String(companyId);
-    const sessionToken = await resolveSessionTokenForCompanyId(picked);
+    const preferredUserId =
+      getTokenUserId(savedToken) ||
+      (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
+    const sessionToken = await resolveSessionTokenForCompanyId(picked, {
+      userId: preferredUserId,
+    });
     if (!sessionToken) {
       return;
     }
@@ -436,6 +494,11 @@ export default function SignIn() {
         return;
       }
       setUsers(list);
+      if (list.length === 1) {
+        setSelectedCompanyId(list[0].companyId);
+      } else {
+        setSelectedCompanyId(null);
+      }
       setStep(2);
     } catch (err) {
       console.error("Email submit error:", err);
@@ -450,8 +513,7 @@ export default function SignIn() {
       return;
     }
     const normalizedEmail = email.trim().toLowerCase();
-    await SecureStore.setItemAsync(LAST_SIGN_IN_EMAIL_KEY, normalizedEmail);
-    await SecureStore.setItemAsync(LAST_COMPANY_ID_KEY, String(selectedCompanyId));
+    await persistSignInContext(token, normalizedEmail, selectedCompanyId);
 
     await login(token, true, String(selectedCompanyId));
     setPasswordSourceStep(null);
@@ -552,8 +614,12 @@ export default function SignIn() {
   };
 
   const handleSignInWithPassword = async () => {
-    if (!password || !selectedCompanyId) {
-      setError("Please select a company and enter your password.");
+    if (!selectedCompanyId) {
+      setError("Please select a company.");
+      return;
+    }
+    if (!password) {
+      setError("Please enter your password.");
       return;
     }
 
@@ -916,7 +982,7 @@ export default function SignIn() {
                     </View>
                   )}
 
-                  {/* Step 2: Company Selection and Password */}
+                  {/* Step 2: Company Selection (multi-company) and Password */}
                   {step === 2 && (
                     <View>
                       <View className="flex-row items-center mb-7">
@@ -933,7 +999,7 @@ export default function SignIn() {
                           </View>
                         </TouchableOpacity>
                         <Text className="text-xl font-bold text-slate-700">
-                          Select your company
+                          {users.length === 1 ? "Sign in" : "Select your company"}
                         </Text>
                       </View>
 
@@ -944,6 +1010,7 @@ export default function SignIn() {
                         </Text>
                       )}
 
+                      {users.length > 1 && (
                       <View className="mb-7">
                         {users.map((user) => (
                           <TouchableOpacity
@@ -1016,6 +1083,7 @@ export default function SignIn() {
                           </TouchableOpacity>
                         ))}
                       </View>
+                      )}
 
                       <View className="mb-7">
                         <Text className="mb-3 font-medium text-slate-600">

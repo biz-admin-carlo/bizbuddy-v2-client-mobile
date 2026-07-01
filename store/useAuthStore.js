@@ -4,6 +4,7 @@ import { create } from "zustand";
 import * as SecureStore from "expo-secure-store";
 import {
   getTokenCompanyId,
+  getTokenUserId,
   isTokenExpired,
   logJwtSessionDebug,
 } from "../utils/jwtTokenUtils";
@@ -17,17 +18,37 @@ export {
   getJwtPayload,
   getTokenCompanyId,
   getTokenEmail,
+  getTokenUserId,
   getTokenVersion,
   isTokenExpired,
   logJwtSessionDebug,
 } from "../utils/jwtTokenUtils";
 
 const LAST_SIGN_IN_EMAIL_KEY = "lastSignInEmail";
+const LAST_SIGN_IN_USER_ID_KEY = "lastSignInUserId";
 const LAST_COMPANY_ID_KEY = "lastCompanyId";
+
+async function persistSignInContext(token, email, companyId) {
+  const userId = getTokenUserId(token);
+  if (userId) {
+    await SecureStore.setItemAsync(LAST_SIGN_IN_USER_ID_KEY, userId);
+  }
+  if (email) {
+    await SecureStore.setItemAsync(LAST_SIGN_IN_EMAIL_KEY, email.trim().toLowerCase());
+  }
+  if (companyId != null && companyId !== "") {
+    await SecureStore.setItemAsync(LAST_COMPANY_ID_KEY, String(companyId));
+  }
+}
 
 async function clearSignInContextKeys() {
   try {
     await SecureStore.deleteItemAsync(LAST_SIGN_IN_EMAIL_KEY);
+  } catch {
+    /* noop */
+  }
+  try {
+    await SecureStore.deleteItemAsync(LAST_SIGN_IN_USER_ID_KEY);
   } catch {
     /* noop */
   }
@@ -38,7 +59,13 @@ async function clearSignInContextKeys() {
   }
 }
 
-export { LAST_SIGN_IN_EMAIL_KEY, LAST_COMPANY_ID_KEY, clearSignInContextKeys };
+export {
+  LAST_SIGN_IN_EMAIL_KEY,
+  LAST_SIGN_IN_USER_ID_KEY,
+  LAST_COMPANY_ID_KEY,
+  clearSignInContextKeys,
+  persistSignInContext,
+};
 
 const useAuthStore = create((set, get) => ({
   token: null,
@@ -57,6 +84,10 @@ const useAuthStore = create((set, get) => ({
     await pruneOlderSessionsForUser(token);
     set({ token, remember });
     await SecureStore.setItemAsync("token", token);
+    const uid = getTokenUserId(token);
+    if (uid) {
+      await SecureStore.setItemAsync(LAST_SIGN_IN_USER_ID_KEY, uid);
+    }
     const cid =
       companyId != null && companyId !== ""
         ? String(companyId)

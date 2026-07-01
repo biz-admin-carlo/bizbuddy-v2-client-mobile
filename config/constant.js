@@ -22,7 +22,7 @@ export const CONTEST_POLICY_SUBMIT_PATH = "/api/contest-policy/submit";
 /** GET — list current user's time log contests (if enabled on API). */
 export const CONTEST_POLICY_MY_REQUESTS_PATH = "/api/contest-policy/my-requests";
 
-export const VERSION = "1.0.20";
+export const VERSION = "1.0.21";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).
@@ -35,6 +35,17 @@ export const CLOCK_OUT_DEVIATION_COMPANY_IDS = [
 ];
 // Set to true to always show the "no scheduled shift" clock-in modal (timekeeping punch, online flow).
 export const DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL = false;
+// Clock-in: treat user as having a schedule only if in an active shift or next shift starts within this many minutes (e.g. weekend gap before Mon–Fri).
+export const NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES = 12 * 60;
+
+/** Punch types offered when clocking in without a scheduled shift (no-schedule modal). */
+export const TIME_IN_PUNCH_TYPE_OPTIONS = [
+  { value: "REGULAR", label: "Regular" },
+  { value: "DRIVER_AIDE", label: "Driver / Aide" },
+  { value: "DRIVER_AIDE_AM", label: "Driver / Aide (AM)" },
+  { value: "DRIVER_AIDE_PM", label: "Driver / Aide (PM)" },
+  { value: "TRAINING", label: "Training" },
+];
 
 // Job titles that always clock out with punchType DRIVER_AIDE (no deviation modal).
 export const DRIVER_AIDE_JOB_TITLES = [

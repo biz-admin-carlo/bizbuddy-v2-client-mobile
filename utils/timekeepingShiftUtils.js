@@ -163,6 +163,42 @@ export function findSurroundingShiftBoundaries(windows, at) {
 }
 
 /**
+ * Whether the user has a shift relevant for clock-in at `at` (no-schedule modal, punch type).
+ * True when currently inside a shift window, or the next shift start is within `lookaheadMinutes`.
+ */
+export function hasRelevantScheduledShiftForClockIn(
+  windows,
+  at,
+  lookaheadMinutes,
+) {
+  if (!Array.isArray(windows) || !windows.length) return false;
+  if (!(at instanceof Date) || !Number.isFinite(at.getTime())) return false;
+  const lookahead = Number(lookaheadMinutes);
+  if (!Number.isFinite(lookahead) || lookahead < 0) return false;
+
+  const t = at.getTime();
+  for (const w of windows) {
+    const s = w?.start instanceof Date ? w.start : null;
+    const e = w?.end instanceof Date ? w.end : null;
+    if (
+      !s ||
+      !e ||
+      !Number.isFinite(s.getTime()) ||
+      !Number.isFinite(e.getTime())
+    )
+      continue;
+    if (s.getTime() <= t && t < e.getTime()) return true;
+  }
+
+  const boundaries = findSurroundingShiftBoundaries(windows, at);
+  const nextStart = boundaries?.nextShiftStart;
+  if (!nextStart || !Number.isFinite(nextStart.getTime())) return false;
+
+  const minutesUntilStart = (nextStart.getTime() - t) / 60000;
+  return minutesUntilStart >= 0 && minutesUntilStart <= lookahead;
+}
+
+/**
  * For clock-out UX: describe how the current moment relates to assigned shifts.
  *
  * @param {Array<{ start: Date, end: Date }>} windows from buildShiftWindowFromUserShift

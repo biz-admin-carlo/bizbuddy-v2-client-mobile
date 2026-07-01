@@ -13,6 +13,14 @@ export const getJwtPayload = (token) => {
   }
 };
 
+/** User id embedded in the login JWT (shape varies by backend). */
+export const getTokenUserId = (token) => {
+  const p = getJwtPayload(token);
+  if (!p) return null;
+  const id = p.userId ?? p.UserId ?? p.user_id ?? p.sub ?? p.id;
+  return id != null ? String(id) : null;
+};
+
 /** Company id embedded in the login JWT (shape varies by backend). */
 export const getTokenCompanyId = (token) => {
   const p = getJwtPayload(token);
@@ -41,6 +49,7 @@ export const logJwtSessionDebug = (label, token) => {
   }
   const payload = getJwtPayload(token);
   console.log(`[Auth/JWT] ${label}`, {
+    userId: getTokenUserId(token),
     tokenVersion: getTokenVersion(token),
     companyId: getTokenCompanyId(token),
     email: getTokenEmail(token),

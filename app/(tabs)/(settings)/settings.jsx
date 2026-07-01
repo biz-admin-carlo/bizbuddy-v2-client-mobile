@@ -26,7 +26,7 @@ import * as LocalAuthentication from "expo-local-authentication";
 import * as Location from "expo-location";
 import { API_BASE_URL, WEBSITE_URL } from "../../../config/constant";
 import useTutorialStore from "../../../store/tutorialStore";
-import useAuthStore, { getTokenCompanyId } from "../../../store/useAuthStore";
+import useAuthStore, { getTokenCompanyId, getTokenUserId } from "../../../store/useAuthStore";
 import {
   findVerifiedSessionToken,
   persistCompanySessionToken,
@@ -46,11 +46,13 @@ const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 
 /** Newest saved JWT that still passes server verification (for enabling biometric). */
 async function resolveActiveSessionTokenForBiometric() {
-  const verified = await findVerifiedSessionToken((t) =>
-    verifySessionToken(t, { strict: true }),
+  const mem = useAuthStore.getState().token;
+  const preferredUserId = getTokenUserId(mem);
+  const verified = await findVerifiedSessionToken(
+    (t) => verifySessionToken(t, { strict: true }),
+    { userId: preferredUserId },
   );
   if (verified?.token) return verified.token;
-  const mem = useAuthStore.getState().token;
   if (mem) {
     const check = await verifySessionToken(mem, { strict: true });
     if (check.valid) return mem;

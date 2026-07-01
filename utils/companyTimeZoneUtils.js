@@ -138,6 +138,27 @@ export const getPickerWallClockParts = (dateInput) => {
   };
 };
 
+/** Minutes since midnight from a time picker (for same-day ordering). */
+export const getPickerWallClockMinutes = (timePicker) => {
+  const wall = getPickerWallClockParts(timePicker);
+  if (!wall) return null;
+  return wall.hour * 60 + wall.minute + wall.second / 60;
+};
+
+/**
+ * True when clock-out wall time is not after clock-in on the same calendar day
+ * (typical overnight shift: e.g. in 22:00, out 06:00). Used for validation only.
+ */
+export const inferClockOutCrossesNextDayFromPickers = (
+  clockInPicker,
+  clockOutPicker,
+) => {
+  const inMin = getPickerWallClockMinutes(clockInPicker);
+  const outMin = getPickerWallClockMinutes(clockOutPicker);
+  if (inMin == null || outMin == null) return false;
+  return outMin <= inMin;
+};
+
 export const addCalendarDays = ({ year, month, day }, days) => {
   const d = new Date(year, month - 1, day);
   d.setDate(d.getDate() + days);

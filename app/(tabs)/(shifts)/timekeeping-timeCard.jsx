@@ -57,6 +57,7 @@ import {
   formatUtcIsoForPunchLogApi,
   formatPickerWallTimeLabel,
   getContestPickerStateFromTimeLog,
+  inferClockOutCrossesNextDayFromPickers,
   logCompanySettingsTimeZoneResult,
   parseCompanyTimeZone,
 } from "../../../utils/companyTimeZoneUtils";
@@ -740,10 +741,20 @@ const TimekeepingTimeCard = () => {
       );
       return;
     }
+    if (
+      !ctClockOutCrossesNextDay &&
+      inferClockOutCrossesNextDayFromPickers(ctClockInTime, ctClockOutTime)
+    ) {
+      Alert.alert(
+        "Overnight shift",
+        "Clock-out is earlier than clock-in on the same day. Turn on “Clock-out crosses next day” before submitting.",
+      );
+      return;
+    }
     if (clockOutInstant.getTime() <= clockInInstant.getTime()) {
       Alert.alert(
         "Check your times",
-        "Clock-out must be after clock-in. Adjust the times or use “Clock-out crosses next day”.",
+        "Clock-out must be after clock-in. Adjust the times or turn on “Clock-out crosses next day”.",
       );
       return;
     }

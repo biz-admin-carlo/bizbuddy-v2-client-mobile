@@ -2,6 +2,7 @@ import * as SecureStore from "expo-secure-store";
 import {
   getTokenCompanyId,
   getTokenEmail,
+  getTokenUserId,
   getTokenVersion,
   isTokenExpired,
 } from "./jwtTokenUtils";
@@ -225,12 +226,35 @@ export async function enumerateSessionTokens() {
   return out;
 }
 
+function filterCandidatesByUserId(candidates, userId) {
+  if (!userId) return candidates;
+  const want = String(userId);
+  return candidates.filter((c) => getTokenUserId(c.token) === want);
+}
+
+/**
+ * Distinct user ids among locally stored JWTs (well-formed only).
+ */
+export async function getDistinctVaultUserIds() {
+  const candidates = await enumerateSessionTokens();
+  return [
+    ...new Set(
+      candidates
+        .map((c) => getTokenUserId(c.token))
+        .filter((id) => id != null && id !== ""),
+    ),
+  ];
+}
+
 /**
  * First stored JWT that passes server verification (for biometric restore).
  * @param {(token: string) => Promise<{ valid: boolean }>} verifyFn
+ * @param {{ userId?: string | null }} [options] — prefer sessions for this user
  */
-export async function findVerifiedSessionToken(verifyFn) {
-  const candidates = await enumerateSessionTokens();
+export async function findVerifiedSessionToken(verifyFn, options = {}) {
+  const { userId = null } = options;
+  let candidates = await enumerateSessionTokens();
+  candidates = filterCandidatesByUserId(candidates, userId);
   for (const candidate of candidates) {
     const check = await verifyFn(candidate.token);
     if (check?.valid) return candidate;
@@ -246,53 +270,48 @@ export async function findVerifiedSessionToken(verifyFn) {
 }
 
 /**
+ * @param {{ userId?: string | null }} [options]
  * @returns {{ token: string, companyId: string | null } | null}
  */
-export async function findAnyValidSessionToken() {
-  const candidates = await enumerateSessionTokens();
+export async function findAnyValidSessionToken(options = {}) {
+  const { userId = null } = options;
+  let candidates = await enumerateSessionTokens();
+  candidates = filterCandidatesByUserId(candidates, userId);
   return candidates.length > 0 ? candidates[0] : null;
 }
-
-const LAST_COMPANY_ID_SECURE_KEY = "lastCompanyId";
 
 /**
  * Find a non-expired JWT for the given company (API id), including when the vault
  * key used a different id than the email/company list returns.
+ * @param {string|number} companyId
+ * @param {{ userId?: string | null }} [options] — only return a token for this user
  */
-export async function resolveSessionTokenForCompanyId(companyId) {
+export async function resolveSessionTokenForCompanyId(companyId, options = {}) {
+  const { userId = null } = options;
   const picked = String(companyId ?? "").trim();
   if (!picked) return null;
 
+  const matchesUser = (token) => {
+    if (!userId) return true;
+    return getTokenUserId(token) === String(userId);
+  };
+
   let sessionToken = await getCompanySessionToken(picked);
-  if (sessionToken && !isTokenExpired(sessionToken)) return sessionToken;
+  if (
+    sessionToken &&
+    !isTokenExpired(sessionToken) &&
+    matchesUser(sessionToken)
+  ) {
+    return sessionToken;
+  }
 
   const ids = await readCompanyIndex();
   for (const id of ids) {
     const t = await getCompanySessionToken(id);
-    if (!t || isTokenExpired(t)) continue;
+    if (!t || isTokenExpired(t) || !matchesUser(t)) continue;
     const tCo = getTokenCompanyId(t);
     if (tCo != null && String(tCo) === picked) return t;
     if (String(id) === picked) return t;
-  }
-
-  const hit = await findAnyValidSessionToken();
-  const hitCo = hit?.token ? getTokenCompanyId(hit.token) : null;
-  if (hit?.token && !isTokenExpired(hit.token) && hitCo != null && String(hitCo) === picked) {
-    return hit.token;
-  }
-
-  try {
-    const lastCo = await SecureStore.getItemAsync(LAST_COMPANY_ID_SECURE_KEY);
-    if (
-      hit?.token &&
-      !isTokenExpired(hit.token) &&
-      lastCo != null &&
-      String(lastCo) === picked
-    ) {
-      return hit.token;
-    }
-  } catch {
-    /* noop */
   }
 
   return null;
