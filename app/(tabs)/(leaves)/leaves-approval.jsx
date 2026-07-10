@@ -19,10 +19,14 @@ import {
   Modal,
   ScrollView,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { API_BASE_URL } from "../../../config/constant";
+import { getTokenUserId } from "../../../store/useAuthStore";
 import {
   formatLeaveBoundaryLabel,
   formatLeaveDateTimeLabel,
@@ -32,38 +36,75 @@ import { Ionicons } from "@expo/vector-icons";
 
 const { height } = Dimensions.get("window");
 
+const cardShadow = Platform.select({
+  ios: {
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+  },
+  android: { elevation: 1 },
+});
+
+const STATUS_STYLES = {
+  approved: {
+    bg: "bg-green-50",
+    text: "text-green-700",
+    border: "border-green-200",
+    icon: "checkmark-circle",
+    iconColor: "#15803d",
+  },
+  rejected: {
+    bg: "bg-red-50",
+    text: "text-red-700",
+    border: "border-red-200",
+    icon: "close-circle",
+    iconColor: "#b91c1c",
+  },
+  pending: {
+    bg: "bg-amber-50",
+    text: "text-amber-700",
+    border: "border-amber-200",
+    icon: "time",
+    iconColor: "#b45309",
+  },
+  default: {
+    bg: "bg-slate-50",
+    text: "text-slate-600",
+    border: "border-slate-200",
+    icon: "help-circle",
+    iconColor: "#64748b",
+  },
+};
+
+const resolveStatusStyle = (status) => {
+  const key = String(status ?? "").toLowerCase();
+  if (key.includes("approved")) return STATUS_STYLES.approved;
+  if (key.includes("reject")) return STATUS_STYLES.rejected;
+  if (key.includes("pending")) return STATUS_STYLES.pending;
+  return STATUS_STYLES.default;
+};
+
 /**
- * A small sub-component to display a status badge with an icon.
+ * Status chip for leave request cards and detail modal.
  */
 const LeaveStatusBadge = ({ status }) => {
-  let bgColor, textColor, icon;
-
-  switch (status.toLowerCase()) {
-    case "approved":
-      bgColor = "bg-green-100";
-      textColor = "text-green-800";
-      icon = "checkmark-circle";
-      break;
-    case "rejected":
-      bgColor = "bg-red-100";
-      textColor = "text-red-800";
-      icon = "close-circle";
-      break;
-    case "pending":
-      bgColor = "bg-amber-100";
-      textColor = "text-amber-800";
-      icon = "time";
-      break;
-    default:
-      bgColor = "bg-slate-100";
-      textColor = "text-slate-800";
-      icon = "help-circle";
-  }
+  const style = resolveStatusStyle(status);
+  const label = String(status ?? "—");
 
   return (
-    <View className={`flex-row items-center rounded-full px-3 py-1 ${bgColor}`}>
-      <Ionicons name={icon} size={14} color={textColor.replace("text-", "")} style={{ marginRight: 4 }} />
-      <Text className={`text-xs font-medium ${textColor}`}>{status}</Text>
+    <View
+      className={`flex-row items-center rounded-lg px-2.5 py-1 border ${style.bg} ${style.border}`}
+    >
+      <Ionicons
+        name={style.icon}
+        size={13}
+        color={style.iconColor}
+        style={{ marginRight: 4 }}
+      />
+      <Text className={`text-xs font-semibold capitalize ${style.text}`}>
+        {label}
+      </Text>
     </View>
   );
 };
@@ -97,8 +138,22 @@ const FilterOption = ({ label, isActive, onPress }) => {
 
   return (
     <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
-      <TouchableOpacity onPress={handlePress} activeOpacity={0.8} className={`px-4 py-2 rounded-full mr-2 ${isActive ? "bg-orange-500" : "bg-slate-100"}`}>
-        <Text className={`text-sm font-medium ${isActive ? "text-white" : "text-slate-700"}`}>{label}</Text>
+      <TouchableOpacity
+        onPress={handlePress}
+        activeOpacity={0.8}
+        className={`px-4 py-2 rounded-full mr-2 border ${
+          isActive
+            ? "bg-orange-500 border-orange-500"
+            : "bg-white border-slate-200"
+        }`}
+      >
+        <Text
+          className={`text-sm font-semibold ${
+            isActive ? "text-white" : "text-slate-600"
+          }`}
+        >
+          {label}
+        </Text>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -146,12 +201,14 @@ const SortOption = ({ label, icon, onPress, isActive }) => {
  * A small sub-component displayed when there's no data.
  */
 const DetailRow = ({ icon, label, value }) => (
-  <View className="flex-row items-start mb-4">
-    <View className="w-9 h-9 rounded-full bg-slate-100 items-center justify-center mr-3">
-      <Ionicons name={icon} size={18} color="#64748b" />
+  <View className="flex-row items-start mb-4 bg-slate-50 rounded-xl px-3 py-3 border border-slate-100">
+    <View className="w-9 h-9 rounded-full bg-white items-center justify-center mr-3 border border-slate-100">
+      <Ionicons name={icon} size={18} color="#f97316" />
     </View>
     <View className="flex-1">
-      <Text className="text-xs font-medium text-slate-500 mb-0.5">{label}</Text>
+      <Text className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1">
+        {label}
+      </Text>
       <Text className="text-slate-800 text-base leading-snug">{value}</Text>
     </View>
   </View>
@@ -166,16 +223,115 @@ const resolvePaidLabel = (item) => {
   return null;
 };
 
-const EmptyListComponent = ({ activeFilter }) => (
-  <View className="flex-1 justify-center items-center py-10">
-    <View className="w-16 h-16 rounded-full bg-slate-100 items-center justify-center mb-4">
-      <Ionicons name="calendar-outline" size={28} color="#9CA3AF" />
+const resolveRequesterLabel = (item) => {
+  const requester =
+    item?.requester ?? item?.User ?? item?.user ?? item?.employee ?? null;
+  const profile = requester?.profile ?? item?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? requester?.firstName ?? ""} ${profile?.lastName ?? requester?.lastName ?? ""}`.trim(),
+    requester?.fullName,
+    requester?.name,
+    profile?.fullName,
+    profile?.name,
+    item?.requesterName,
+    item?.employeeName,
+    item?.userName,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  return (
+    fullName ||
+    requester?.username ||
+    requester?.email ||
+    item?.requesterEmail ||
+    (requester?.id != null ? `ID ${requester.id}` : null)
+  );
+};
+
+const resolveApproverLabel = (item) => {
+  const approver =
+    item?.approver ?? item?.Approver ?? item?.approverUser ?? null;
+  const profile = approver?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? approver?.firstName ?? ""} ${profile?.lastName ?? approver?.lastName ?? ""}`.trim(),
+    approver?.fullName,
+    approver?.name,
+    profile?.fullName,
+    profile?.name,
+    item?.approverName,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  return (
+    fullName ||
+    approver?.username ||
+    approver?.email ||
+    item?.approverEmail ||
+    (approver?.id != null || item?.approverId != null
+      ? `ID ${approver?.id ?? item?.approverId}`
+      : null)
+  );
+};
+
+const resolveLeaveId = (item) =>
+  item?.id ??
+  item?._id ??
+  item?.leaveId ??
+  item?.leaveRequestId ??
+  item?.requestId ??
+  item?.leave?.id ??
+  item?.leave?._id ??
+  null;
+
+const toStr = (value) => (value == null ? "" : String(value));
+
+const isApproverMatch = (leave, currentUserId) => {
+  const currentId = toStr(currentUserId);
+  if (!currentId) return false;
+
+  const approverCandidates = [
+    leave?.approverId,
+    leave?.ApproverId,
+    leave?.approverUserId,
+    leave?.approvedById,
+    leave?.approver?.id,
+    leave?.approver?.userId,
+    leave?.Approver?.id,
+    leave?.Approver?.userId,
+    leave?.assignedApproverId,
+  ]
+    .map(toStr)
+    .filter(Boolean);
+
+  if (approverCandidates.some((id) => id === currentId)) return true;
+
+  const approverArray =
+    leave?.approverIds ??
+    leave?.ApproverIds ??
+    leave?.approvers?.map((a) => a?.id ?? a?.userId) ??
+    [];
+
+  return Array.isArray(approverArray)
+    ? approverArray.map(toStr).some((id) => id === currentId)
+    : false;
+};
+
+const EmptyListComponent = ({ activeFilter, isCompanyView }) => (
+  <View className="flex-1 justify-center items-center py-16 px-6">
+    <View className="w-20 h-20 rounded-full bg-orange-50 items-center justify-center mb-5">
+      <Ionicons name="leaf-outline" size={36} color="#fdba74" />
     </View>
-    <Text className="text-slate-500 text-lg font-medium mb-1">No leave records</Text>
-    <Text className="text-slate-400 text-center px-10">
+    <Text className="text-slate-700 text-lg font-semibold mb-2 text-center">
+      No leave requests
+    </Text>
+    <Text className="text-slate-500 text-center text-sm leading-5">
       {activeFilter === "all"
-        ? "You don't have any leave records yet. Submit a leave request to get started."
-        : `No ${activeFilter} leave requests found.`}
+        ? isCompanyView
+          ? "No leave requests found for employees in your company yet."
+          : "You have not submitted any leave requests yet. Use the Request tab to file one."
+        : `No ${activeFilter} leave requests found. Try another filter or pull to refresh.`}
     </Text>
   </View>
 );
@@ -184,6 +340,7 @@ const EmptyListComponent = ({ activeFilter }) => (
  * Main LeavesApproval screen component.
  */
 export default function LeavesApproval() {
+  const insets = useSafeAreaInsets();
   const [leaves, setLeaves] = useState([]);
   const [filteredLeaves, setFilteredLeaves] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -193,6 +350,10 @@ export default function LeavesApproval() {
   const [sortOption, setSortOption] = useState("newest");
   const [detailModalVisible, setDetailModalVisible] = useState(false);
   const [selectedLeave, setSelectedLeave] = useState(null);
+  const [isCompanyView, setIsCompanyView] = useState(false);
+  const [userRole, setUserRole] = useState("");
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [processingLeaves, setProcessingLeaves] = useState({});
   const router = useRouter();
 
   // Animations
@@ -237,7 +398,33 @@ export default function LeavesApproval() {
         ]);
         return;
       }
-      const res = await fetch(`${API_BASE_URL}/api/leaves/my`, {
+      let leavesPath = "/api/leaves/my";
+      let companyView = false;
+      let role = "";
+
+      try {
+        const profileRes = await fetch(`${API_BASE_URL}/api/account/profile`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const profileData = await profileRes.json();
+        role = String(profileData?.data?.user?.role ?? "").toLowerCase();
+        if (
+          role === "supervisor" ||
+          role === "admin" ||
+          role === "superadmin"
+        ) {
+          leavesPath = "/api/leaves/";
+          companyView = true;
+        }
+      } catch (profileError) {
+        console.error("Error resolving leave view role:", profileError);
+      }
+
+      setUserRole(role);
+      setCurrentUserId(getTokenUserId(token));
+      setIsCompanyView(companyView);
+
+      const res = await fetch(`${API_BASE_URL}${leavesPath}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
@@ -245,8 +432,16 @@ export default function LeavesApproval() {
         const rows = Array.isArray(data.data)
           ? data.data.map(normalizeLeaveRecord)
           : [];
-        setLeaves(rows);
-        applyFiltersAndSort(rows, activeFilter, sortOption);
+        const canViewAllCompanyLeaves =
+          role === "admin" || role === "superadmin";
+        const visibleRows =
+          companyView && !canViewAllCompanyLeaves
+            ? rows.filter((leave) =>
+                isApproverMatch(leave, getTokenUserId(token)),
+              )
+            : rows;
+        setLeaves(visibleRows);
+        applyFiltersAndSort(visibleRows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leave logs.");
       }
@@ -404,6 +599,112 @@ export default function LeavesApproval() {
     setSelectedLeave(null);
   };
 
+  const canActOnLeave = useCallback(
+    (item) => {
+      if (!isCompanyView) return false;
+      const status = String(item?.status ?? "").toLowerCase();
+      if (!status.includes("pending")) return false;
+      if (userRole === "admin" || userRole === "superadmin") return true;
+      if (userRole === "supervisor") {
+        return isApproverMatch(item, currentUserId);
+      }
+      return false;
+    },
+    [isCompanyView, userRole, currentUserId],
+  );
+
+  const submitLeaveAction = async (item, action, comments = "") => {
+    const leaveId = resolveLeaveId(item);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      return;
+    }
+    setProcessingLeaves((prev) => ({
+      ...prev,
+      [leaveId]: action === "approve" ? "approving" : "rejecting",
+    }));
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/${action}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ approverComments: comments }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok) {
+        RNAlert.alert(
+          "Success",
+          action === "approve"
+            ? "Leave approved successfully."
+            : "Leave rejected successfully.",
+        );
+        if (selectedLeave && resolveLeaveId(selectedLeave) === leaveId) {
+          closeLeaveDetail();
+        }
+        fetchLeaves();
+      } else {
+        const message =
+          data.message ||
+          (action === "approve"
+            ? "Failed to approve leave."
+            : "Failed to reject leave.");
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
+      }
+    } catch (error) {
+      console.error(`Error ${action}ing leave:`, error);
+      RNAlert.alert(
+        "Error",
+        `An error occurred while ${action === "approve" ? "approving" : "rejecting"} the leave.`,
+      );
+    } finally {
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
+    }
+  };
+
+  const promptLeaveAction = (item, action) => {
+    const title = action === "approve" ? "Approve Leave" : "Reject Leave";
+    const confirmLabel = action === "approve" ? "Approve" : "Reject";
+
+    if (Platform.OS === "ios" && typeof RNAlert.prompt === "function") {
+      RNAlert.prompt(
+        title,
+        "Optional comments",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: confirmLabel,
+            onPress: (text) => submitLeaveAction(item, action, text || ""),
+          },
+        ],
+        "plain-text",
+      );
+      return;
+    }
+
+    RNAlert.alert(title, `Are you sure you want to ${action} this leave request?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: confirmLabel,
+        style: action === "reject" ? "destructive" : "default",
+        onPress: () => submitLeaveAction(item, action, ""),
+      },
+    ]);
+  };
+
   /**
    * Chooses an icon for the leave type.
    */
@@ -424,96 +725,129 @@ export default function LeavesApproval() {
     }
   };
 
-  /**
-   * Renders each leave entry.
-   * Show separate rows for Start, End, Reason, and CreatedAt.
-   */
   const renderItem = ({ item }) => {
-    const itemScaleAnim = new Animated.Value(1);
-
-    const animateItemPress = () => {
-      Animated.sequence([
-        Animated.timing(itemScaleAnim, {
-          toValue: 0.97,
-          duration: 70,
-          useNativeDriver: true,
-        }),
-        Animated.spring(itemScaleAnim, {
-          toValue: 1,
-          friction: 3,
-          tension: 40,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    };
+    const typeLabel = resolveLeaveTypeLabel(item);
+    const reason = item.leaveReason?.trim();
+    const paidLabel = resolvePaidLabel(item);
+    const requesterName = resolveRequesterLabel(item);
+    const approverName = resolveApproverLabel(item);
+    const leaveId = resolveLeaveId(item);
+    const isProcessing = leaveId != null && !!processingLeaves[leaveId];
+    const showActions = canActOnLeave(item);
 
     return (
-      <Animated.View style={{ transform: [{ scale: itemScaleAnim }] }}>
-        <TouchableOpacity
-          onPress={() => {
-            animateItemPress();
-            openLeaveDetail(item);
-          }}
-          activeOpacity={0.9}
-          className="mb-4 rounded-xl overflow-hidden bg-white"
-        >
-          <View className="p-2 bg-slate-50 rounded-lg">
-            {/* Row: Leave Type + Status Badge */}
-            <View className="flex-row justify-between items-center pb-4 border-b border-slate-200">
-              <View className="flex-row items-center">
-                <View className="w-10 h-10 rounded-full bg-orange-100 items-center justify-center mr-3">
-                  <Ionicons name={getLeaveTypeIcon(item.leaveType)} size={20} color="#f97316" />
-                </View>
-                <Text className="text-lg font-semibold text-slate-800">{item.leaveType}</Text>
-              </View>
-              <LeaveStatusBadge status={item.status} />
+      <TouchableOpacity
+        onPress={() => openLeaveDetail(item)}
+        activeOpacity={0.85}
+        className="mb-3 p-4 bg-white rounded-xl border border-slate-100"
+        style={cardShadow}
+      >
+        <View className="flex-row justify-between items-start mb-3">
+          <View className="flex-row items-center flex-1 pr-2 min-w-0">
+            <View className="w-10 h-10 rounded-full bg-orange-50 items-center justify-center mr-3">
+              <Ionicons
+                name={getLeaveTypeIcon(typeLabel)}
+                size={20}
+                color="#f97316"
+              />
             </View>
-
-            {/* Row(s): Start, End, Reason, CreatedAt */}
-            <View className="bg-slate-50 rounded-lg p-3 border-b border-slate-200">
-              {/* CreatedAt */}
-              <View className="flex-row items-center mb-1">
-                <Ionicons name="time-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2">Submitted: {formatLeaveDateTimeLabel(item.createdAt)}</Text>
-              </View>
-              {/* Start Date/Time */}
-              <View className="flex-row items-center mb-1">
-                <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2 ">Start: {formatLeaveBoundaryLabel(item, "start")}</Text>
-              </View>
-              {/* End Date/Time */}
-              <View className="flex-row items-center mb-1">
-                <Ionicons name="calendar-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2">End: {formatLeaveBoundaryLabel(item, "end")}</Text>
-              </View>
-              {/* Reason */}
-              <View className="flex-row items-center">
-                <Ionicons name="pencil-outline" size={16} color="#6B7280" />
-                <Text className="text-slate-600 text-sm ml-2">Reason: {item.leaveReason ? item.leaveReason : "No reason"}</Text>
-              </View>
+            <View className="flex-1 min-w-0">
+              <Text
+                className="font-semibold text-slate-800 text-base"
+                numberOfLines={1}
+              >
+                {typeLabel}
+              </Text>
+              {isCompanyView && requesterName ? (
+                <Text className="text-xs text-slate-500 mt-0.5" numberOfLines={1}>
+                  {requesterName}
+                </Text>
+              ) : paidLabel ? (
+                <Text className="text-xs text-slate-500 mt-0.5">{paidLabel}</Text>
+              ) : null}
             </View>
-
-            {/* Approver (if any) */}
-            {item.approver && item.approver.email && (
-              <View className="bg-slate-50 rounded-lg p-3">
-                <View className="flex-row items-center mb-1">
-                  <Ionicons name="person-outline" size={16} color="#6B7280" />
-                  <Text className="text-slate-600 text-sm ml-1">Approver: {item.approver.email}</Text>
-                </View>
-                <View className="flex-row items-center">
-                  <Ionicons name="pencil-outline" size={16} color="#6B7280" />
-                  <Text className="text-slate-600 text-sm ml-1">Comments: {item.approverComments}</Text>
-                </View>
-              </View>
-            )}
           </View>
-        </TouchableOpacity>
-      </Animated.View>
+          <LeaveStatusBadge status={item.status} />
+        </View>
+
+        <View className="bg-slate-50 rounded-lg px-3 py-2.5 mb-3 border border-slate-100">
+          <Text className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1">
+            Leave period
+          </Text>
+          <View className="flex-row items-center">
+            <Ionicons name="calendar-outline" size={15} color="#94a3b8" />
+            <Text className="text-sm font-medium text-slate-800 ml-2 flex-1 leading-5">
+              {formatLeaveBoundaryLabel(item, "start")}
+              {"  →  "}
+              {formatLeaveBoundaryLabel(item, "end")}
+            </Text>
+          </View>
+        </View>
+
+        <View className="flex-row items-end justify-between">
+          <View className="flex-1 pr-2">
+            <Text className="text-xs text-slate-500">
+              Submitted {formatLeaveDateTimeLabel(item.createdAt)}
+            </Text>
+            {reason ? (
+              <Text className="text-xs text-slate-600 mt-1" numberOfLines={2}>
+                {reason}
+              </Text>
+            ) : (
+              <Text className="text-xs text-slate-400 mt-1 italic">
+                No reason provided
+              </Text>
+            )}
+            {approverName ? (
+              <Text className="text-xs text-slate-500 mt-1" numberOfLines={1}>
+                Approver: {approverName}
+              </Text>
+            ) : null}
+          </View>
+          <Ionicons name="chevron-forward" size={18} color="#cbd5e1" />
+        </View>
+
+        {showActions ? (
+          <View className="flex-row gap-2 mt-3">
+            <TouchableOpacity
+              onPress={() => promptLeaveAction(item, "approve")}
+              activeOpacity={0.85}
+              disabled={isProcessing}
+              className="flex-1 py-2.5 rounded-lg bg-green-500 items-center"
+            >
+              {processingLeaves[leaveId] === "approving" ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text className="text-white font-semibold">Approve</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => promptLeaveAction(item, "reject")}
+              activeOpacity={0.85}
+              disabled={isProcessing}
+              className="flex-1 py-2.5 rounded-lg bg-red-500 items-center"
+            >
+              {processingLeaves[leaveId] === "rejecting" ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text className="text-white font-semibold">Reject</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        ) : null}
+      </TouchableOpacity>
     );
   };
 
+  const androidBottom =
+    Platform.OS === "android" ? Math.max(insets.bottom, 28) : insets.bottom;
+
   return (
-    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: 70 }}>
+    <SafeAreaView
+      className="flex-1 bg-slate-50"
+      edges={["left", "right", "bottom"]}
+      style={{ paddingTop: insets.top + 60 }}
+    >
       <Animated.View
         style={{
           flex: 1,
@@ -521,10 +855,14 @@ export default function LeavesApproval() {
           transform: [{ translateY: slideAnim }],
         }}
       >
-        <View className="px-4 pb-2">
-          {/* Header */}
-          <View className="flex-row justify-between items-center mb-2">
-            <Text className="text-2xl font-bold text-slate-800">Leave History</Text>
+        <View className="px-4 pb-3 bg-white border-b border-slate-100">
+          <View className="flex-row justify-between items-center mb-1">
+            <View className="flex-row items-center flex-1">
+              <Ionicons name="leaf-outline" size={24} color="#f97316" />
+              <Text className="text-xl font-bold text-slate-800 ml-2">
+                Leave requests
+              </Text>
+            </View>
             <Animated.View style={{ transform: [{ scale: sortButtonScale }] }}>
               <TouchableOpacity
                 onPress={() => {
@@ -532,38 +870,80 @@ export default function LeavesApproval() {
                   setTimeout(openSortModal, 100);
                 }}
                 activeOpacity={0.8}
-                className="w-10 h-10 rounded-full bg-white border border-slate-200 items-center justify-center"
+                className="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 items-center justify-center"
                 style={styles.buttonShadow}
+                accessibilityLabel="Sort leave requests"
               >
-                <Ionicons name="options-outline" size={20} color="#4B5563" />
+                <Ionicons name="options-outline" size={20} color="#64748b" />
               </TouchableOpacity>
             </Animated.View>
           </View>
 
-          <Text className="text-slate-500 mb-4">View all your leave requests and their status</Text>
+          <Text className="text-slate-500 text-sm mb-4">
+            {isCompanyView
+              ? userRole === "supervisor"
+                ? "Review and approve leave requests assigned to you"
+                : "Track status and details for employee leave requests in your company"
+              : "Track status and details for your submitted leave"}
+          </Text>
 
-          {/* Filter pills */}
-          <View className="flex-row mb-4">
-            <FilterOption label="All" isActive={activeFilter === "all"} onPress={() => setActiveFilter("all")} />
-            <FilterOption label="Pending" isActive={activeFilter === "pending"} onPress={() => setActiveFilter("pending")} />
-            <FilterOption label="Approved" isActive={activeFilter === "approved"} onPress={() => setActiveFilter("approved")} />
-            <FilterOption label="Rejected" isActive={activeFilter === "rejected"} onPress={() => setActiveFilter("rejected")} />
-          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingRight: 8 }}
+          >
+            <FilterOption
+              label="All"
+              isActive={activeFilter === "all"}
+              onPress={() => setActiveFilter("all")}
+            />
+            <FilterOption
+              label="Pending"
+              isActive={activeFilter === "pending"}
+              onPress={() => setActiveFilter("pending")}
+            />
+            <FilterOption
+              label="Approved"
+              isActive={activeFilter === "approved"}
+              onPress={() => setActiveFilter("approved")}
+            />
+            <FilterOption
+              label="Rejected"
+              isActive={activeFilter === "rejected"}
+              onPress={() => setActiveFilter("rejected")}
+            />
+          </ScrollView>
         </View>
 
-        {/* Main content: list or loading */}
         {loading ? (
-          <View className="flex-1 justify-center items-center">
-            <ActivityIndicator size="large" color="#cbd5e1" />
+          <View className="flex-1 justify-center items-center bg-slate-50">
+            <ActivityIndicator size="large" color="#f97316" />
+            <Text className="mt-4 text-slate-500 text-sm">Loading requests…</Text>
           </View>
         ) : (
           <FlatList
             data={filteredLeaves}
-            keyExtractor={(item) => item.id.toString()}
+            keyExtractor={(item) => String(item.id)}
             renderItem={renderItem}
-            contentContainerStyle={[{ paddingHorizontal: 16, paddingBottom: 20 }, filteredLeaves.length === 0 && { flex: 1 }]}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={["#cbd5e1"]} tintColor={["#cbd5e1"]} />}
-            ListEmptyComponent={<EmptyListComponent activeFilter={activeFilter} />}
+            className="bg-slate-50"
+            contentContainerStyle={[
+              { paddingHorizontal: 16, paddingTop: 16, paddingBottom: androidBottom + 24 },
+              filteredLeaves.length === 0 && { flex: 1 },
+            ]}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                colors={["#f97316"]}
+                tintColor="#f97316"
+              />
+            }
+            ListEmptyComponent={
+              <EmptyListComponent
+                activeFilter={activeFilter}
+                isCompanyView={isCompanyView}
+              />
+            }
             showsVerticalScrollIndicator={false}
           />
         )}
@@ -616,8 +996,13 @@ export default function LeavesApproval() {
                   </TouchableOpacity>
                 </View>
 
-                <View className="px-5 py-3 border-b border-slate-100">
+                <View className="px-5 py-3 border-b border-slate-100 flex-row items-center justify-between">
                   <LeaveStatusBadge status={selectedLeave.status || "pending"} />
+                  {resolvePaidLabel(selectedLeave) ? (
+                    <Text className="text-sm text-slate-500">
+                      {resolvePaidLabel(selectedLeave)}
+                    </Text>
+                  ) : null}
                 </View>
 
                 <ScrollView
@@ -625,6 +1010,13 @@ export default function LeavesApproval() {
                   showsVerticalScrollIndicator={false}
                   bounces={false}
                 >
+                  {resolveRequesterLabel(selectedLeave) ? (
+                    <DetailRow
+                      icon="person-outline"
+                      label="Requester"
+                      value={resolveRequesterLabel(selectedLeave)}
+                    />
+                  ) : null}
                   <DetailRow
                     icon="time-outline"
                     label="Submitted"
@@ -640,13 +1032,6 @@ export default function LeavesApproval() {
                     label="End"
                     value={formatLeaveBoundaryLabel(selectedLeave, "end")}
                   />
-                  {resolvePaidLabel(selectedLeave) ? (
-                    <DetailRow
-                      icon="card-outline"
-                      label="Pay type"
-                      value={resolvePaidLabel(selectedLeave)}
-                    />
-                  ) : null}
                   <DetailRow
                     icon="document-text-outline"
                     label="Reason"
@@ -656,11 +1041,14 @@ export default function LeavesApproval() {
                         : "No reason provided"
                     }
                   />
-                  {selectedLeave.approver?.email ? (
+                  {selectedLeave.approver?.email || resolveApproverLabel(selectedLeave) ? (
                     <DetailRow
-                      icon="person-outline"
+                      icon="shield-checkmark-outline"
                       label="Approver"
-                      value={selectedLeave.approver.email}
+                      value={
+                        resolveApproverLabel(selectedLeave) ||
+                        selectedLeave.approver?.email
+                      }
                     />
                   ) : null}
                   <DetailRow
@@ -682,6 +1070,44 @@ export default function LeavesApproval() {
                 </ScrollView>
 
                 <View className="px-5 pt-2">
+                  {canActOnLeave(selectedLeave) ? (
+                    <View className="flex-row gap-2 mb-2">
+                      <TouchableOpacity
+                        onPress={() => promptLeaveAction(selectedLeave, "approve")}
+                        activeOpacity={0.85}
+                        disabled={
+                          !!processingLeaves[resolveLeaveId(selectedLeave)]
+                        }
+                        className="flex-1 bg-green-500 rounded-xl py-3.5 items-center"
+                      >
+                        {processingLeaves[resolveLeaveId(selectedLeave)] ===
+                        "approving" ? (
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                        ) : (
+                          <Text className="text-white font-semibold text-base">
+                            Approve
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => promptLeaveAction(selectedLeave, "reject")}
+                        activeOpacity={0.85}
+                        disabled={
+                          !!processingLeaves[resolveLeaveId(selectedLeave)]
+                        }
+                        className="flex-1 bg-red-500 rounded-xl py-3.5 items-center"
+                      >
+                        {processingLeaves[resolveLeaveId(selectedLeave)] ===
+                        "rejecting" ? (
+                          <ActivityIndicator size="small" color="#FFFFFF" />
+                        ) : (
+                          <Text className="text-white font-semibold text-base">
+                            Reject
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
                   <TouchableOpacity
                     onPress={closeLeaveDetail}
                     activeOpacity={0.85}

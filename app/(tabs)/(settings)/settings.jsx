@@ -523,8 +523,8 @@ const Settings = () => {
 
     {
       title: "Leave Requests",
-      route: "./manage-leaves",
-      roles: ["admin", "superadmin"],
+      route: "./(management)/manage-leaves",
+      roles: ["supervisor", "admin", "superadmin"],
       icon: "calendar-outline",
       iconType: "ionicons",
       group: "Schedule Management",
@@ -1087,7 +1087,7 @@ const Settings = () => {
                     {userRole === "employee"
                       ? "You don't have access to administrative features."
                       : userRole === "supervisor"
-                        ? "Only employee management is available for supervisors."
+                        ? "Employee management and leave approvals are available for supervisors."
                         : "No options available for your role."}
                   </Text>
                 </View>

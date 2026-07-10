@@ -24,6 +24,7 @@ import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../../config/constant";
+import { getTokenUserId } from "../../../../store/useAuthStore";
 import {
   formatLeaveBoundaryLabel,
   formatLeaveDateTimeLabel,
@@ -37,8 +38,9 @@ const { height } = Dimensions.get("window");
 // ---------------------------------------------------------------------
 
 const LeaveStatusBadge = ({ status }) => {
+  const normalizedStatus = String(status ?? "pending").toLowerCase();
   let bgColor, textColor, icon;
-  switch (status.toLowerCase()) {
+  switch (normalizedStatus) {
     case "approved":
       bgColor = "bg-green-100";
       textColor = "text-green-800";
@@ -67,7 +69,9 @@ const LeaveStatusBadge = ({ status }) => {
         color={textColor.replace("text-", "")}
         style={{ marginRight: 4 }}
       />
-      <Text className={`text-xs font-medium ${textColor}`}>{status}</Text>
+      <Text className={`text-xs font-medium ${textColor}`}>
+        {String(status ?? "pending")}
+      </Text>
     </View>
   );
 };
@@ -187,7 +191,7 @@ const EmptyListComponent = ({ activeFilter }) => (
 );
 
 const getLeaveTypeIcon = (type) => {
-  switch (type.toLowerCase()) {
+  switch (String(type ?? "").toLowerCase()) {
     case "sick leave":
       return "medkit";
     case "vacation leave":
@@ -201,6 +205,101 @@ const getLeaveTypeIcon = (type) => {
     default:
       return "calendar";
   }
+};
+
+const resolveRequesterLabel = (item) => {
+  const requester =
+    item?.requester ?? item?.User ?? item?.user ?? item?.employee ?? null;
+  const profile = requester?.profile ?? item?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? requester?.firstName ?? ""} ${profile?.lastName ?? requester?.lastName ?? ""}`.trim(),
+    requester?.fullName,
+    requester?.name,
+    profile?.fullName,
+    profile?.name,
+    item?.requesterName,
+    item?.employeeName,
+    item?.userName,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  return (
+    fullName ||
+    requester?.username ||
+    requester?.email ||
+    item?.requesterEmail ||
+    (requester?.id != null ? `ID ${requester.id}` : "Unknown requester")
+  );
+};
+
+const resolveApproverLabel = (item) => {
+  const approver =
+    item?.approver ?? item?.Approver ?? item?.approverUser ?? null;
+  const profile = approver?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? approver?.firstName ?? ""} ${profile?.lastName ?? approver?.lastName ?? ""}`.trim(),
+    approver?.fullName,
+    approver?.name,
+    profile?.fullName,
+    profile?.name,
+    item?.approverName,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  return (
+    fullName ||
+    approver?.username ||
+    approver?.email ||
+    item?.approverEmail ||
+    (approver?.id != null || item?.approverId != null
+      ? `ID ${approver?.id ?? item?.approverId}`
+      : null)
+  );
+};
+
+const resolveLeaveId = (item) =>
+  item?.id ??
+  item?._id ??
+  item?.leaveId ??
+  item?.leaveRequestId ??
+  item?.requestId ??
+  item?.leave?.id ??
+  item?.leave?._id ??
+  null;
+
+const toStr = (value) => (value == null ? "" : String(value));
+
+const isApproverMatch = (leave, currentUserId) => {
+  const currentId = toStr(currentUserId);
+  if (!currentId) return false;
+
+  const approverCandidates = [
+    leave?.approverId,
+    leave?.ApproverId,
+    leave?.approverUserId,
+    leave?.approvedById,
+    leave?.approver?.id,
+    leave?.approver?.userId,
+    leave?.Approver?.id,
+    leave?.Approver?.userId,
+    leave?.assignedApproverId,
+  ]
+    .map(toStr)
+    .filter(Boolean);
+
+  if (approverCandidates.some((id) => id === currentId)) return true;
+
+  const approverArray =
+    leave?.approverIds ??
+    leave?.ApproverIds ??
+    leave?.approvers?.map((a) => a?.id ?? a?.userId) ??
+    [];
+
+  return Array.isArray(approverArray)
+    ? approverArray.map(toStr).some((id) => id === currentId)
+    : false;
 };
 
 // ---------------------------------------------------------------------
@@ -275,16 +374,35 @@ export default function ManageLeaves() {
         );
         return;
       }
+      let userRole = "";
+      try {
+        const profileRes = await fetch(`${API_BASE_URL}/api/account/profile`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const profileData = await profileRes.json();
+        if (profileRes.ok) {
+          userRole = String(profileData?.data?.user?.role ?? "").toLowerCase();
+        }
+      } catch (profileError) {
+        console.error("Error resolving leave management role:", profileError);
+      }
+
       const res = await fetch(`${API_BASE_URL}/api/leaves/`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       if (res.ok) {
+        const currentUserId = getTokenUserId(token);
         const rows = Array.isArray(data.data)
           ? data.data.map(normalizeLeaveRecord)
           : [];
-        setApproverLeaves(rows);
-        applyFiltersAndSort(rows, activeFilter, sortOption);
+        const canViewAllCompanyLeaves =
+          userRole === "admin" || userRole === "superadmin";
+        const visibleRows = canViewAllCompanyLeaves
+          ? rows
+          : rows.filter((leave) => isApproverMatch(leave, currentUserId));
+        setApproverLeaves(visibleRows);
+        applyFiltersAndSort(visibleRows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leaves.");
       }
@@ -326,11 +444,9 @@ export default function ManageLeaves() {
         result.sort((a, b) => a.status.localeCompare(b.status));
         break;
       case "requester":
-        result.sort((a, b) => {
-          const nameA = a.requester?.username || "";
-          const nameB = b.requester?.username || "";
-          return nameA.localeCompare(nameB);
-        });
+        result.sort((a, b) =>
+          resolveRequesterLabel(a).localeCompare(resolveRequesterLabel(b)),
+        );
         break;
       default:
         break;
@@ -427,6 +543,28 @@ export default function ManageLeaves() {
     ]).start();
   };
 
+  const openActionSection = (leaveItem, section) => {
+    setActionsLeave(leaveItem);
+    setExpandedSection(section);
+    setApproveComments("");
+    setRejectComments("");
+    setActionsModalVisible(true);
+    actionsModalY.setValue(height);
+    Animated.parallel([
+      Animated.timing(modalBgAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.spring(actionsModalY, {
+        toValue: 0,
+        tension: 60,
+        friction: 12,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  };
+
   const closeActionsModal = () => {
     Animated.parallel([
       Animated.timing(modalBgAnim, {
@@ -451,18 +589,27 @@ export default function ManageLeaves() {
   // ---------------------------------------------------------------------
 
   const confirmApprove = async () => {
-    if (!actionsLeave?.id) {
+    const leaveId = resolveLeaveId(actionsLeave);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      closeActionsModal();
+      return;
+    }
+    const selectedStatus = String(actionsLeave?.status ?? "").toLowerCase();
+    if (!selectedStatus.includes("pending")) {
+      RNAlert.alert("Request updated", "This leave is no longer pending. Refreshing leave list.");
+      fetchApproverLeaves();
       closeActionsModal();
       return;
     }
     setProcessingLeaves((prev) => ({
       ...prev,
-      [actionsLeave.id]: "approving",
+      [leaveId]: "approving",
     }));
     try {
       const token = await SecureStore.getItemAsync("token");
       const res = await fetch(
-        `${API_BASE_URL}/api/leaves/${actionsLeave.id}/approve`,
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/approve`,
         {
           method: "PUT",
           headers: {
@@ -477,30 +624,48 @@ export default function ManageLeaves() {
         RNAlert.alert("Success", "Leave approved successfully.");
         fetchApproverLeaves();
       } else {
-        RNAlert.alert("Error", data.message || "Failed to approve leave.");
+        const message = data.message || "Failed to approve leave.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchApproverLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
       }
     } catch (error) {
       console.error("Error approving leave:", error);
       RNAlert.alert("Error", "An error occurred while approving the leave.");
     } finally {
-      setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: null }));
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
       closeActionsModal();
     }
   };
 
   const confirmReject = async () => {
-    if (!actionsLeave?.id) {
+    const leaveId = resolveLeaveId(actionsLeave);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      closeActionsModal();
+      return;
+    }
+    const selectedStatus = String(actionsLeave?.status ?? "").toLowerCase();
+    if (!selectedStatus.includes("pending")) {
+      RNAlert.alert("Request updated", "This leave is no longer pending. Refreshing leave list.");
+      fetchApproverLeaves();
       closeActionsModal();
       return;
     }
     setProcessingLeaves((prev) => ({
       ...prev,
-      [actionsLeave.id]: "rejecting",
+      [leaveId]: "rejecting",
     }));
     try {
       const token = await SecureStore.getItemAsync("token");
       const res = await fetch(
-        `${API_BASE_URL}/api/leaves/${actionsLeave.id}/reject`,
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/reject`,
         {
           method: "PUT",
           headers: {
@@ -515,26 +680,39 @@ export default function ManageLeaves() {
         RNAlert.alert("Success", "Leave rejected successfully.");
         fetchApproverLeaves();
       } else {
-        RNAlert.alert("Error", data.message || "Failed to reject leave.");
+        const message = data.message || "Failed to reject leave.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchApproverLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
       }
     } catch (error) {
       console.error("Error rejecting leave:", error);
       RNAlert.alert("Error", "An error occurred while rejecting the leave.");
     } finally {
-      setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: null }));
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
       closeActionsModal();
     }
   };
 
   const confirmDelete = async () => {
-    if (!actionsLeave?.id) {
+    const leaveId = resolveLeaveId(actionsLeave);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
       closeActionsModal();
       return;
     }
-    setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: "deleting" }));
+    setProcessingLeaves((prev) => ({ ...prev, [leaveId]: "deleting" }));
     try {
       const token = await SecureStore.getItemAsync("token");
-      const res = await fetch(`${API_BASE_URL}/api/leaves/${actionsLeave.id}`, {
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}`,
+        {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -543,13 +721,22 @@ export default function ManageLeaves() {
         RNAlert.alert("Success", data.message || "Leave deleted successfully.");
         fetchApproverLeaves();
       } else {
-        RNAlert.alert("Error", data.message || "Failed to delete leave.");
+        const message = data.message || "Failed to delete leave.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchApproverLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
       }
     } catch (error) {
       console.error("Error deleting leave:", error);
       RNAlert.alert("Error", "An error occurred while deleting the leave.");
     } finally {
-      setProcessingLeaves((prev) => ({ ...prev, [actionsLeave.id]: null }));
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
       closeActionsModal();
     }
   };
@@ -598,7 +785,7 @@ export default function ManageLeaves() {
                   />
                 </View>
                 <Text className="text-base font-semibold text-slate-700">
-                  {item.leaveType}
+                  {item.leaveType || "Leave"}
                 </Text>
               </View>
               <LeaveStatusBadge status={item.status} />
@@ -608,9 +795,21 @@ export default function ManageLeaves() {
               <View className="flex-row items-center mb-1 ">
                 <Ionicons name="person-outline" size={16} color="#6B7280" />
                 <Text className="text-gray-600 text-sm ml-2">
-                  Requester: {item.User.email}
+                  Requester: {resolveRequesterLabel(item)}
                 </Text>
               </View>
+              {resolveApproverLabel(item) ? (
+                <View className="flex-row items-center mb-1">
+                  <Ionicons
+                    name="shield-checkmark-outline"
+                    size={16}
+                    color="#6B7280"
+                  />
+                  <Text className="text-gray-600 text-sm ml-2">
+                    Approver: {resolveApproverLabel(item)}
+                  </Text>
+                </View>
+              ) : null}
               <View className="flex-row items-center mb-1">
                 <Ionicons name="time-outline" size={16} color="#6B7280" />
                 <Text className="text-gray-600 text-sm ml-2">
@@ -644,6 +843,24 @@ export default function ManageLeaves() {
                 </Text>
               </View>
             </View>
+            {String(item?.status || "").toLowerCase().includes("pending") ? (
+              <View className="flex-row gap-2 px-3 pb-3">
+                <TouchableOpacity
+                  onPress={() => openActionSection(item, "approve")}
+                  activeOpacity={0.85}
+                  className="flex-1 py-2.5 rounded-lg bg-green-500 items-center"
+                >
+                  <Text className="text-white font-semibold">Approve</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => openActionSection(item, "reject")}
+                  activeOpacity={0.85}
+                  className="flex-1 py-2.5 rounded-lg bg-red-500 items-center"
+                >
+                  <Text className="text-white font-semibold">Reject</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
           </View>
         </TouchableOpacity>
       </Animated.View>
@@ -655,8 +872,9 @@ export default function ManageLeaves() {
   // ---------------------------------------------------------------------
 
   const renderApproveSection = () => {
+    const leaveId = resolveLeaveId(actionsLeave);
     const isProcessing =
-      actionsLeave && processingLeaves[actionsLeave.id] === "approving";
+      leaveId != null && processingLeaves[leaveId] === "approving";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4 ">
         <Text className="text-lg font-bold text-slate-700 mb-3">
@@ -705,8 +923,9 @@ export default function ManageLeaves() {
   };
 
   const renderRejectSection = () => {
+    const leaveId = resolveLeaveId(actionsLeave);
     const isProcessing =
-      actionsLeave && processingLeaves[actionsLeave.id] === "rejecting";
+      leaveId != null && processingLeaves[leaveId] === "rejecting";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4">
         <Text className="text-lg font-bold text-slate-700 mb-3">
@@ -755,8 +974,9 @@ export default function ManageLeaves() {
   };
 
   const renderDeleteSection = () => {
+    const leaveId = resolveLeaveId(actionsLeave);
     const isProcessing =
-      actionsLeave && processingLeaves[actionsLeave.id] === "deleting";
+      leaveId != null && processingLeaves[leaveId] === "deleting";
     return (
       <View className="bg-slate-50 rounded-lg p-4 mb-4">
         <Text className="text-lg font-bold text-slate-700 mb-3">
@@ -873,7 +1093,9 @@ export default function ManageLeaves() {
         ) : (
           <FlatList
             data={filteredLeaves}
-            keyExtractor={(item) => item.id.toString()}
+            keyExtractor={(item, index) =>
+              String(resolveLeaveId(item) ?? index)
+            }
             renderItem={renderItem}
             contentContainerStyle={[
               { paddingHorizontal: 16, paddingBottom: 20 },
@@ -1020,7 +1242,9 @@ export default function ManageLeaves() {
               {expandedSection === null && (
                 <>
                   {/* Only show Approve & Reject if leave is pending */}
-                  {actionsLeave.status === "pending" && (
+                  {String(actionsLeave?.status || "")
+                    .toLowerCase()
+                    .includes("pending") && (
                     <>
                       <TouchableOpacity
                         onPress={() => setExpandedSection("approve")}
