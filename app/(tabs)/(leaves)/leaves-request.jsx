@@ -26,7 +26,7 @@ import { useRouter, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../config/constant";
-import { formatLocalTimeHms } from "../../../utils/dateOnlyUtils";
+import { formatLocalTimeHm } from "../../../utils/dateOnlyUtils";
 
 const { height } = Dimensions.get("window");
 
@@ -450,10 +450,10 @@ const SubmitLeaves = () => {
         toDate: endIso,
         startDate: startIso,
         endDate: endIso,
-        fromTime: formatLocalTimeHms(combinedStart),
-        toTime: formatLocalTimeHms(combinedEnd),
-        startTime: formatLocalTimeHms(combinedStart),
-        endTime: formatLocalTimeHms(combinedEnd),
+        fromTime: formatLocalTimeHm(combinedStart),
+        toTime: formatLocalTimeHm(combinedEnd),
+        startTime: formatLocalTimeHm(combinedStart),
+        endTime: formatLocalTimeHm(combinedEnd),
         approverId: approverValue,
         leaveReason,
         isPaid: isPaidLeave,

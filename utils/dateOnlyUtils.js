@@ -42,6 +42,15 @@ export const formatLocalDateOnly = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
+/** Local wall-clock time HH:mm for APIs that expect hours and minutes only. */
+export const formatLocalTimeHm = (dateInput) => {
+  const date = new Date(dateInput);
+  if (!Number.isFinite(date.getTime())) return "";
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${hour}:${minute}`;
+};
+
 /** Local wall-clock time HH:mm:ss for APIs that store date and time separately. */
 export const formatLocalTimeHms = (dateInput) => {
   const date = new Date(dateInput);
