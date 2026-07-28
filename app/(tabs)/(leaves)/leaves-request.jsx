@@ -16,7 +16,6 @@ import {
   TextInput,
   ScrollView,
   TouchableWithoutFeedback,
-  Switch,
   RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -30,6 +29,7 @@ import {
   DEFAULT_SHIFT_DISPLAY_TIMEZONE,
 } from "../../../config/constant";
 import { formatLocalTimeHm } from "../../../utils/dateOnlyUtils";
+import { buildShiftWindowFromUserShift } from "../../../utils/timekeepingShiftUtils";
 
 const { height } = Dimensions.get("window");
 
@@ -94,6 +94,17 @@ const formatNaiveTimeInZone = (naiveTimeStr) => {
   const m = String(t.minute).padStart(2, "0");
   const ampm = t.hour >= 12 ? "PM" : "AM";
   return `${h}:${m} ${ampm}`;
+};
+
+/** Compact hour label matching web leave UI (e.g. "3h", "1.5h"). */
+const formatCompactHours = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  const rounded = Math.round(n * 10) / 10;
+  const label = Number.isInteger(rounded)
+    ? String(rounded)
+    : String(rounded).replace(/\.0$/, "");
+  return `${label}h`;
 };
 
 // Utility to combine date and time into one
@@ -710,6 +721,68 @@ const SubmitLeaves = () => {
       .sort((a, b) => getShiftDateKey(a).localeCompare(getShiftDateKey(b)));
   }, [userShifts, leaveRangeStartKey, leaveRangeEndKey]);
 
+  const selectedLeaveBalance = useMemo(() => {
+    if (!leaveType || !leaveBalances.length) return null;
+    const normalize = (v) =>
+      String(v ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_-]+/g, "");
+    const target = normalize(leaveType);
+    return (
+      leaveBalances.find((row) => {
+        const candidates = [row.label, row.key];
+        return candidates.some((c) => normalize(c) === target);
+      }) ?? null
+    );
+  }, [leaveType, leaveBalances]);
+
+  const estimatedHoursUsed = useMemo(() => {
+    let totalMs = 0;
+    if (affectedShifts.length > 0) {
+      for (const userShift of affectedShifts) {
+        const window = buildShiftWindowFromUserShift(userShift);
+        if (window?.start && window?.end) {
+          totalMs += Math.max(0, window.end.getTime() - window.start.getTime());
+        }
+      }
+    }
+    if (totalMs <= 0) {
+      const start = combineDateAndTime(leaveStartDate, leaveStartTime);
+      const end = combineDateAndTime(leaveEndDate, leaveEndTime);
+      totalMs = Math.max(0, end.getTime() - start.getTime());
+    }
+    if (totalMs <= 0) return null;
+    return totalMs / (1000 * 60 * 60);
+  }, [
+    affectedShifts,
+    leaveStartDate,
+    leaveStartTime,
+    leaveEndDate,
+    leaveEndTime,
+  ]);
+
+  const availableBalanceLabel = (() => {
+    const hoursLabel = formatCompactHours(selectedLeaveBalance?.hours);
+    if (hoursLabel) return `${hoursLabel} available balance`;
+    if (selectedLeaveBalance?.credits != null) {
+      const n = Number(selectedLeaveBalance.credits);
+      if (Number.isFinite(n)) {
+        const days = Number.isInteger(n)
+          ? String(n)
+          : String(Math.round(n * 10) / 10);
+        return `${days}d available balance`;
+      }
+    }
+    // Fallback: first balance row that has hours
+    for (const row of leaveBalances) {
+      const hoursLabel = formatCompactHours(row.hours);
+      if (hoursLabel) return `${hoursLabel} available balance`;
+    }
+    return null;
+  })();
+  const hoursUsedLabel = formatCompactHours(estimatedHoursUsed);
+
   // Android-specific date/time picker
   const renderAndroidPicker = () => {
     if (!currentPicker) return null;
@@ -1099,26 +1172,107 @@ const SubmitLeaves = () => {
                 />
               </View>
 
-              {/* Paid / unpaid leave */}
+              {/* Paid / unpaid leave — matches web segmented control + info card */}
               <View className="px-5 mb-5">
                 <FormLabel text="Leave compensation" required={false} />
-                <View className="bg-slate-50 rounded-lg px-4 py-3 flex-row items-center justify-between">
-                  <View className="flex-1 pr-3">
-                    <Text className="text-base font-medium text-slate-800">
-                      {isPaidLeave ? "Paid leave" : "Unpaid leave"}
+                <View className="flex-row gap-2">
+                  <TouchableOpacity
+                    onPress={() => setIsPaidLeave(true)}
+                    activeOpacity={0.85}
+                    className={`flex-1 py-3 rounded-xl border items-center ${
+                      isPaidLeave
+                        ? "bg-emerald-50 border-emerald-600"
+                        : "bg-white border-slate-200"
+                    }`}
+                  >
+                    <Text
+                      className={`text-base font-semibold ${
+                        isPaidLeave ? "text-emerald-800" : "text-slate-500"
+                      }`}
+                    >
+                      Paid
                     </Text>
-                    <Text className="text-sm text-slate-500 mt-0.5">
-                      Toggle if this request should be unpaid time off
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => setIsPaidLeave(false)}
+                    activeOpacity={0.85}
+                    className={`flex-1 py-3 rounded-xl border items-center ${
+                      !isPaidLeave
+                        ? "bg-slate-100 border-slate-400"
+                        : "bg-white border-slate-200"
+                    }`}
+                  >
+                    <Text
+                      className={`text-base font-semibold ${
+                        !isPaidLeave ? "text-slate-700" : "text-slate-500"
+                      }`}
+                    >
+                      Unpaid
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {isPaidLeave ? (
+                  <View className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5">
+                    <View className="flex-row items-center mb-1.5">
+                      <Ionicons
+                        name="checkmark-circle"
+                        size={18}
+                        color="#047857"
+                        style={{ marginRight: 6 }}
+                      />
+                      <Text className="text-base font-bold text-emerald-800">
+                        Paid leave
+                      </Text>
+                    </View>
+                    <Text className="text-sm text-emerald-900/80 leading-5 mb-3">
+                      You will be compensated for this leave period.
+                    </Text>
+                    {hoursUsedLabel ? (
+                      <View className="flex-row items-center mb-1.5">
+                        <Ionicons
+                          name="time-outline"
+                          size={16}
+                          color="#EA580C"
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text className="text-sm font-semibold text-orange-600">
+                          {hoursUsedLabel} will be used
+                        </Text>
+                      </View>
+                    ) : null}
+                    {availableBalanceLabel ? (
+                      <View className="flex-row items-center">
+                        <Ionicons
+                          name="time-outline"
+                          size={16}
+                          color="#EA580C"
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text className="text-sm font-semibold text-orange-600">
+                          {availableBalanceLabel}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : (
+                  <View className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5">
+                    <View className="flex-row items-center mb-1.5">
+                      <Ionicons
+                        name="information-circle"
+                        size={18}
+                        color="#64748b"
+                        style={{ marginRight: 6 }}
+                      />
+                      <Text className="text-base font-bold text-slate-700">
+                        Unpaid leave
+                      </Text>
+                    </View>
+                    <Text className="text-sm text-slate-600 leading-5">
+                      This leave will not deduct from your paid leave balance.
                     </Text>
                   </View>
-                  <Switch
-                    value={isPaidLeave}
-                    onValueChange={setIsPaidLeave}
-                    trackColor={{ false: "#E5E7EB", true: "#FDBA74" }}
-                    thumbColor={isPaidLeave ? "#EA580C" : "#F3F4F6"}
-                    ios_backgroundColor="#E5E7EB"
-                  />
-                </View>
+                )}
               </View>
 
               {/* Approver Dropdown */}
