@@ -68,6 +68,13 @@ const STATUS_STYLES = {
     icon: "time",
     iconColor: "#b45309",
   },
+  cancelled: {
+    bg: "bg-slate-100",
+    text: "text-slate-600",
+    border: "border-slate-200",
+    icon: "ban",
+    iconColor: "#64748b",
+  },
   default: {
     bg: "bg-slate-50",
     text: "text-slate-600",
@@ -81,8 +88,17 @@ const resolveStatusStyle = (status) => {
   const key = String(status ?? "").toLowerCase();
   if (key.includes("approved")) return STATUS_STYLES.approved;
   if (key.includes("reject")) return STATUS_STYLES.rejected;
+  if (key.includes("cancel")) return STATUS_STYLES.cancelled;
   if (key.includes("pending")) return STATUS_STYLES.pending;
   return STATUS_STYLES.default;
+};
+
+const formatLeaveStatusLabel = (status) => {
+  const raw = String(status ?? "").trim();
+  if (!raw) return "—";
+  const key = raw.toLowerCase().replace(/[\s-]+/g, "_");
+  if (key === "pending_secondary") return "Pending final";
+  return raw.replace(/_/g, " ");
 };
 
 /**
@@ -90,7 +106,11 @@ const resolveStatusStyle = (status) => {
  */
 const LeaveStatusBadge = ({ status }) => {
   const style = resolveStatusStyle(status);
-  const label = String(status ?? "—");
+  const label = formatLeaveStatusLabel(status);
+  const isCustomLabel =
+    String(status ?? "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_") === "pending_secondary";
 
   return (
     <View
@@ -102,7 +122,9 @@ const LeaveStatusBadge = ({ status }) => {
         color={style.iconColor}
         style={{ marginRight: 4 }}
       />
-      <Text className={`text-xs font-semibold capitalize ${style.text}`}>
+      <Text
+        className={`text-xs font-semibold ${isCustomLabel ? "" : "capitalize"} ${style.text}`}
+      >
         {label}
       </Text>
     </View>
@@ -318,6 +340,29 @@ const isApproverMatch = (leave, currentUserId) => {
     : false;
 };
 
+const isRequesterMatch = (leave, currentUserId) => {
+  const currentId = toStr(currentUserId);
+  if (!currentId) return false;
+
+  const requester =
+    leave?.requester ?? leave?.User ?? leave?.user ?? leave?.employee ?? null;
+
+  const requesterCandidates = [
+    leave?.requesterId,
+    leave?.userId,
+    leave?.employeeId,
+    leave?.createdById,
+    leave?.createdBy,
+    requester?.id,
+    requester?._id,
+    requester?.userId,
+  ]
+    .map(toStr)
+    .filter(Boolean);
+
+  return requesterCandidates.some((id) => id === currentId);
+};
+
 const EmptyListComponent = ({ activeFilter, isCompanyView }) => (
   <View className="flex-1 justify-center items-center py-16 px-6">
     <View className="w-20 h-20 rounded-full bg-orange-50 items-center justify-center mb-5">
@@ -477,10 +522,10 @@ export default function LeavesApproval() {
     // Sort
     switch (sort) {
       case "newest":
-        result.sort((a, b) => new Date(b.startDate) - new Date(a.startDate));
+        result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         break;
       case "oldest":
-        result.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+        result.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         break;
       case "type":
         result.sort((a, b) => a.leaveType.localeCompare(b.leaveType));
@@ -613,6 +658,17 @@ export default function LeavesApproval() {
     [isCompanyView, userRole, currentUserId],
   );
 
+  const canCancelLeave = useCallback(
+    (item) => {
+      const status = String(item?.status ?? "").toLowerCase();
+      if (!status.includes("pending")) return false;
+      // Employee History (`/api/leaves/my`) only returns the current user's requests.
+      if (!isCompanyView) return true;
+      return isRequesterMatch(item, currentUserId);
+    },
+    [isCompanyView, currentUserId],
+  );
+
   const submitLeaveAction = async (item, action, comments = "") => {
     const leaveId = resolveLeaveId(item);
     if (!leaveId) {
@@ -705,6 +761,76 @@ export default function LeavesApproval() {
     ]);
   };
 
+  const submitCancelLeave = async (item) => {
+    const leaveId = resolveLeaveId(item);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      return;
+    }
+    setProcessingLeaves((prev) => ({ ...prev, [leaveId]: "cancelling" }));
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/cancel`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+      if (res.ok) {
+        RNAlert.alert("Success", "Leave request cancelled successfully.");
+        if (selectedLeave && resolveLeaveId(selectedLeave) === leaveId) {
+          closeLeaveDetail();
+        }
+        fetchLeaves();
+      } else {
+        const message = data.message || "Failed to cancel leave request.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed") ||
+          String(message).toLowerCase().includes("already cancelled")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
+      }
+    } catch (error) {
+      console.error("Error cancelling leave:", error);
+      RNAlert.alert(
+        "Error",
+        "An error occurred while cancelling the leave request.",
+      );
+    } finally {
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
+    }
+  };
+
+  const promptCancelLeave = (item) => {
+    RNAlert.alert(
+      "Cancel Leave",
+      "Are you sure you want to cancel this leave request?",
+      [
+        { text: "Keep request", style: "cancel" },
+        {
+          text: "Cancel request",
+          style: "destructive",
+          onPress: () => submitCancelLeave(item),
+        },
+      ],
+    );
+  };
+
   /**
    * Chooses an icon for the leave type.
    */
@@ -734,6 +860,7 @@ export default function LeavesApproval() {
     const leaveId = resolveLeaveId(item);
     const isProcessing = leaveId != null && !!processingLeaves[leaveId];
     const showActions = canActOnLeave(item);
+    const showCancel = canCancelLeave(item);
 
     return (
       <TouchableOpacity
@@ -834,6 +961,21 @@ export default function LeavesApproval() {
               )}
             </TouchableOpacity>
           </View>
+        ) : null}
+
+        {showCancel ? (
+          <TouchableOpacity
+            onPress={() => promptCancelLeave(item)}
+            activeOpacity={0.85}
+            disabled={isProcessing}
+            className="mt-3 py-2.5 rounded-lg border border-red-200 bg-red-50 items-center"
+          >
+            {processingLeaves[leaveId] === "cancelling" ? (
+              <ActivityIndicator size="small" color="#b91c1c" />
+            ) : (
+              <Text className="text-red-700 font-semibold">Cancel request</Text>
+            )}
+          </TouchableOpacity>
         ) : null}
       </TouchableOpacity>
     );
@@ -1107,6 +1249,25 @@ export default function LeavesApproval() {
                         )}
                       </TouchableOpacity>
                     </View>
+                  ) : null}
+                  {canCancelLeave(selectedLeave) ? (
+                    <TouchableOpacity
+                      onPress={() => promptCancelLeave(selectedLeave)}
+                      activeOpacity={0.85}
+                      disabled={
+                        !!processingLeaves[resolveLeaveId(selectedLeave)]
+                      }
+                      className="mb-2 rounded-xl py-3.5 items-center border border-red-200 bg-red-50"
+                    >
+                      {processingLeaves[resolveLeaveId(selectedLeave)] ===
+                      "cancelling" ? (
+                        <ActivityIndicator size="small" color="#b91c1c" />
+                      ) : (
+                        <Text className="text-red-700 font-semibold text-base">
+                          Cancel request
+                        </Text>
+                      )}
+                    </TouchableOpacity>
                   ) : null}
                   <TouchableOpacity
                     onPress={closeLeaveDetail}

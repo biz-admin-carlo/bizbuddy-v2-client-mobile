@@ -1,6 +1,6 @@
 // app/(tabs)/(leaves)/leaves-request.jsx
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -25,10 +25,76 @@ import DropDownPicker from "react-native-dropdown-picker";
 import { useRouter, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
-import { API_BASE_URL } from "../../../config/constant";
+import {
+  API_BASE_URL,
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE,
+} from "../../../config/constant";
 import { formatLocalTimeHm } from "../../../utils/dateOnlyUtils";
 
 const { height } = Dimensions.get("window");
+
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const getLocalDateKey = (dateInput) => {
+  const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (!Number.isFinite(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const getDateKeyInTimeZone = (dateInput, timeZone) => {
+  if (!dateInput) return "";
+  const normalizedDateInput = String(dateInput).trim();
+  if (DATE_ONLY_REGEX.test(normalizedDateInput)) return normalizedDateInput;
+  const date = new Date(dateInput);
+  if (!Number.isFinite(date.getTime())) return "";
+  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  if (!year || !month || !day) return "";
+  return `${year}-${month}-${day}`;
+};
+
+const getShiftTimeZone = (shift) =>
+  shift?.shift?.timeZone ||
+  shift?.shift?.time_zone ||
+  shift?.timeZone ||
+  shift?.time_zone ||
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+
+const getShiftDateKey = (shift) =>
+  getDateKeyInTimeZone(shift?.assignedDate, getShiftTimeZone(shift));
+
+const parseNaiveTime = (value) => {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  const timeMatch =
+    s.match(/T?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z)?$/i) ||
+    s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!timeMatch) return null;
+  const hour = parseInt(timeMatch[1], 10);
+  const minute = parseInt(timeMatch[2], 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+};
+
+const formatNaiveTimeInZone = (naiveTimeStr) => {
+  const t = parseNaiveTime(naiveTimeStr);
+  if (!t) return "";
+  const h = t.hour % 12 || 12;
+  const m = String(t.minute).padStart(2, "0");
+  const ampm = t.hour >= 12 ? "PM" : "AM";
+  return `${h}:${m} ${ampm}`;
+};
 
 // Utility to combine date and time into one
 const combineDateAndTime = (date, time) => {
@@ -181,6 +247,7 @@ const SubmitLeaves = () => {
   const [balancesLoading, setBalancesLoading] = useState(true);
   const [balancesError, setBalancesError] = useState(null);
   const [refreshingBalances, setRefreshingBalances] = useState(false);
+  const [userShifts, setUserShifts] = useState([]);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -239,10 +306,31 @@ const SubmitLeaves = () => {
         );
         return;
       }
-      await Promise.all([fetchApprovers(token), fetchLeavePolicies(token)]);
+      await Promise.all([
+        fetchApprovers(token),
+        fetchLeavePolicies(token),
+        fetchUserShifts(token),
+      ]);
     };
     initialize();
   }, [router]);
+
+  const fetchUserShifts = async (token) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/usershifts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data?.data)) {
+        setUserShifts(data.data);
+      } else {
+        setUserShifts([]);
+      }
+    } catch (error) {
+      console.error("Error fetching user shifts:", error);
+      setUserShifts([]);
+    }
+  };
 
   const fetchLeaveBalances = useCallback(async (token, options = {}) => {
     const soft = options.soft === true;
@@ -601,6 +689,26 @@ const SubmitLeaves = () => {
       closeDateTimeModal();
     }, 100);
   };
+
+  const leaveRangeStartKey = getLocalDateKey(leaveStartDate);
+  const leaveRangeEndKey = getLocalDateKey(leaveEndDate);
+  const affectedShifts = useMemo(() => {
+    if (!leaveRangeStartKey || !leaveRangeEndKey) return [];
+    const startKey =
+      leaveRangeStartKey <= leaveRangeEndKey
+        ? leaveRangeStartKey
+        : leaveRangeEndKey;
+    const endKey =
+      leaveRangeStartKey <= leaveRangeEndKey
+        ? leaveRangeEndKey
+        : leaveRangeStartKey;
+    return userShifts
+      .filter((userShift) => {
+        const shiftDate = getShiftDateKey(userShift);
+        return shiftDate && shiftDate >= startKey && shiftDate <= endKey;
+      })
+      .sort((a, b) => getShiftDateKey(a).localeCompare(getShiftDateKey(b)));
+  }, [userShifts, leaveRangeStartKey, leaveRangeEndKey]);
 
   // Android-specific date/time picker
   const renderAndroidPicker = () => {
@@ -1076,6 +1184,72 @@ const SubmitLeaves = () => {
                   onDatePress={() => openDateTimeModal("endDate", "date")}
                   onTimePress={() => openDateTimeModal("endTime", "time")}
                 />
+
+                <View className="mb-5">
+                  <Text className="text-base font-semibold text-slate-800 mb-2">
+                    Affected schedule
+                  </Text>
+                  {affectedShifts.length === 0 ? (
+                    <Text className="text-sm text-slate-500">
+                      No scheduled shifts in this date range
+                    </Text>
+                  ) : (
+                    <>
+                      {(affectedShifts.length >= 5
+                        ? affectedShifts.slice(0, 4)
+                        : affectedShifts
+                      ).map((userShift, index) => {
+                        const shiftName =
+                          userShift?.shift?.shiftName ||
+                          userShift?.shift?.name ||
+                          "Shift";
+                        const startLabel = formatNaiveTimeInZone(
+                          userShift?.shift?.startTime,
+                        );
+                        const endLabel = formatNaiveTimeInZone(
+                          userShift?.shift?.endTime,
+                        );
+                        const timeRange =
+                          startLabel && endLabel
+                            ? `${startLabel} - ${endLabel}`
+                            : startLabel || endLabel || "—";
+                        const assignedKey = getShiftDateKey(userShift);
+                        return (
+                          <View
+                            key={String(userShift?.id ?? index)}
+                            className="mb-2 p-3 bg-slate-50 rounded-xl border border-slate-100"
+                          >
+                            <Text className="text-sm font-semibold text-slate-800">
+                              {shiftName}
+                            </Text>
+                            <View className="flex-row items-center mt-1">
+                              <Ionicons
+                                name="time-outline"
+                                size={14}
+                                color="#64748b"
+                              />
+                              <Text className="ml-1 text-slate-600 text-sm">
+                                {timeRange}
+                              </Text>
+                            </View>
+                            {assignedKey ? (
+                              <Text className="text-xs text-slate-500 mt-1">
+                                {new Date(
+                                  `${assignedKey}T12:00:00`,
+                                ).toLocaleDateString()}
+                              </Text>
+                            ) : null}
+                          </View>
+                        );
+                      })}
+                      {affectedShifts.length >= 5 ? (
+                        <Text className="text-sm text-slate-500 mt-1 text-right">
+                          and {affectedShifts.length - 4} more
+                        </Text>
+                      ) : null}
+                    </>
+                  )}
+                </View>
 
                 {/* Submit Button */}
                 <View className="mt-6">

@@ -37,29 +37,35 @@ const { height } = Dimensions.get("window");
 // UI Components (Status badge, formatting, filter, sort)
 // ---------------------------------------------------------------------
 
+const formatLeaveStatusLabel = (status) => {
+  const raw = String(status ?? "").trim();
+  if (!raw) return "pending";
+  const key = raw.toLowerCase().replace(/[\s-]+/g, "_");
+  if (key === "pending_secondary") return "Pending final";
+  return raw.replace(/_/g, " ");
+};
+
 const LeaveStatusBadge = ({ status }) => {
-  const normalizedStatus = String(status ?? "pending").toLowerCase();
+  const normalizedStatus = String(status ?? "pending")
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
   let bgColor, textColor, icon;
-  switch (normalizedStatus) {
-    case "approved":
-      bgColor = "bg-green-100";
-      textColor = "text-green-800";
-      icon = "checkmark-circle";
-      break;
-    case "rejected":
-      bgColor = "bg-red-100";
-      textColor = "text-red-800";
-      icon = "close-circle";
-      break;
-    case "pending":
-      bgColor = "bg-amber-100";
-      textColor = "text-amber-800";
-      icon = "time";
-      break;
-    default:
-      bgColor = "bg-gray-100";
-      textColor = "text-gray-800";
-      icon = "help-circle";
+  if (normalizedStatus.includes("approved")) {
+    bgColor = "bg-green-100";
+    textColor = "text-green-800";
+    icon = "checkmark-circle";
+  } else if (normalizedStatus.includes("reject")) {
+    bgColor = "bg-red-100";
+    textColor = "text-red-800";
+    icon = "close-circle";
+  } else if (normalizedStatus.includes("pending")) {
+    bgColor = "bg-amber-100";
+    textColor = "text-amber-800";
+    icon = "time";
+  } else {
+    bgColor = "bg-gray-100";
+    textColor = "text-gray-800";
+    icon = "help-circle";
   }
   return (
     <View className={`flex-row items-center rounded-full px-3 py-1 ${bgColor}`}>
@@ -70,7 +76,7 @@ const LeaveStatusBadge = ({ status }) => {
         style={{ marginRight: 4 }}
       />
       <Text className={`text-xs font-medium ${textColor}`}>
-        {String(status ?? "pending")}
+        {formatLeaveStatusLabel(status)}
       </Text>
     </View>
   );
@@ -432,10 +438,10 @@ export default function ManageLeaves() {
     }
     switch (sort) {
       case "newest":
-        result.sort((a, b) => new Date(b.startDate) - new Date(a.startDate));
+        result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         break;
       case "oldest":
-        result.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+        result.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         break;
       case "type":
         result.sort((a, b) => a.leaveType.localeCompare(b.leaveType));
