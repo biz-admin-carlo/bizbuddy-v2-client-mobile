@@ -67,7 +67,7 @@ export {
   persistSignInContext,
 };
 
-const useAuthStore = create((set, get) => ({
+const useAuthStore = create((set) => ({
   token: null,
   remember: false,
   /**
@@ -97,17 +97,16 @@ const useAuthStore = create((set, get) => ({
     }
   },
   logout: async () => {
-    set({ token: null });
-    if (!get().remember) {
-      try {
-        await SecureStore.deleteItemAsync("token");
-      } catch {
-        /* noop */
-      }
-      await clearSignInContextKeys();
-      // Keep per-company vault entries so biometric can restore other companies
-      // after signing out of one. forceLogout still clears everything.
+    // Always clear the active session so cold-start restore does not undo sign-out.
+    // Keep per-company vault entries so biometric can restore after signing out.
+    // forceLogout still clears everything.
+    set({ token: null, remember: false });
+    try {
+      await SecureStore.deleteItemAsync("token");
+    } catch {
+      /* noop */
     }
+    await clearSignInContextKeys();
   },
   forceLogout: async () => {
     set({ token: null, remember: false });

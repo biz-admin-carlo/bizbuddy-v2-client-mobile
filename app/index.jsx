@@ -15,6 +15,7 @@ import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { VERSION } from "../config/constant";
 import { getNativeAppVersion } from "../utils/versionCheck";
+import useAuthStore from "../store/useAuthStore";
 
 export default function Index() {
   const router = useRouter();
@@ -38,9 +39,14 @@ export default function Index() {
           await SecureStore.setItemAsync("appVersion", VERSION);
         }
 
+        const hasSession = await useAuthStore.getState().loadToken();
+        const destination = hasSession
+          ? "(tabs)/profile"
+          : "(auth)/signin";
+
         // Add a slight delay for a smoother transition
         setTimeout(() => {
-          router.replace("(auth)/signin");
+          router.replace(destination);
         }, 1500);
       } catch (error) {
         console.error("Error during app initialization:", error);

@@ -311,6 +311,7 @@ export default function TimekeepingPunch() {
   const [locationEnabled, setLocationEnabled] = useState(false);
   const [wifiConnected, setWifiConnected] = useState(false);
   const [subscriptionPlan, setSubscriptionPlan] = useState(null);
+  const [pendingOfflinePunches, setPendingOfflinePunches] = useState([]);
 
   // Whether the user is location restricted
   const [isLocationRestricted, setIsLocationRestricted] = useState(false);
@@ -958,6 +959,15 @@ export default function TimekeepingPunch() {
     validatePunchLocation();
   }, [validatePunchLocation]);
 
+  const refreshPendingOfflinePunches = useCallback(async () => {
+    const pending = await getPendingActions();
+    setPendingOfflinePunches(Array.isArray(pending) ? pending : []);
+  }, []);
+
+  useEffect(() => {
+    refreshPendingOfflinePunches();
+  }, [refreshPendingOfflinePunches]);
+
   // Offline sync
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener(async (state) => {
@@ -978,6 +988,7 @@ export default function TimekeepingPunch() {
             } catch {}
           }
           await clearPendingActions();
+          setPendingOfflinePunches([]);
         }
       }
     });
@@ -1021,8 +1032,28 @@ export default function TimekeepingPunch() {
       updateLocationStatus();
       fetchAssignedLocations(); // re-check location restrictions
       validatePunchLocation();
+      await refreshPendingOfflinePunches();
     } catch {}
     setRefreshing(false);
+  };
+
+  const formatOfflinePunchLabel = (endpoint) => {
+    if (endpoint === "/time-in") return "Time In";
+    if (endpoint === "/time-out") return "Time Out";
+    return endpoint?.replace(/^\//, "") || "Punch";
+  };
+
+  const formatOfflinePunchTime = (iso) => {
+    if (!iso) return "Unknown time";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "Unknown time";
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
   };
 
   // Time In/Out (with localTimestamp)
@@ -1105,6 +1136,7 @@ export default function TimekeepingPunch() {
         const offlinePayload =
           endpoint === "/time-in" ? baseTimeInPayload : payload;
         await storePendingAction({ endpoint, payload: offlinePayload });
+        await refreshPendingOfflinePunches();
         Alert.alert("Offline Mode", "Your punch action is saved locally.");
 
         // Update local UI
@@ -3307,6 +3339,63 @@ export default function TimekeepingPunch() {
               </View>
             </TouchableOpacity>
           </View>
+
+          {pendingOfflinePunches.length > 0 && (
+            <View className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+              <View className="flex-row items-center mb-3">
+                <View className="w-8 h-8 rounded-full bg-amber-100 items-center justify-center mr-2">
+                  <Ionicons name="cloud-offline-outline" size={18} color="#d97706" />
+                </View>
+                <View className="flex-1">
+                  <Text className="text-base font-semibold text-amber-900">
+                    Pending offline punches
+                  </Text>
+                  <Text className="text-xs text-amber-700 mt-0.5">
+                    Will sync when you are back online
+                  </Text>
+                </View>
+                <View className="bg-amber-200 rounded-full px-2 py-0.5">
+                  <Text className="text-xs font-semibold text-amber-900">
+                    {pendingOfflinePunches.length}
+                  </Text>
+                </View>
+              </View>
+              {pendingOfflinePunches.map((action, index) => {
+                const lat = action?.payload?.location?.latitude;
+                const lng = action?.payload?.location?.longitude;
+                const hasCoords =
+                  Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+                const punchType = action?.payload?.punchType;
+                return (
+                  <View
+                    key={`${action?.endpoint}-${action?.payload?.localTimestamp}-${index}`}
+                    className={`bg-white rounded-lg p-3 ${index < pendingOfflinePunches.length - 1 ? "mb-2" : ""}`}
+                  >
+                    <View className="flex-row items-center justify-between">
+                      <Text className="text-sm font-semibold text-slate-800">
+                        {formatOfflinePunchLabel(action?.endpoint)}
+                      </Text>
+                      <Text className="text-xs text-slate-500">
+                        {formatOfflinePunchTime(action?.payload?.localTimestamp)}
+                      </Text>
+                    </View>
+                    {(punchType || hasCoords) && (
+                      <Text className="text-xs text-slate-500 mt-1">
+                        {[
+                          punchType ? String(punchType).replace(/_/g, " ") : null,
+                          hasCoords
+                            ? `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}`
+                            : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
 
           {/* Main status card */}
           <Animated.View
