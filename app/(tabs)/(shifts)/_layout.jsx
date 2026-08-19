@@ -65,6 +65,14 @@ const ShiftsTabsLayout = () => {
         }}
       />
 
+      <Tabs.Screen
+        name="timekeeping-punch-requests"
+        options={{
+          tabBarLabel: "Requests",
+          tabBarIcon: getTabBarIcon("document-text-outline", 24, "Requested punch logs tab"),
+        }}
+      />
+
       {/* Schedule Screen */}
       <Tabs.Screen
         name="timekeeping-schedule"

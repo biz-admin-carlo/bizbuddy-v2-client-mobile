@@ -22,8 +22,11 @@ import {
 } from "react-native";
 import axios from "axios";
 import * as SecureStore from "expo-secure-store";
-import * as Notifications from "expo-notifications";
-import { API_BASE_URL } from "../../../config/constant";
+// Notification functionality removed - can be re-implemented later
+import {
+  API_BASE_URL,
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE,
+} from "../../../config/constant";
 import { Calendar } from "react-native-calendars";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -46,53 +49,11 @@ const COLORS = {
   card: "#f1f5f9",
 };
 
-// Optional: Customize notification handling.
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-  }),
-});
-
-// Function to register and handle notification permissions.
+// Simple notification permission check (placeholder for future implementation)
 const registerForPushNotificationsAsync = async () => {
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let finalStatus = existingStatus;
-
-  if (existingStatus !== "granted") {
-    Alert.alert(
-      "Enable Notifications",
-      "We need notifications to remind you about your shifts. Would you like to enable notifications?",
-      [
-        {
-          text: "Cancel",
-          onPress: () => {
-            console.log("User cancelled notifications prompt");
-          },
-          style: "cancel",
-        },
-        {
-          text: "Enable",
-          onPress: async () => {
-            const { status } = await Notifications.requestPermissionsAsync();
-            finalStatus = status;
-            if (finalStatus !== "granted") {
-              Alert.alert("Permission Denied", "Notifications have been disabled. To enable them, please go to your device settings.", [
-                {
-                  text: "Open Settings",
-                  onPress: () => Linking.openSettings(),
-                },
-                { text: "OK" },
-              ]);
-            }
-          },
-        },
-      ],
-      { cancelable: false }
-    );
-  }
-  return finalStatus === "granted";
+  // For now, just return false - notifications can be implemented later
+  console.log("Notification functionality temporarily disabled");
+  return false;
 };
 
 // --- Added helper to get local date string in YYYY-MM-DD format ---
@@ -104,11 +65,93 @@ const getLocalDateString = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const parseDateOnlyToLocalDate = (dateString) => {
+  if (!DATE_ONLY_REGEX.test(String(dateString || "").trim())) return null;
+  const [year, month, day] = String(dateString)
+    .trim()
+    .split("-")
+    .map((part) => parseInt(part, 10));
+  const date = new Date(year, month - 1, day);
+  if (!Number.isFinite(date.getTime())) return null;
+  return date;
+};
+
+const getDateKeyInTimeZone = (dateInput, timeZone) => {
+  if (!dateInput) return "";
+  const normalizedDateInput = String(dateInput).trim();
+  if (DATE_ONLY_REGEX.test(normalizedDateInput)) return normalizedDateInput;
+  const date = new Date(dateInput);
+  if (!Number.isFinite(date.getTime())) return "";
+  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  if (!year || !month || !day) return "";
+  return `${year}-${month}-${day}`;
+};
+
+const getShiftTimeZone = (shift) =>
+  shift?.shift?.timeZone ||
+  shift?.shift?.time_zone ||
+  shift?.timeZone ||
+  shift?.time_zone ||
+  DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+
+const getShiftDateKey = (shift) =>
+  getDateKeyInTimeZone(shift?.assignedDate, getShiftTimeZone(shift));
+
+// Parse naive time from API (no timezone in DB). Returns { hour, minute } or null.
+// Handles "08:00:00", "08:00", "2026-03-06T08:00:00", "2026-03-06T08:00:00.000Z" etc.
+const parseNaiveTime = (value) => {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  const timeMatch =
+    s.match(/T?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z)?$/i) ||
+    s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!timeMatch) return null;
+  const hour = parseInt(timeMatch[1], 10);
+  const minute = parseInt(timeMatch[2], 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+};
+
+// Format naive startTime/endTime (no timezone in DB) as display time.
+// The stored time is the clock time in the shift's timeZone; we parse and display it (e.g. 8:00 AM - 5:00 PM).
+const formatNaiveTimeInZone = (naiveTimeStr) => {
+  const t = parseNaiveTime(naiveTimeStr);
+  if (!t) return "";
+  const h = t.hour % 12 || 12;
+  const m = String(t.minute).padStart(2, "0");
+  const ampm = t.hour >= 12 ? "PM" : "AM";
+  return `${h}:${m} ${ampm}`;
+};
+
+// Format date in the shift's timezone for "Assigned on" display
+const formatDateInZone = (isoString, timeZone) => {
+  if (!isoString) return "";
+  const dateOnly = parseDateOnlyToLocalDate(isoString);
+  if (dateOnly) return dateOnly.toLocaleDateString("en-US");
+  const date = new Date(isoString);
+  if (!Number.isFinite(date.getTime())) return "";
+  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+  return date.toLocaleDateString("en-US", { timeZone: tz });
+};
+
 const TimekeepingSchedule = () => {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // Use the helper for the default selectedDate
-  const [selectedDate, setSelectedDate] = useState(getLocalDateString(new Date()));
+  const [selectedDate, setSelectedDate] = useState(
+    getLocalDateString(new Date()),
+  );
   const [userShifts, setUserShifts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [markedDates, setMarkedDates] = useState({});
@@ -133,7 +176,8 @@ const TimekeepingSchedule = () => {
   const modalPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
       onPanResponderMove: (_, gestureState) => {
         if (gestureState.dy > 0) {
           modalYAnim.setValue(gestureState.dy);
@@ -151,22 +195,39 @@ const TimekeepingSchedule = () => {
           }).start();
         }
       },
-    })
+    }),
   ).current;
 
   const openModal = () => {
     setModalVisible(true);
     modalYAnim.setValue(height);
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.spring(modalYAnim, { toValue: 0, tension: 60, friction: 12, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.spring(modalYAnim, {
+        toValue: 0,
+        tension: 60,
+        friction: 12,
+        useNativeDriver: true,
+      }),
     ]).start();
   };
 
   const closeModal = () => {
     Animated.parallel([
-      Animated.timing(modalBgAnim, { toValue: 0, duration: 300, useNativeDriver: true }),
-      Animated.timing(modalYAnim, { toValue: height, duration: 300, useNativeDriver: true }),
+      Animated.timing(modalBgAnim, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(modalYAnim, {
+        toValue: height,
+        duration: 300,
+        useNativeDriver: true,
+      }),
     ]).start(() => {
       setModalVisible(false);
     });
@@ -176,30 +237,55 @@ const TimekeepingSchedule = () => {
   const renderModalContent = () => {
     return (
       <View className="p-5">
-        <Text className="text-xl font-bold text-slate-800 mb-4 text-center">Notification Permissions</Text>
+        <Text className="text-xl font-bold text-slate-800 mb-4 text-center">
+          Notification Permissions
+        </Text>
 
         <View className="bg-slate-50 rounded-xl p-4 mb-6">
           <View className="flex-row items-center mb-4">
-            <View className={`w-10 h-10 rounded-full ${notificationAllowed ? "bg-orange-100" : "bg-slate-100"} items-center justify-center mr-3`}>
+            <View
+              className={`w-10 h-10 rounded-full ${
+                notificationAllowed ? "bg-orange-100" : "bg-slate-100"
+              } items-center justify-center mr-3`}
+            >
               <Ionicons name="notifications" size={20} color="#f97316" />
             </View>
-            <Text className="text-lg font-semibold text-slate-700">{notificationAllowed ? "Enabled" : "Disabled"}</Text>
+            <Text className="text-lg font-semibold text-slate-700">
+              {notificationAllowed ? "Enabled" : "Disabled"}
+            </Text>
           </View>
 
-          <Text className="text-base text-slate-700 mb-3">This app uses notifications to remind you about your shifts and other important updates.</Text>
+          <Text className="text-base text-slate-700 mb-3">
+            This app uses notifications to remind you about your shifts and
+            other important updates.
+          </Text>
 
           <View className="mb-2">
-            <Text className="text-sm font-medium text-slate-700 mb-1">• Shift Reminders</Text>
-            <Text className="text-sm text-slate-600">Receive a notification 30 minutes before your shift starts and ends.</Text>
+            <Text className="text-sm font-medium text-slate-700 mb-1">
+              • Shift Reminders
+            </Text>
+            <Text className="text-sm text-slate-600">
+              Receive a notification 30 minutes before your shift starts and
+              ends.
+            </Text>
           </View>
 
           <View>
-            <Text className="text-sm font-medium text-slate-700 mb-1">• Timely Updates</Text>
-            <Text className="text-sm text-slate-600">Stay informed about any schedule changes or important announcements.</Text>
+            <Text className="text-sm font-medium text-slate-700 mb-1">
+              • Timely Updates
+            </Text>
+            <Text className="text-sm text-slate-600">
+              Stay informed about any schedule changes or important
+              announcements.
+            </Text>
           </View>
         </View>
 
-        <TouchableOpacity onPress={closeModal} className="bg-orange-400 py-3.5 rounded-lg items-center justify-center" activeOpacity={0.8}>
+        <TouchableOpacity
+          onPress={closeModal}
+          className="bg-orange-400 py-3.5 rounded-lg items-center justify-center"
+          activeOpacity={0.8}
+        >
           <Text className="text-white font-bold text-base">Got It</Text>
         </TouchableOpacity>
       </View>
@@ -208,47 +294,17 @@ const TimekeepingSchedule = () => {
 
   // Request notification permissions on mount.
   useEffect(() => {
-    registerForPushNotificationsAsync().then((granted) => setNotificationAllowed(granted));
+    registerForPushNotificationsAsync().then((granted) =>
+      setNotificationAllowed(granted),
+    );
   }, []);
 
-  // Function to schedule notifications for shifts.
+  // Foreground message handling removed - can be re-implemented later
+
+  // Function to schedule notifications for shifts (placeholder for future implementation)
   const scheduleNotificationsForShifts = async (shifts) => {
-    await Notifications.cancelAllScheduledNotificationsAsync();
-    const now = new Date();
-
-    shifts.forEach(async (shift) => {
-      const shiftStart = new Date(shift.shift.startTime);
-      const shiftEnd = new Date(shift.shift.endTime);
-      const startNotificationTime = new Date(shiftStart);
-      startNotificationTime.setMinutes(startNotificationTime.getMinutes() - 30);
-      const endNotificationTime = new Date(shiftEnd);
-      endNotificationTime.setMinutes(endNotificationTime.getMinutes() - 30);
-
-      if (startNotificationTime > now) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: "Upcoming Shift",
-            body: `Your shift "${shift.shift.shiftName}" starts at ${shiftStart.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}.`,
-          },
-          trigger: startNotificationTime,
-        });
-      }
-      if (endNotificationTime > now) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: "Shift End Reminder",
-            body: `Your shift "${shift.shift.shiftName}" ends at ${shiftEnd.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}. Time to punch out.`,
-          },
-          trigger: endNotificationTime,
-        });
-      }
-    });
+    // Notification scheduling removed - can be re-implemented later
+    console.log("Notification scheduling temporarily disabled");
   };
 
   // Fetch user shifts.
@@ -259,19 +315,19 @@ const TimekeepingSchedule = () => {
       const res = await axios.get(`${API_BASE_URL}/api/usershifts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      console.log("Timekeeping schedule userShifts response:", res?.data?.data);
       if (res.status === 200 && res.data.data) {
         setUserShifts(res.data.data);
         createMarkedDates(res.data.data);
         const todayShifts = res.data.data.filter((shift) => {
-          // Use local date string for filtering
-          const shiftDate = getLocalDateString(shift.assignedDate);
+          // Use shift timezone date key for filtering to avoid day shifts across device timezones.
+          const shiftDate = getShiftDateKey(shift);
           return shiftDate === selectedDate;
         });
         setSelectedShifts(todayShifts);
         scheduleNotificationsForShifts(res.data.data);
-        // Update notification status after a refresh.
-        const { status } = await Notifications.getPermissionsAsync();
-        setNotificationAllowed(status === "granted");
+        // Notification status check removed - can be re-implemented later
+        setNotificationAllowed(false);
       }
     } catch (error) {
       Alert.alert("Error", "Failed to load your shift assignments.");
@@ -303,8 +359,9 @@ const TimekeepingSchedule = () => {
     const marked = {};
 
     shifts.forEach((userShift) => {
-      // Use local date string for marking the calendar
-      const shiftDate = getLocalDateString(userShift.assignedDate);
+      // Mark by shift timezone date key so schedule days stay correct across viewer locales.
+      const shiftDate = getShiftDateKey(userShift);
+      if (!shiftDate) return;
 
       marked[shiftDate] = {
         ...marked[shiftDate],
@@ -314,7 +371,10 @@ const TimekeepingSchedule = () => {
         selectedColor: `${COLORS.primary}20`,
         customStyles: {
           container: {
-            backgroundColor: shiftDate === selectedDate ? `${COLORS.primary}20` : "transparent",
+            backgroundColor:
+              shiftDate === selectedDate
+                ? `${COLORS.primary}20`
+                : "transparent",
           },
           text: {
             color: "#334155",
@@ -342,8 +402,8 @@ const TimekeepingSchedule = () => {
     setSelectedDate(selected);
 
     const shiftsForDate = userShifts.filter((userShift) => {
-      // Compare using local date string
-      const shiftDate = getLocalDateString(userShift.assignedDate);
+      // Compare using shift timezone date key.
+      const shiftDate = getShiftDateKey(userShift);
       return shiftDate === selected;
     });
 
@@ -357,7 +417,8 @@ const TimekeepingSchedule = () => {
     Object.keys(updatedMarkedDates).forEach((date) => {
       if (updatedMarkedDates[date]) {
         if (updatedMarkedDates[date].customStyles) {
-          updatedMarkedDates[date].customStyles.container.backgroundColor = "transparent";
+          updatedMarkedDates[date].customStyles.container.backgroundColor =
+            "transparent";
           updatedMarkedDates[date].selected = false;
         } else {
           updatedMarkedDates[date].selected = false;
@@ -373,7 +434,8 @@ const TimekeepingSchedule = () => {
       };
 
       if (updatedMarkedDates[selected].customStyles) {
-        updatedMarkedDates[selected].customStyles.container.backgroundColor = `${COLORS.primary}20`;
+        updatedMarkedDates[selected].customStyles.container.backgroundColor =
+          `${COLORS.primary}20`;
       }
     } else {
       updatedMarkedDates[selected] = {
@@ -391,34 +453,51 @@ const TimekeepingSchedule = () => {
     setRefreshing(false);
   };
 
-  // Render each shift item.
-  const renderShiftItem = (shift) => (
-    <View key={shift.id} className="mb-3 p-4 bg-slate-50 rounded-xl border border-slate-50">
-      <View className="flex-row justify-between items-start">
-        <View style={{ flex: 1 }}>
-          <Text className="text-lg font-bold text-slate-800">{shift.shift.shiftName}</Text>
-          <View className="flex-row items-center mt-1">
-            <Ionicons name="time-outline" size={14} color={COLORS.textSecondary} />
-            <Text className="ml-1 text-slate-600 text-sm">
-              {new Date(shift.shift.startTime).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}{" "}
-              -{" "}
-              {new Date(shift.shift.endTime).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
+  // Render each shift item. Times and assigned date use the shift's timeZone when present (API may use timeZone or time_zone); otherwise use default so UTC times display correctly.
+  const renderShiftItem = (shift) => {
+    const timeZone =
+      shift?.shift?.timeZone ||
+      shift?.shift?.time_zone ||
+      shift?.timeZone ||
+      shift?.time_zone ||
+      DEFAULT_SHIFT_DISPLAY_TIMEZONE;
+    return (
+      <View
+        key={shift.id}
+        className="mb-3 p-4 bg-slate-50 rounded-xl border border-slate-50"
+      >
+        <View className="flex-row justify-between items-start">
+          <View style={{ flex: 1 }}>
+            <Text className="text-lg font-bold text-slate-800">
+              {shift.shift.shiftName}
             </Text>
+            <View className="flex-row items-center mt-1">
+              <Ionicons
+                name="time-outline"
+                size={14}
+                color={COLORS.textSecondary}
+              />
+              <Text className="ml-1 text-slate-600 text-sm">
+                {formatNaiveTimeInZone(shift.shift.startTime)} -{" "}
+                {formatNaiveTimeInZone(shift.shift.endTime)}
+              </Text>
+            </View>
+            {shift.assignedDate && (
+              <Text className="text-xs text-slate-500 mt-1">
+                Assigned on: {formatDateInZone(shift.assignedDate, timeZone)}
+              </Text>
+            )}
           </View>
-          {shift.assignedDate && <Text className="text-xs text-slate-500 mt-1">Assigned on: {new Date(shift.assignedDate).toLocaleDateString()}</Text>}
         </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
-    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: insets.top + 60 }}>
+    <SafeAreaView
+      className="flex-1 bg-white"
+      style={{ paddingTop: insets.top + 60 }}
+    >
       <Animated.View
         style={{
           flex: 1,
@@ -431,15 +510,22 @@ const TimekeepingSchedule = () => {
         {/* Title Row with Date and Notification Icon */}
         <View className="px-4 py-2 flex-row items-center justify-between">
           <Text className="text-xl font-bold text-slate-700">
-            {selectedDate === new Date().toISOString().split("T")[0]
+            {selectedDate === getLocalDateString(new Date())
               ? "Today's Shifts"
-              : `Shift(s) for ${new Date(selectedDate).toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                })}`}
+              : `Shift(s) for ${(parseDateOnlyToLocalDate(selectedDate) || new Date(selectedDate)).toLocaleDateString(
+                  "en-US",
+                  {
+                    month: "short",
+                    day: "numeric",
+                  },
+                )}`}
           </Text>
           <TouchableOpacity onPress={openModal}>
-            <Ionicons name={notificationAllowed ? "notifications" : "notifications-off"} size={22} color={notificationAllowed ? "#fb923c" : "#64748b"} />
+            <Ionicons
+              name={notificationAllowed ? "notifications" : "notifications-off"}
+              size={22}
+              color={notificationAllowed ? "#fb923c" : "#64748b"}
+            />
           </TouchableOpacity>
         </View>
 
@@ -453,7 +539,13 @@ const TimekeepingSchedule = () => {
           <ScrollView
             className="flex-1"
             showsVerticalScrollIndicator={false}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={"#cbd5e1"} />}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={handleRefresh}
+                tintColor={"#cbd5e1"}
+              />
+            }
           >
             <View className="p-4">
               {/* Calendar */}
@@ -499,14 +591,24 @@ const TimekeepingSchedule = () => {
                 {selectedShifts.length > 0 ? (
                   <View>
                     {selectedShifts.map((shift, index) => (
-                      <React.Fragment key={`shift-${shift.id}-${index}`}>{renderShiftItem(shift)}</React.Fragment>
+                      <React.Fragment key={`shift-${shift.id}-${index}`}>
+                        {renderShiftItem(shift)}
+                      </React.Fragment>
                     ))}
                   </View>
                 ) : (
                   <View className="bg-slate-50 rounded-xl p-6 items-center">
-                    <Ionicons name="calendar-outline" size={36} color={COLORS.textLight} />
-                    <Text className="text-slate-500 mt-3 text-center font-medium">No shifts scheduled for this date</Text>
-                    <Text className="text-slate-400 text-sm text-center mt-1">Tap on a date with an orange border to view shifts</Text>
+                    <Ionicons
+                      name="calendar-outline"
+                      size={36}
+                      color={COLORS.textLight}
+                    />
+                    <Text className="text-slate-500 mt-3 text-center font-medium">
+                      No shifts scheduled for this date
+                    </Text>
+                    <Text className="text-slate-400 text-sm text-center mt-1">
+                      Tap on a date with an orange border to view shifts
+                    </Text>
                   </View>
                 )}
               </View>
@@ -516,7 +618,12 @@ const TimekeepingSchedule = () => {
       </Animated.View>
 
       {modalVisible && (
-        <Modal transparent={true} animationType="none" visible={modalVisible} onRequestClose={closeModal}>
+        <Modal
+          transparent={true}
+          animationType="none"
+          visible={modalVisible}
+          onRequestClose={closeModal}
+        >
           <View style={{ flex: 1 }}>
             {/* Backdrop */}
             <Animated.View
@@ -549,8 +656,18 @@ const TimekeepingSchedule = () => {
               }}
             >
               {/* Drag Handle */}
-              <View style={{ alignItems: "center", paddingVertical: 12 }} {...modalPanResponder.panHandlers}>
-                <View style={{ width: 40, height: 4, backgroundColor: "#e2e8f0", borderRadius: 2 }} />
+              <View
+                style={{ alignItems: "center", paddingVertical: 12 }}
+                {...modalPanResponder.panHandlers}
+              >
+                <View
+                  style={{
+                    width: 40,
+                    height: 4,
+                    backgroundColor: "#e2e8f0",
+                    borderRadius: 2,
+                  }}
+                />
               </View>
 
               {renderModalContent()}

@@ -2,14 +2,34 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { AppState, TouchableOpacity, Modal, View, Text, Linking, Animated, Dimensions, Platform, PanResponder, Easing } from "react-native";
-import { Tabs } from "expo-router";
+import {
+  AppState,
+  TouchableOpacity,
+  Modal,
+  View,
+  Text,
+  Linking,
+  Animated,
+  Dimensions,
+  Platform,
+  PanResponder,
+  Easing,
+} from "react-native";
+import { Tabs, useRouter, useSegments } from "expo-router";
+import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import UserInactivity from "react-native-user-inactivity";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL, WEBSITE_URL } from "../../config/constant";
+import { NotificationService } from "../../utils/notificationService";
 import useAuthStore from "../../store/useAuthStore";
 import usePresenceStore from "../../store/presenceStore";
+import useTutorialStore from "../../store/tutorialStore";
+import TutorialOverlay from "../../components/TutorialOverlay";
+import FeedbackFloatingPill from "../../components/FeedbackFloatingPill";
+import { useNotifications } from "../../hooks/useNotifications";
+import { useSessionGuard } from "../../hooks/useSessionGuard";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import io from "socket.io-client";
 
 const { height } = Dimensions.get("window");
@@ -128,7 +148,11 @@ const TabIcon = ({ name, size, focused, isAvatar = false, initials = "U" }) => {
               {initials}
             </Text>
           ) : (
-            <Ionicons name={name} size={iconSize} color={focused ? "#ffffff" : "#94a3b8"} />
+            <Ionicons
+              name={name}
+              size={iconSize}
+              color={focused ? "#ffffff" : "#94a3b8"}
+            />
           )}
         </Animated.View>
       </Animated.View>
@@ -179,13 +203,117 @@ const AvatarIcon = ({ color, size, focused }) => {
     fetchUserProfile();
   }, []);
 
-  return <TabIcon size={size} focused={focused} isAvatar={true} initials={initials} />;
+  return (
+    <TabIcon
+      size={size}
+      focused={focused}
+      isAvatar={true}
+      initials={initials}
+    />
+  );
+};
+
+// Notification icon with badge
+const NotificationIcon = ({ color, size, focused }) => {
+  const { unreadCount } = useNotifications();
+  
+  return (
+    <View className="items-center justify-center">
+      <TabIcon
+        name="notifications-outline"
+        size={size}
+        color={color}
+        focused={focused}
+      />
+      {unreadCount > 0 && (
+        <View
+          className="absolute -top-1 -right-1 bg-red-500 rounded-full items-center justify-center border-2 border-white"
+          style={{
+            minWidth: 18,
+            height: 18,
+            paddingHorizontal: unreadCount > 9 ? 4 : 0,
+          }}
+        >
+          <Text className="text-white text-xs font-bold" style={{ fontSize: 10 }}>
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
 };
 
 const TabsLayout = () => {
+  const insets = useSafeAreaInsets();
   const { token } = useAuthStore();
+  useSessionGuard();
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
+  const router = useRouter();
+  const segments = useSegments();
+  const handledNotificationIdsRef = useRef(new Set());
+  const maybeAutoStartTutorial = useTutorialStore((s) => s.maybeAutoStart);
+
+  // Show the tutorial once per install (after first successful entry into tabs).
+  useEffect(() => {
+    maybeAutoStartTutorial();
+  }, [maybeAutoStartTutorial]);
+
+  // When a user taps a notification, redirect to `data.targetRoute` (deep link-like behavior).
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+
+    const handleNotificationResponse = (response) => {
+      try {
+        if (
+          response?.actionIdentifier &&
+          response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER
+        ) {
+          return;
+        }
+
+        const request = response?.notification?.request;
+        const contentData = request?.content?.data ?? {};
+        const targetRoute = contentData?.targetRoute;
+        const identifier =
+          request?.identifier ??
+          response?.notification?.date?.toISOString?.() ??
+          null;
+
+        if (
+          identifier &&
+          handledNotificationIdsRef.current.has(String(identifier))
+        ) {
+          return;
+        }
+        if (identifier) handledNotificationIdsRef.current.add(String(identifier));
+
+        if (typeof targetRoute === "string" && targetRoute.startsWith("/")) {
+          router.push(targetRoute);
+        }
+      } catch (err) {
+        console.log("Notification redirect handling failed:", err?.message);
+      }
+    };
+
+    const subscription =
+      NotificationService.addNotificationResponseListener(
+        handleNotificationResponse
+      );
+
+    // Handle cold-start / app-resume where the notification response is already available.
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (response) handleNotificationResponse(response);
+      })
+      .catch(() => {});
+
+    return () => {
+      if (subscription) {
+        NotificationService.removeNotificationListener(subscription);
+      }
+    };
+  }, [router]);
 
   // State for subscription plan (e.g., "free", "basic", "pro")
   const [subscriptionPlan, setSubscriptionPlan] = useState(null);
@@ -269,7 +397,11 @@ const TabsLayout = () => {
         headers: { Authorization: `Bearer ${storedToken}` },
       });
       const data = await response.json();
-      if (response.ok && data.data.subscription && data.data.subscription.plan) {
+      if (
+        response.ok &&
+        data.data.subscription &&
+        data.data.subscription.plan
+      ) {
         setSubscriptionPlan(data.data.subscription.plan.name);
       }
     } catch (error) {
@@ -280,8 +412,10 @@ const TabsLayout = () => {
   };
 
   useEffect(() => {
+    // Depend on `token` so subscription info refreshes after an account switch
+    // (this layout persists across `router.replace("(tabs)/profile")`, it never remounts).
     fetchSubscription();
-  }, []);
+  }, [token]);
 
   // Socket.IO integration: Listen for real-time subscription updates.
   useEffect(() => {
@@ -296,7 +430,8 @@ const TabsLayout = () => {
     return () => {
       socket.disconnect();
     };
-  }, []);
+    // Reconnect whenever the active account changes so the socket room/context matches.
+  }, [token]);
 
   // Update presence on app state changes.
   const updateUserPresence = async (status) => {
@@ -344,18 +479,33 @@ const TabsLayout = () => {
   };
 
   const inactivityTimeout = 5000;
-  const isLockedForFree = !loadingSub && subscriptionPlan && subscriptionPlan.toLowerCase() === "free";
+  const isLockedForFree =
+    !loadingSub &&
+    subscriptionPlan &&
+    subscriptionPlan.toLowerCase() === "free";
 
   // Custom tab button component for locked features.
-  const LockedTabButton = (props) => <TouchableOpacity {...props} onPress={() => openModal()} style={[props.style, { opacity: 0.4 }]} />;
+  const LockedTabButton = (props) => (
+    <TouchableOpacity
+      {...props}
+      onPress={() => openModal()}
+      style={[props.style, { opacity: 0.4 }]}
+    />
+  );
 
-  // Update the tab bar height to ensure icons are fully visible
-  const tabBarHeight = Platform.OS === "ios" ? 90 : 70;
+  // Add extra Android bottom-safe-area spacing so system navigation does not overlap tabs.
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 16) : 0;
+  const tabBarHeight = Platform.OS === "ios" ? 90 : 70 + androidBottomInset;
+  const isSettingsTabActive = segments.includes("(settings)");
 
   // Update the tabBarActiveTintColor to be white for the labels
   return (
     <>
-      <UserInactivity timeForInactivity={inactivityTimeout} onAction={handleUserActivity} style={{ flex: 1 }}>
+      <UserInactivity
+        timeForInactivity={inactivityTimeout}
+        onAction={handleUserActivity}
+        style={{ flex: 1 }}
+      >
         <Tabs
           screenOptions={{
             tabBarStyle: {
@@ -364,7 +514,7 @@ const TabsLayout = () => {
               borderTopWidth: 0,
               height: tabBarHeight,
               paddingTop: Platform.OS === "ios" ? 12 : 8,
-              paddingBottom: Platform.OS === "ios" ? 30 : 12,
+              paddingBottom: Platform.OS === "ios" ? 30 : androidBottomInset,
               // Use platform-specific styling
               ...Platform.select({
                 ios: {
@@ -392,7 +542,14 @@ const TabsLayout = () => {
             options={{
               title: "Profile",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => <TabIcon name="person-outline" size={size} color={color} focused={focused} />,
+              tabBarIcon: ({ color, size, focused }) => (
+                <TabIcon
+                  name="person-outline"
+                  size={size}
+                  color={color}
+                  focused={focused}
+                />
+              ),
             }}
           />
           <Tabs.Screen
@@ -400,8 +557,28 @@ const TabsLayout = () => {
             options={{
               title: "Leaves",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => <TabIcon name="calendar-outline" size={size} color={color} focused={focused} />,
-              tabBarButton: (props) => (isLockedForFree ? <LockedTabButton {...props} /> : <TouchableOpacity {...props} />),
+              tabBarIcon: ({ color, size, focused }) => (
+                <TabIcon
+                  name="calendar-outline"
+                  size={size}
+                  color={color}
+                  focused={focused}
+                />
+              ),
+              tabBarButton: (props) =>
+                isLockedForFree ? (
+                  <LockedTabButton {...props} />
+                ) : (
+                  <TouchableOpacity {...props} />
+                ),
+            }}
+          />
+          {/* Keep overtime route hidden from the tab bar and overflow */}
+          <Tabs.Screen
+            name="(overtime)"
+            options={{
+              headerShown: false,
+              href: null,
             }}
           />
           <Tabs.Screen
@@ -409,8 +586,20 @@ const TabsLayout = () => {
             options={{
               title: "Payroll",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => <TabIcon name="cash-outline" size={size} color={color} focused={focused} />,
-              tabBarButton: (props) => (isLockedForFree ? <LockedTabButton {...props} /> : <TouchableOpacity {...props} />),
+              tabBarIcon: ({ color, size, focused }) => (
+                <TabIcon
+                  name="cash-outline"
+                  size={size}
+                  color={color}
+                  focused={focused}
+                />
+              ),
+              tabBarButton: (props) =>
+                isLockedForFree ? (
+                  <LockedTabButton {...props} />
+                ) : (
+                  <TouchableOpacity {...props} />
+                ),
             }}
           />
           <Tabs.Screen
@@ -418,7 +607,30 @@ const TabsLayout = () => {
             options={{
               title: "Timekeeping",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => <TabIcon name="time-outline" size={size} color={color} focused={focused} />,
+              tabBarIcon: ({ color, size, focused }) => (
+                <TabIcon
+                  name="time-outline"
+                  size={size}
+                  color={color}
+                  focused={focused}
+                />
+              ),
+            }}
+          />
+          {/* Keep AI chats route hidden until feature launch */}
+          <Tabs.Screen
+            name="ai-chats"
+            options={{
+              headerShown: false,
+              href: null,
+            }}
+          />
+          {/* Keep notifications route hidden from the tab bar */}
+          <Tabs.Screen
+            name="notifications"
+            options={{
+              headerShown: false,
+              href: null,
             }}
           />
           <Tabs.Screen
@@ -426,16 +638,38 @@ const TabsLayout = () => {
             options={{
               title: "Settings",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => <AvatarIcon color={color} size={size} focused={focused} />,
+              tabBarIcon: ({ color, size, focused }) => (
+                <AvatarIcon color={color} size={size} focused={focused} />
+              ),
             }}
           />
         </Tabs>
       </UserInactivity>
 
+      {isSettingsTabActive && (
+        <FeedbackFloatingPill tabBarHeight={tabBarHeight} />
+      )}
+
+      {/* Tutorial overlay (text bubble walkthrough) */}
+      <TutorialOverlay />
+
       {/* Slide-up Modal for Locked Features */}
-      <Modal transparent visible={showLockedModal} onRequestClose={closeModal} animationType="none">
-        <Animated.View className="flex-1 bg-black/50 justify-end" style={{ opacity: modalOpacity }} onTouchEnd={closeModal}>
-          <Animated.View className="bg-white rounded-t-3xl px-5 pt-5 pb-8" style={{ transform: [{ translateY: modalY }] }} {...panResponder.panHandlers}>
+      <Modal
+        transparent
+        visible={showLockedModal}
+        onRequestClose={closeModal}
+        animationType="none"
+      >
+        <Animated.View
+          className="flex-1 bg-black/50 justify-end"
+          style={{ opacity: modalOpacity }}
+          onTouchEnd={closeModal}
+        >
+          <Animated.View
+            className="bg-white rounded-t-3xl px-5 pt-5 pb-8"
+            style={{ transform: [{ translateY: modalY }] }}
+            {...panResponder.panHandlers}
+          >
             {/* Drag handle */}
             <View className="w-full items-center mb-5">
               <View className="w-10 h-1 rounded-full bg-slate-300" />
@@ -446,9 +680,13 @@ const TabsLayout = () => {
                 <Ionicons name="lock-closed" size={32} color="#fb923c" />
               </View>
 
-              <Text className="text-xl font-bold mb-2 text-slate-800">Feature Locked</Text>
+              <Text className="text-xl font-bold mb-2 text-slate-800">
+                Feature Locked
+              </Text>
 
-              <Text className="text-center text-slate-600 px-4">This feature is locked. Need help?</Text>
+              <Text className="text-center text-slate-600 px-4">
+                This feature is locked. Need help?
+              </Text>
             </View>
 
             <TouchableOpacity
@@ -465,10 +703,15 @@ const TabsLayout = () => {
                 elevation: 3,
               }}
             >
-              <Text className="text-white text-center font-semibold text-base">Visit Website</Text>
+              <Text className="text-white text-center font-semibold text-base">
+                Visit Website
+              </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity className="w-full py-4 rounded-xl border border-slate-200" onPress={closeModal}>
+            <TouchableOpacity
+              className="w-full py-4 rounded-xl border border-slate-200"
+              onPress={closeModal}
+            >
               <Text className="text-slate-800 text-center">Maybe Later</Text>
             </TouchableOpacity>
           </Animated.View>

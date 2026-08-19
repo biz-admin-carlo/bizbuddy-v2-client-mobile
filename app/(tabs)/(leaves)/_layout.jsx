@@ -9,13 +9,25 @@ const LeavesTabsLayout = () => {
   const insets = useSafeAreaInsets();
 
   // Helper function to generate tab icons with a specified icon component
-  const getTabBarIcon = (iconName, IconComponent = Ionicons, size = 24, accessibilityLabel = "") => {
-    return ({ color }) => <IconComponent name={iconName} size={size} color={color} accessibilityLabel={accessibilityLabel} />;
+  const getTabBarIcon = (
+    iconName,
+    IconComponent = Ionicons,
+    size = 24,
+    accessibilityLabel = ""
+  ) => {
+    return ({ color }) => (
+      <IconComponent
+        name={iconName}
+        size={size}
+        color={color}
+        accessibilityLabel={accessibilityLabel}
+      />
+    );
   };
 
   return (
     <Tabs
-      initialRouteName="leaves-request"
+      initialRouteName="leaves-approval"
       screenOptions={{
         headerShown: false,
         tabBarShowIcon: true,
@@ -47,21 +59,31 @@ const LeavesTabsLayout = () => {
         },
       }}
     >
+      {/* Leave History Tab (logs first) */}
+      <Tabs.Screen
+        name="leaves-approval"
+        options={{
+          tabBarLabel: "History",
+          tabBarIcon: getTabBarIcon(
+            "check-circle",
+            FontAwesome5,
+            24,
+            "Leave History Tab Icon"
+          ),
+        }}
+      />
+
       {/* Submit Leaves Tab */}
       <Tabs.Screen
         name="leaves-request"
         options={{
-          tabBarLabel: "Submit",
-          tabBarIcon: getTabBarIcon("document-text-outline", Ionicons, 24, "Submit Leaves Tab Icon"),
-        }}
-      />
-
-      {/* Approval Leaves Tab */}
-      <Tabs.Screen
-        name="leaves-approval"
-        options={{
-          tabBarLabel: "Approval",
-          tabBarIcon: getTabBarIcon("check-circle", FontAwesome5, 24, "Approval Leaves Tab Icon"),
+          tabBarLabel: "Request",
+          tabBarIcon: getTabBarIcon(
+            "document-text-outline",
+            Ionicons,
+            24,
+            "Submit Leaves Tab Icon"
+          ),
         }}
       />
     </Tabs>

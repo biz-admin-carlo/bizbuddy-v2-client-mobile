@@ -4,7 +4,6 @@ import {
   Text,
   TextInput,
   ActivityIndicator,
-  Switch,
   TouchableOpacity,
   Animated,
   KeyboardAvoidingView,
@@ -15,20 +14,94 @@ import {
   Image,
   StyleSheet,
   SafeAreaView,
-  Dimensions,
+  Alert,
 } from "react-native";
-import { useRouter } from "expo-router";
-import useAuthStore from "../../store/useAuthStore";
+import { useRouter, useLocalSearchParams } from "expo-router";
+import useAuthStore, {
+  getTokenUserId,
+  getTokenVersion,
+  LAST_SIGN_IN_USER_ID_KEY,
+  persistSignInContext,
+} from "../../store/useAuthStore";
+import {
+  findAnyValidSessionToken,
+  findVerifiedSessionToken,
+  getDistinctVaultUserIds,
+  removeStoredSessionToken,
+  resolveSessionTokenForCompanyId,
+  syncLegacyTokenIntoPerCompanyStore,
+} from "../../utils/authTokenStorage";
+import { getVaultedAccountRows } from "../../utils/vaultedAccounts";
 import { API_BASE_URL, VERSION } from "../../config/constant";
+import { getInstallationId } from "../../utils/deviceId";
+import { cacheCompaniesForEmail } from "../../utils/emailCompanyDirectory";
+import {
+  AUTH_ERROR_CODES,
+  getLoginErrorMessage,
+  isDeviceAlreadyRegisteredError,
+  isDeviceSwitchCooldownError,
+  verifySessionToken,
+} from "../../utils/authSession";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SecureStore from "expo-secure-store";
-import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from "@expo/vector-icons";
+import {
+  Ionicons,
+  MaterialCommunityIcons,
+  FontAwesome5,
+} from "@expo/vector-icons";
 
-const { width } = Dimensions.get("window");
+const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
+/** After device biometric: pick company when user has multiple companies. */
+const STEP_BIOMETRIC_COMPANY = 3;
+/** Before device biometric: pick which saved account when several different
+ * users are vaulted on this device and there's no "last signed in" hint. */
+const STEP_BIOMETRIC_ACCOUNT_PICKER = 4;
+
+async function fetchAccountEmailForToken(token) {
+  if (!token) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/account/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const email = data?.data?.user?.email ?? data?.user?.email;
+    if (typeof email !== "string") return null;
+    const normalized = email.trim().toLowerCase();
+    return normalized.includes("@") ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+/** API may return companies as `data`, nested array, or a single user object. */
+function normalizeCompaniesFromEmailResponse(json) {
+  const raw = json?.data;
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object" && Array.isArray(raw.data)) {
+    return raw.data;
+  }
+  if (raw && typeof raw === "object" && Array.isArray(raw.companies)) {
+    return raw.companies;
+  }
+  if (raw && typeof raw === "object" && raw.companyId != null) {
+    return [raw];
+  }
+  return [];
+}
 
 export default function SignIn() {
   const router = useRouter();
-  const { login } = useAuthStore();
+  const { login, forceLogout } = useAuthStore();
+  const {
+    mode,
+    email: switchEmailParam,
+    companyId: switchCompanyIdParam,
+  } = useLocalSearchParams();
+  /** Opened from the account switcher to add a brand new account (keeps other saved accounts). */
+  const isAddMode = mode === "add";
+  /** Opened from the account switcher because a saved session went stale — needs a password re-entry. */
+  const isSwitchMode = mode === "switch";
 
   const [step, setStep] = useState(1);
   const [email, setEmail] = useState("");
@@ -37,13 +110,19 @@ export default function SignIn() {
   const [selectedCompanyId, setSelectedCompanyId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [rememberMe, setRememberMe] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
 
   // For biometric authentication
   const [biometricAvailable, setBiometricAvailable] = useState(false);
+  const [biometricEnabled, setBiometricEnabled] = useState(false);
   const [savedToken, setSavedToken] = useState(null);
+  const [bioCompanyLoading, setBioCompanyLoading] = useState(false);
+  /** When user reached password (step 2) from post-biometric company pick (step 3). */
+  const [passwordSourceStep, setPasswordSourceStep] = useState(null);
+  // For the ambiguous multi-account biometric picker (step 4)
+  const [biometricAccounts, setBiometricAccounts] = useState([]);
+  const [bioAccountSwitchingKey, setBioAccountSwitchingKey] = useState(null);
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -94,32 +173,41 @@ export default function SignIn() {
     };
 
     const getToken = async () => {
-      const token = await SecureStore.getItemAsync("token");
-      setSavedToken(token);
+      await syncLegacyTokenIntoPerCompanyStore();
+      const enabledFlag = await SecureStore.getItemAsync(BIOMETRIC_ENABLED_KEY);
+      setBiometricEnabled(enabledFlag === "true");
+      const hit = await findAnyValidSessionToken();
+      setSavedToken(hit?.token ?? null);
     };
 
     checkBiometric();
     getToken();
 
     // Keyboard listeners
-    const keyboardDidShowListener = Keyboard.addListener("keyboardDidShow", () => {
-      setKeyboardVisible(true);
-      // Only animate description out
-      Animated.timing(descriptionOpacity, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-    });
-    const keyboardDidHideListener = Keyboard.addListener("keyboardDidHide", () => {
-      setKeyboardVisible(false);
-      // Animate description in
-      Animated.timing(descriptionOpacity, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-    });
+    const keyboardDidShowListener = Keyboard.addListener(
+      "keyboardDidShow",
+      () => {
+        setKeyboardVisible(true);
+        // Only animate description out
+        Animated.timing(descriptionOpacity, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      }
+    );
+    const keyboardDidHideListener = Keyboard.addListener(
+      "keyboardDidHide",
+      () => {
+        setKeyboardVisible(false);
+        // Animate description in
+        Animated.timing(descriptionOpacity, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      }
+    );
 
     // Clean up listeners
     return () => {
@@ -186,8 +274,53 @@ export default function SignIn() {
     ]).start();
   };
 
+  const ensureSavedSessionStillValid = async (sessionToken) => {
+    const check = await verifySessionToken(sessionToken, { strict: true });
+    if (check.valid) return true;
+    if (typeof __DEV__ !== "undefined" && __DEV__) {
+      console.warn("[Auth/JWT] biometric saved session invalid", {
+        reason: check.reason,
+        jwtTokenVersion: getTokenVersion(sessionToken),
+        apiCode: check.data?.code,
+        apiMessage: check.data?.message,
+      });
+    }
+    await removeStoredSessionToken(sessionToken);
+    const remaining = await findAnyValidSessionToken();
+    if (!remaining?.token) {
+      await forceLogout();
+    }
+    if (check.reason === AUTH_ERROR_CODES.TOKEN_VERSION_MISMATCH) {
+      setError(
+        "Your saved sign-in is out of date. Sign in with your password to refresh it."
+      );
+    } else {
+      setError(
+        "This account is signed in on another device. Sign in with your password on this device only if your administrator has cleared the other session."
+      );
+    }
+    setSavedToken(remaining?.token ?? null);
+    return false;
+  };
+
   const handleBiometricSignIn = async () => {
-    if (!savedToken) {
+    const vaultUserIds = await getDistinctVaultUserIds();
+    const lastUserId = await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY);
+
+    if (vaultUserIds.length > 1 && !lastUserId) {
+      const rows = await getVaultedAccountRows();
+      if (rows.length === 0) {
+        setError("No saved credentials. Please sign in using email first.");
+        return;
+      }
+      setError(null);
+      setBiometricAccounts(rows);
+      setStep(STEP_BIOMETRIC_ACCOUNT_PICKER);
+      return;
+    }
+
+    const session = await findAnyValidSessionToken({ userId: lastUserId });
+    if (!session?.token) {
       setError("No saved credentials. Please sign in using email first.");
       return;
     }
@@ -201,10 +334,196 @@ export default function SignIn() {
     });
 
     if (result.success) {
-      await login(savedToken, true);
-      router.replace("(tabs)/profile");
+      const active = await findVerifiedSessionToken(
+        (token) => verifySessionToken(token, { strict: true }),
+        { userId: lastUserId || getTokenUserId(session.token) },
+      );
+      if (!active?.token) {
+        await forceLogout();
+        setError(
+          "Your saved sign-in is out of date. Sign in with your password to refresh it."
+        );
+        setSavedToken(null);
+        return;
+      }
+
+      const activeUserId = getTokenUserId(active.token);
+
+      setError(null);
+      setBioCompanyLoading(true);
+      try {
+        const emailForLookup = await fetchAccountEmailForToken(active.token);
+
+        if (!emailForLookup) {
+          await persistSignInContext(active.token, null, active.companyId);
+          await login(active.token, true, active.companyId);
+          router.replace("(tabs)/profile");
+          return;
+        }
+
+        const res = await fetch(
+          `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+            emailForLookup
+          )}`
+        );
+        const data = await res.json();
+        const companies = normalizeCompaniesFromEmailResponse(data);
+        if (!res.ok || companies.length === 0) {
+          await persistSignInContext(active.token, emailForLookup, active.companyId);
+          await login(active.token, true, active.companyId);
+          router.replace("(tabs)/profile");
+          return;
+        }
+        cacheCompaniesForEmail(emailForLookup, companies);
+
+        if (companies.length === 1) {
+          const onlyCompanyId = String(companies[0].companyId);
+          const companyToken = await resolveSessionTokenForCompanyId(
+            onlyCompanyId,
+            { userId: activeUserId },
+          );
+          const tokenToUse = companyToken || active.token;
+          if (!(await ensureSavedSessionStillValid(tokenToUse))) {
+            return;
+          }
+          await persistSignInContext(tokenToUse, emailForLookup, onlyCompanyId);
+          await login(tokenToUse, true, onlyCompanyId);
+          router.replace("(tabs)/profile");
+          return;
+        }
+
+        setUsers(companies);
+        setEmail(emailForLookup);
+        setSelectedCompanyId(null);
+        setStep(STEP_BIOMETRIC_COMPANY);
+        setSavedToken(active.token);
+      } catch (e) {
+        console.error("Biometric company lookup error:", e);
+        const fallback = await findVerifiedSessionToken(
+          (token) => verifySessionToken(token, { strict: true }),
+          { userId: activeUserId },
+        );
+        if (fallback?.token) {
+          await login(fallback.token, true, fallback.companyId);
+          router.replace("(tabs)/profile");
+        } else {
+          setError(
+            "Could not restore your session. Sign in with your password."
+          );
+        }
+      } finally {
+        setBioCompanyLoading(false);
+      }
     } else {
       setError("Biometric authentication failed. Please try again.");
+    }
+  };
+
+  const handleBiometricCompanyContinue = async () => {
+    if (!selectedCompanyId) {
+      setError("Please select a company.");
+      return;
+    }
+
+    animateButtonPress();
+    setError(null);
+    setLoading(true);
+    try {
+      const picked = String(selectedCompanyId);
+      const preferredUserId =
+        getTokenUserId(savedToken) ||
+        (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
+      const sessionToken = await resolveSessionTokenForCompanyId(picked, {
+        userId: preferredUserId,
+      });
+
+      if (sessionToken) {
+        if (!(await ensureSavedSessionStillValid(sessionToken))) {
+          return;
+        }
+        await login(sessionToken, true, picked);
+        setPasswordSourceStep(null);
+        router.replace("(tabs)/profile");
+        return;
+      }
+
+      setPassword("");
+      setPasswordSourceStep(STEP_BIOMETRIC_COMPANY);
+      setStep(2);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** When a saved session exists for this company, sign in immediately (no Continue tap). */
+  const handleBiometricCompanyRowPress = async (companyId) => {
+    setSelectedCompanyId(companyId);
+    setError(null);
+    const picked = String(companyId);
+    const preferredUserId =
+      getTokenUserId(savedToken) ||
+      (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
+    const sessionToken = await resolveSessionTokenForCompanyId(picked, {
+      userId: preferredUserId,
+    });
+    if (!sessionToken) {
+      return;
+    }
+    setLoading(true);
+    try {
+      if (!(await ensureSavedSessionStillValid(sessionToken))) {
+        return;
+      }
+      await login(sessionToken, true, picked);
+      setPasswordSourceStep(null);
+      router.replace("(tabs)/profile");
+    } catch (e) {
+      console.error("Biometric company instant login:", e);
+      setError("Could not complete sign-in. Tap Continue to use your password.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /**
+   * Ambiguous-device biometric flow: user picked which saved account to unlock,
+   * so run the device biometric prompt scoped to that specific account's token.
+   */
+  const handleBiometricAccountRowPress = async (account) => {
+    if (bioAccountSwitchingKey) return;
+    setError(null);
+    setBioAccountSwitchingKey(account.key);
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Sign in to BizBuddy",
+        fallbackLabel: "Enter Passcode",
+        disableDeviceFallback: false,
+      });
+
+      if (!result.success) {
+        setError("Biometric authentication failed. Please try again.");
+        return;
+      }
+
+      if (!(await ensureSavedSessionStillValid(account.token))) {
+        setBiometricAccounts((prev) => {
+          const next = prev.filter((a) => a.key !== account.key);
+          if (next.length === 0) {
+            setStep(1);
+          }
+          return next;
+        });
+        return;
+      }
+
+      await persistSignInContext(account.token, account.email, account.companyId);
+      await login(account.token, true, account.companyId);
+      router.replace("(tabs)/profile");
+    } catch (e) {
+      console.error("Biometric account picker sign-in error:", e);
+      setError("Could not complete sign-in. Please try again.");
+    } finally {
+      setBioAccountSwitchingKey(null);
     }
   };
 
@@ -219,7 +538,11 @@ export default function SignIn() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(email.trim().toLowerCase())}`);
+      const res = await fetch(
+        `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+          email.trim().toLowerCase()
+        )}`
+      );
       const data = await res.json();
       if (!res.ok) {
         setError(data.message || "Email not found.");
@@ -227,7 +550,19 @@ export default function SignIn() {
         return;
       }
 
-      setUsers(data.data);
+      const list = normalizeCompaniesFromEmailResponse(data);
+      if (list.length === 0) {
+        setError("No companies found for this email.");
+        setLoading(false);
+        return;
+      }
+      cacheCompaniesForEmail(email, list);
+      setUsers(list);
+      if (list.length === 1) {
+        setSelectedCompanyId(list[0].companyId);
+      } else {
+        setSelectedCompanyId(null);
+      }
       setStep(2);
     } catch (err) {
       console.error("Email submit error:", err);
@@ -236,9 +571,119 @@ export default function SignIn() {
     setLoading(false);
   };
 
+  const completePasswordSignIn = async (token) => {
+    if (!token) {
+      setError("Sign-in succeeded but no session token was returned. Please try again.");
+      return;
+    }
+    const normalizedEmail = email.trim().toLowerCase();
+    await persistSignInContext(token, normalizedEmail, selectedCompanyId);
+
+    await login(token, true, String(selectedCompanyId));
+    setPasswordSourceStep(null);
+    setSavedToken(token);
+    router.replace("(tabs)/profile");
+  };
+
+  const logSignInFailure = (label, { signInRes, signInData, replaceDevice = false, deviceId }) => {
+    console.error(`[SignIn] ${label}`, {
+      replaceDevice,
+      status: signInRes?.status,
+      ok: signInRes?.ok,
+      code: signInData?.code,
+      message: signInData?.message,
+      switchAllowedAt: signInData?.switchAllowedAt ?? null,
+      deviceId,
+      serverRegisteredDeviceId: signInData?.registeredDeviceId ?? null,
+      requestDeviceId: signInData?.requestDeviceId ?? deviceId,
+      companyId: selectedCompanyId,
+      email: email.trim().toLowerCase(),
+      response: signInData,
+    });
+  };
+
+  const attemptPasswordSignIn = async ({ replaceDevice = false } = {}) => {
+    const deviceId = await getInstallationId();
+    const loginUrl = replaceDevice
+      ? `${API_BASE_URL}/api/account/login?replaceDevice=true`
+      : `${API_BASE_URL}/api/account/login`;
+    const signInRes = await fetch(loginUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: email.trim().toLowerCase(),
+        password,
+        companyId: selectedCompanyId,
+        deviceId,
+        ...(replaceDevice ? { replaceDevice: true } : {}),
+      }),
+    });
+    let signInData = null;
+    try {
+      signInData = await signInRes.json();
+    } catch (parseErr) {
+      console.error("[SignIn] Failed to parse login response JSON", {
+        replaceDevice,
+        status: signInRes.status,
+        url: loginUrl,
+        deviceId,
+        error: parseErr,
+      });
+      signInData = null;
+    }
+    if (!signInRes.ok) {
+      logSignInFailure(replaceDevice ? "Replace device login failed" : "Password login failed", {
+        signInRes,
+        signInData,
+        replaceDevice,
+        deviceId,
+      });
+    }
+    return { signInRes, signInData, deviceId };
+  };
+
+  const promptReplaceRegisteredDevice = () => {
+    Alert.alert(
+      "Signed in on another device",
+      "This account is registered on a different phone or tablet. Use this device instead? The other device will be signed out and will need to sign in again.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Use this device",
+          onPress: async () => {
+            setLoading(true);
+            setError(null);
+            try {
+              const { signInRes, signInData } = await attemptPasswordSignIn({
+                replaceDevice: true,
+              });
+              if (!signInRes.ok) {
+                setError(getLoginErrorMessage(signInData));
+                return;
+              }
+              const token = signInData?.data?.token ?? signInData?.token;
+              await completePasswordSignIn(token);
+            } catch (err) {
+              console.error("Replace device sign-in error:", err);
+              setError("Something went wrong.");
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleSignInWithPassword = async () => {
-    if (!password || !selectedCompanyId) {
-      setError("Please select a company and enter your password.");
+    if (!selectedCompanyId) {
+      setError("Please select a company.");
+      return;
+    }
+    if (!password) {
+      setError("Please enter your password.");
       return;
     }
 
@@ -247,23 +692,23 @@ export default function SignIn() {
     setLoading(true);
     setError(null);
     try {
-      const signInRes = await fetch(
-        `${API_BASE_URL}/api/account/sign-in?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&companyId=${selectedCompanyId}`
-      );
-      const signInData = await signInRes.json();
+      const { signInRes, signInData } = await attemptPasswordSignIn();
       if (!signInRes.ok) {
-        setError(signInData.message || "Invalid credentials.");
+        if (isDeviceAlreadyRegisteredError(signInData)) {
+          setLoading(false);
+          promptReplaceRegisteredDevice();
+          return;
+        }
+        if (isDeviceSwitchCooldownError(signInData)) {
+          setError(getLoginErrorMessage(signInData));
+          setLoading(false);
+          return;
+        }
+        setError(getLoginErrorMessage(signInData));
         setLoading(false);
         return;
       }
-      const token = signInData.data.token;
-      console.log("Received token:", token);
-
-      await login(token, rememberMe);
-      if (rememberMe) {
-        setSavedToken(token);
-      }
-      router.replace("(tabs)/profile");
+      await completePasswordSignIn(signInData?.data?.token ?? signInData?.token);
     } catch (err) {
       console.error("Sign-in error:", err);
       setError("Something went wrong.");
@@ -272,47 +717,186 @@ export default function SignIn() {
   };
 
   const goBackToEmail = () => {
+    setPasswordSourceStep(null);
     setStep(1);
+    setSelectedCompanyId(null);
+    setUsers([]);
+    setPassword("");
   };
+
+  const goBackFromBiometricCompany = () => {
+    setPasswordSourceStep(null);
+    setStep(1);
+    setSelectedCompanyId(null);
+    setUsers([]);
+  };
+
+  const goBackFromBiometricAccountPicker = () => {
+    setStep(1);
+    setBiometricAccounts([]);
+    setError(null);
+  };
+
+  /** Close the add-account / switch-account overlay and return to whatever screen opened it. */
+  const closeAuthOverlay = () => {
+    if (router.canGoBack && router.canGoBack()) {
+      router.back();
+      return;
+    }
+    goBackToEmail();
+  };
+
+  const goBackFromPasswordStep = () => {
+    if (passwordSourceStep === STEP_BIOMETRIC_COMPANY) {
+      setPasswordSourceStep(null);
+      setPassword("");
+      setError(null);
+      setStep(STEP_BIOMETRIC_COMPANY);
+      return;
+    }
+    if (isSwitchMode) {
+      closeAuthOverlay();
+      return;
+    }
+    goBackToEmail();
+  };
+
+  // Switch-account mode: a saved session was rejected by the server, so jump
+  // straight to the password step for that email/company instead of step 1.
+  useEffect(() => {
+    if (mode !== "switch" || !switchEmailParam) return;
+    const targetEmail = String(switchEmailParam).trim().toLowerCase();
+    setEmail(targetEmail);
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+            targetEmail
+          )}`
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.message || "Email not found.");
+          return;
+        }
+        const list = normalizeCompaniesFromEmailResponse(data);
+        if (list.length === 0) {
+          setError("No companies found for this email.");
+          return;
+        }
+        cacheCompaniesForEmail(targetEmail, list);
+        setUsers(list);
+        const match = switchCompanyIdParam
+          ? list.find(
+              (u) => String(u.companyId) === String(switchCompanyIdParam)
+            )
+          : null;
+        setSelectedCompanyId(match ? match.companyId : list[0].companyId);
+        setPassword("");
+        setStep(2);
+        setError("Enter your password to sign in to this account.");
+      } catch (err) {
+        console.error("Switch mode prefill error:", err);
+        setError("Network error, please try again.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // Only run once on mount for the switch-mode deep link.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <SafeAreaView style={{ flex: 1 }} className="bg-white">
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1 }}
+      >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
-            <ScrollView contentContainerStyle={{ flexGrow: 1 }} keyboardShouldPersistTaps="handled">
-              <View className="flex-1 justify-center items-center px-5 py-20">
+            <ScrollView
+              style={{ flex: 1 }}
+              contentContainerStyle={styles.scrollContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.screenContent} className="justify-center px-5 py-20">
                 {/* Logo/Header - Always visible */}
-                <View className="items-center mb-6">
-                  <View className="flex-row justify-center items-center">
-                    <Image source={require("../../assets/images/icon.png")} style={{ width: 50, height: 50 }} resizeMode="contain" className=" mb-4" />
-                    <Text className="text-6xl text-orange-400 font-extrabold">BizBuddy</Text>
+                <View style={styles.header} className="items-center mb-6">
+                  <View style={styles.brandRow} className="flex-row justify-center items-center">
+                    <Image
+                      source={require("../../assets/images/icon.png")}
+                      style={styles.brandIcon}
+                      resizeMode="contain"
+                    />
+                    <Text
+                      className="text-4xl text-orange-400 font-extrabold"
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.7}
+                      style={styles.brandTitle}
+                    >
+                      BizBuddy
+                    </Text>
                   </View>
 
                   {/* Only the description and version fade out */}
-                  <Animated.View style={{ opacity: descriptionOpacity, alignItems: "center" }}>
-                    <Text className="text-xs mt-2 text-slate-600">{VERSION}</Text>
-                    <Text className="text-slate-600 text-center text-sm mt-1">Your business companion</Text>
+                  <Animated.View
+                    style={{
+                      opacity: descriptionOpacity,
+                      alignItems: "center",
+                      width: "100%",
+                    }}
+                  >
+                    <Text className="text-xs mt-2 text-slate-600">
+                      {VERSION}
+                    </Text>
+                    <Text className="text-slate-600 text-center text-sm mt-1">
+                      Your business companion
+                    </Text>
                   </Animated.View>
                 </View>
 
                 {/* Main Form Container */}
                 <Animated.View
-                  style={{
-                    opacity: formAnim,
-                    transform: [{ translateY: formSlideAnim }],
-                    width: "100%",
-                    maxWidth: 400,
-                  }}
+                  style={[
+                    styles.formContainer,
+                    {
+                      opacity: formAnim,
+                      transform: [{ translateY: formSlideAnim }],
+                    },
+                  ]}
                   className="p-2"
                 >
                   {/* Step 1: Email Input */}
                   {step === 1 && (
                     <View>
+                      {!!mode && (
+                        <View className="flex-row items-center justify-between mb-6">
+                          <Text className="text-xl font-bold text-slate-700">
+                            {isAddMode ? "Add another account" : "Sign in"}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={closeAuthOverlay}
+                            className="p-1"
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          >
+                            <Ionicons name="close" size={24} color="#64748b" />
+                          </TouchableOpacity>
+                        </View>
+                      )}
                       <View className="mb-7">
-                        <Text className="mb-3 font-medium text-slate-600">Email</Text>
+                        <Text className="mb-3 font-medium text-slate-600">
+                          Email
+                        </Text>
                         <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-4 mb-2">
-                          <MaterialCommunityIcons name="email-outline" size={20} color="#f97316" style={{ marginRight: 10 }} />
+                          <MaterialCommunityIcons
+                            name="email-outline"
+                            size={20}
+                            color="#f97316"
+                            style={{ marginRight: 10 }}
+                          />
                           <TextInput
                             placeholder="Enter your email"
                             className="flex-1 text-slate-700"
@@ -341,7 +925,9 @@ export default function SignIn() {
                       </Animated.View>
 
                       {/* Continue Button */}
-                      <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+                      <Animated.View
+                        style={{ transform: [{ scale: buttonScale }] }}
+                      >
                         <TouchableOpacity
                           onPress={handleEmailSubmit}
                           disabled={loading}
@@ -353,66 +939,380 @@ export default function SignIn() {
                             <ActivityIndicator color="#fff" size="small" />
                           ) : (
                             <View className="flex-row items-center justify-center">
-                              <Text className="text-white text-center font-semibold text-base mr-2">Continue</Text>
-                              <Ionicons name="arrow-forward" size={18} color="#fff" />
+                              <Text className="text-white text-center font-semibold text-base mr-2">
+                                Continue
+                              </Text>
+                              <Ionicons
+                                name="arrow-forward"
+                                size={18}
+                                color="#fff"
+                              />
                             </View>
                           )}
                         </TouchableOpacity>
                       </Animated.View>
 
-                      {/* Biometric button - Moved below Continue button */}
-                      {biometricAvailable && savedToken && (
-                        <Animated.View style={{ transform: [{ scale: buttonScale }], marginTop: 16 }}>
+                      {/* Biometric button (hidden when adding a second account — it targets the currently active user) */}
+                      {biometricAvailable && biometricEnabled && !isAddMode && (
+                        <Animated.View
+                          style={{
+                            transform: [{ scale: buttonScale }],
+                            marginTop: 16,
+                          }}
+                        >
                           <TouchableOpacity
                             onPress={handleBiometricSignIn}
+                            disabled={!savedToken || bioCompanyLoading}
                             className="flex-row items-center justify-center py-4 px-5 rounded-lg border border-slate-200"
-                            style={styles.buttonShadow}
+                            style={[
+                              styles.buttonShadow,
+                              (!savedToken || bioCompanyLoading) && { opacity: 0.6 },
+                            ]}
                             activeOpacity={0.8}
                           >
-                            <Ionicons name="finger-print-outline" size={22} color="#f97316" style={{ marginRight: 8 }} />
-                            <Text className="font-medium text-slate-700">Sign in with biometrics</Text>
+                            {bioCompanyLoading ? (
+                              <ActivityIndicator color="#f97316" size="small" />
+                            ) : (
+                              <>
+                                <Ionicons
+                                  name="finger-print-outline"
+                                  size={22}
+                                  color="#f97316"
+                                  style={{ marginRight: 8 }}
+                                />
+                                <Text className="font-medium text-slate-700">
+                                  Sign in with biometrics
+                                </Text>
+                              </>
+                            )}
                           </TouchableOpacity>
+                          {!savedToken && (
+                            <Text className="text-xs text-slate-500 mt-2 text-center">
+                              Sign in with your password once to save credentials for biometric sign-in.
+                            </Text>
+                          )}
                         </Animated.View>
                       )}
                     </View>
                   )}
 
-                  {/* Step 2: Company Selection and Password */}
+                  {/* Step 3: After device biometric — pick company (multi-company only) */}
+                  {step === STEP_BIOMETRIC_COMPANY && (
+                    <View>
+                      <View className="flex-row items-center mb-4">
+                        <TouchableOpacity
+                          onPress={goBackFromBiometricCompany}
+                          className="mr-4"
+                        >
+                          <View className="w-10 h-10 rounded-full items-center justify-center">
+                            <Ionicons
+                              name="arrow-back"
+                              size={18}
+                              color="#f97316"
+                            />
+                          </View>
+                        </TouchableOpacity>
+                        <Text className="text-xl font-bold text-slate-700 flex-1">
+                          Select your company
+                        </Text>
+                      </View>
+                      <Text className="text-sm text-slate-600 mb-6">
+                        Tap a company to sign in if you have saved that session, or select
+                        one and tap Continue (password required if there is no saved session).
+                      </Text>
+
+                      <View className="mb-7">
+                        {users.map((user) => {
+                          const isSelected =
+                            String(selectedCompanyId) === String(user.companyId);
+                          return (
+                          <TouchableOpacity
+                            key={user.companyId}
+                            disabled={loading}
+                            onPress={() => handleBiometricCompanyRowPress(user.companyId)}
+                            className={`p-4 mb-4 rounded-lg border ${
+                              isSelected
+                                ? "border-orange-400"
+                                : "border-slate-200"
+                            } bg-white`}
+                            style={[
+                              styles.cardShadow,
+                              isSelected && styles.selectedCardShadow,
+                            ]}
+                            activeOpacity={0.7}
+                          >
+                            <View className="flex-row items-center">
+                              <View
+                                className={`w-12 h-12 rounded-full ${
+                                  isSelected
+                                    ? "bg-orange-50"
+                                    : "bg-slate-100"
+                                } items-center justify-center mr-4`}
+                              >
+                                <FontAwesome5
+                                  name="building"
+                                  size={18}
+                                  color={
+                                    isSelected
+                                      ? "#f97316"
+                                      : "#64748b"
+                                  }
+                                />
+                              </View>
+                              <View className="flex-1">
+                                <Text className="font-semibold text-base text-slate-700">
+                                  {user.companyName}
+                                </Text>
+                                <View className="flex-row items-center mt-2">
+                                  <View
+                                    className={`px-3 py-1 rounded-full ${
+                                      isSelected
+                                        ? "bg-orange-50"
+                                        : "bg-slate-100"
+                                    }`}
+                                  >
+                                    <Text
+                                      className={`text-xs ${
+                                        isSelected
+                                          ? "text-orange-800"
+                                          : "text-slate-600"
+                                      } font-medium`}
+                                    >
+                                      {user.role}
+                                    </Text>
+                                  </View>
+                                </View>
+                              </View>
+                              {isSelected && (
+                                <View className="w-8 h-8 rounded-full bg-orange-400 items-center justify-center">
+                                  <Ionicons
+                                    name="checkmark"
+                                    size={16}
+                                    color="#fff"
+                                  />
+                                </View>
+                              )}
+                            </View>
+                          </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Animated.View
+                        style={{
+                          opacity: errorAnim,
+                          transform: [{ translateX: errorShake }],
+                          marginBottom: error ? 20 : 0,
+                        }}
+                      >
+                        {error && (
+                          <View className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                            <Text className="text-red-600">{error}</Text>
+                          </View>
+                        )}
+                      </Animated.View>
+
+                      <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+                        <TouchableOpacity
+                          onPress={handleBiometricCompanyContinue}
+                          disabled={loading || !selectedCompanyId}
+                          className="bg-orange-400 py-4 rounded-lg mt-2"
+                          style={styles.buttonShadow}
+                          activeOpacity={0.8}
+                        >
+                          {loading ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                          ) : (
+                            <View className="flex-row items-center justify-center">
+                              <Text className="text-white text-center font-semibold text-base">
+                                Continue
+                              </Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      </Animated.View>
+                    </View>
+                  )}
+
+                  {/* Step 4: Multiple different accounts saved — pick which one to unlock with biometrics */}
+                  {step === STEP_BIOMETRIC_ACCOUNT_PICKER && (
+                    <View>
+                      <View className="flex-row items-center mb-4">
+                        <TouchableOpacity
+                          onPress={goBackFromBiometricAccountPicker}
+                          className="mr-4"
+                        >
+                          <View className="w-10 h-10 rounded-full items-center justify-center">
+                            <Ionicons
+                              name="arrow-back"
+                              size={18}
+                              color="#f97316"
+                            />
+                          </View>
+                        </TouchableOpacity>
+                        <Text className="text-xl font-bold text-slate-700 flex-1">
+                          Choose an account
+                        </Text>
+                      </View>
+                      <Text className="text-sm text-slate-600 mb-6">
+                        Several accounts are saved on this device. Tap the one you want to
+                        unlock with biometrics.
+                      </Text>
+
+                      <View className="mb-7">
+                        {biometricAccounts.map((account) => {
+                          const isSwitching = bioAccountSwitchingKey === account.key;
+                          const disabled = !!bioAccountSwitchingKey;
+                          return (
+                            <TouchableOpacity
+                              key={account.key}
+                              disabled={disabled}
+                              onPress={() => handleBiometricAccountRowPress(account)}
+                              className="flex-row items-center p-4 mb-4 rounded-lg border border-slate-200 bg-white"
+                              style={[styles.cardShadow, disabled && !isSwitching && { opacity: 0.5 }]}
+                              activeOpacity={0.7}
+                            >
+                              <View className="w-12 h-12 rounded-full bg-orange-400 items-center justify-center mr-4">
+                                <Text className="text-white text-base font-bold">
+                                  {account.initials}
+                                </Text>
+                              </View>
+                              <View className="flex-1">
+                                <Text className="font-semibold text-base text-slate-700">
+                                  {account.name}
+                                </Text>
+                                {!!account.email && (
+                                  <Text
+                                    className="text-slate-500 text-xs"
+                                    numberOfLines={1}
+                                  >
+                                    {account.email}
+                                  </Text>
+                                )}
+                                <View className="flex-row items-center mt-1">
+                                  <FontAwesome5 name="building" size={10} color="#94a3b8" />
+                                  <Text
+                                    className="text-slate-500 text-xs ml-1"
+                                    numberOfLines={1}
+                                  >
+                                    {account.companyName || "Company"}
+                                    {account.role ? ` • ${account.role}` : ""}
+                                  </Text>
+                                </View>
+                              </View>
+                              {isSwitching ? (
+                                <ActivityIndicator color="#f97316" size="small" />
+                              ) : (
+                                <Ionicons
+                                  name="finger-print-outline"
+                                  size={22}
+                                  color="#f97316"
+                                />
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Animated.View
+                        style={{
+                          opacity: errorAnim,
+                          transform: [{ translateX: errorShake }],
+                          marginBottom: error ? 20 : 0,
+                        }}
+                      >
+                        {error && (
+                          <View className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                            <Text className="text-red-600">{error}</Text>
+                          </View>
+                        )}
+                      </Animated.View>
+                    </View>
+                  )}
+
+                  {/* Step 2: Company Selection (multi-company) and Password */}
                   {step === 2 && (
                     <View>
                       <View className="flex-row items-center mb-7">
-                        <TouchableOpacity onPress={goBackToEmail} className="mr-4">
+                        <TouchableOpacity
+                          onPress={goBackFromPasswordStep}
+                          className="mr-4"
+                        >
                           <View className="w-10 h-10 rounded-full  items-center justify-center">
-                            <Ionicons name="arrow-back" size={18} color="#f97316" />
+                            <Ionicons
+                              name="arrow-back"
+                              size={18}
+                              color="#f97316"
+                            />
                           </View>
                         </TouchableOpacity>
-                        <Text className="text-xl font-bold text-slate-700">Select your company</Text>
+                        <Text className="text-xl font-bold text-slate-700">
+                          {users.length === 1 ? "Sign in" : "Select your company"}
+                        </Text>
                       </View>
 
+                      {passwordSourceStep === STEP_BIOMETRIC_COMPANY && (
+                        <Text className="text-sm text-slate-600 mb-4 -mt-4">
+                          Enter your password for the company you selected. Your saved
+                          session is for a different company.
+                        </Text>
+                      )}
+
+                      {users.length > 1 && (
                       <View className="mb-7">
                         {users.map((user) => (
                           <TouchableOpacity
                             key={user.companyId}
                             onPress={() => setSelectedCompanyId(user.companyId)}
                             className={`p-4 mb-4 rounded-lg border ${
-                              selectedCompanyId === user.companyId ? "border-orange-400" : "border-slate-200"
+                              selectedCompanyId === user.companyId
+                                ? "border-orange-400"
+                                : "border-slate-200"
                             } bg-white`}
-                            style={[styles.cardShadow, selectedCompanyId === user.companyId && styles.selectedCardShadow]}
+                            style={[
+                              styles.cardShadow,
+                              selectedCompanyId === user.companyId &&
+                                styles.selectedCardShadow,
+                            ]}
                             activeOpacity={0.7}
                           >
                             <View className="flex-row items-center">
                               <View
                                 className={`w-12 h-12 rounded-full ${
-                                  selectedCompanyId === user.companyId ? "bg-orange-50" : "bg-slate-100"
+                                  selectedCompanyId === user.companyId
+                                    ? "bg-orange-50"
+                                    : "bg-slate-100"
                                 } items-center justify-center mr-4`}
                               >
-                                <FontAwesome5 name="building" size={18} color={selectedCompanyId === user.companyId ? "#f97316" : "#64748b"} />
+                                <FontAwesome5
+                                  name="building"
+                                  size={18}
+                                  color={
+                                    selectedCompanyId === user.companyId
+                                      ? "#f97316"
+                                      : "#64748b"
+                                  }
+                                />
                               </View>
                               <View className="flex-1">
-                                <Text className="font-semibold text-base text-slate-700">{user.companyName}</Text>
+                                <Text className="font-semibold text-base text-slate-700">
+                                  {user.companyName}
+                                </Text>
                                 <View className="flex-row items-center mt-2">
-                                  <View className={`px-3 py-1 rounded-full ${selectedCompanyId === user.companyId ? "bg-orange-50" : "bg-slate-100"}`}>
-                                    <Text className={`text-xs ${selectedCompanyId === user.companyId ? "text-orange-800" : "text-slate-600"} font-medium`}>
+                                  <View
+                                    className={`px-3 py-1 rounded-full ${
+                                      selectedCompanyId === user.companyId
+                                        ? "bg-orange-50"
+                                        : "bg-slate-100"
+                                    }`}
+                                  >
+                                    <Text
+                                      className={`text-xs ${
+                                        selectedCompanyId === user.companyId
+                                          ? "text-orange-800"
+                                          : "text-slate-600"
+                                      } font-medium`}
+                                    >
                                       {user.role}
                                     </Text>
                                   </View>
@@ -420,18 +1320,30 @@ export default function SignIn() {
                               </View>
                               {selectedCompanyId === user.companyId && (
                                 <View className="w-8 h-8 rounded-full bg-orange-400 items-center justify-center">
-                                  <Ionicons name="checkmark" size={16} color="#fff" />
+                                  <Ionicons
+                                    name="checkmark"
+                                    size={16}
+                                    color="#fff"
+                                  />
                                 </View>
                               )}
                             </View>
                           </TouchableOpacity>
                         ))}
                       </View>
+                      )}
 
                       <View className="mb-7">
-                        <Text className="mb-3 font-medium text-slate-600">Password</Text>
+                        <Text className="mb-3 font-medium text-slate-600">
+                          Password
+                        </Text>
                         <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-4">
-                          <MaterialCommunityIcons name="lock-outline" size={20} color="#f97316" style={{ marginRight: 10 }} />
+                          <MaterialCommunityIcons
+                            name="lock-outline"
+                            size={20}
+                            color="#f97316"
+                            style={{ marginRight: 10 }}
+                          />
                           <TextInput
                             secureTextEntry={!showPassword}
                             placeholder="Enter password"
@@ -440,22 +1352,18 @@ export default function SignIn() {
                             onChangeText={setPassword}
                             placeholderTextColor="#9ca3af"
                           />
-                          <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-                            <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={20} color="#64748b" />
+                          <TouchableOpacity
+                            onPress={() => setShowPassword(!showPassword)}
+                          >
+                            <Ionicons
+                              name={
+                                showPassword ? "eye-off-outline" : "eye-outline"
+                              }
+                              size={20}
+                              color="#64748b"
+                            />
                           </TouchableOpacity>
                         </View>
-                      </View>
-
-                      {/* Remember Me switch */}
-                      <View className="flex-row items-center mb-7">
-                        <Switch
-                          value={rememberMe}
-                          onValueChange={setRememberMe}
-                          trackColor={{ false: "#d1d5db", true: "#fdba74" }}
-                          thumbColor={rememberMe ? "#f97316" : "#ffffff"}
-                          ios_backgroundColor="#d1d5db"
-                        />
-                        <Text className="ml-3 text-slate-600">Remember Me</Text>
                       </View>
 
                       {/* Error Message for Step 2 */}
@@ -474,7 +1382,9 @@ export default function SignIn() {
                       </Animated.View>
 
                       {/* Sign In Button */}
-                      <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+                      <Animated.View
+                        style={{ transform: [{ scale: buttonScale }] }}
+                      >
                         <TouchableOpacity
                           onPress={handleSignInWithPassword}
                           disabled={loading}
@@ -486,8 +1396,15 @@ export default function SignIn() {
                             <ActivityIndicator color="#fff" size="small" />
                           ) : (
                             <View className="flex-row items-center justify-center">
-                              <Ionicons name="log-in-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
-                              <Text className="text-white text-center font-semibold text-base">Sign In</Text>
+                              <Ionicons
+                                name="log-in-outline"
+                                size={20}
+                                color="#fff"
+                                style={{ marginRight: 8 }}
+                              />
+                              <Text className="text-white text-center font-semibold text-base">
+                                Sign In
+                              </Text>
                             </View>
                           )}
                         </TouchableOpacity>
@@ -505,6 +1422,40 @@ export default function SignIn() {
 }
 
 const styles = StyleSheet.create({
+  scrollContent: {
+    flexGrow: 1,
+    width: "100%",
+  },
+  screenContent: {
+    flex: 1,
+    width: "100%",
+    maxWidth: "100%",
+    alignItems: "stretch",
+  },
+  header: {
+    width: "100%",
+    maxWidth: "100%",
+  },
+  brandRow: {
+    width: "100%",
+    maxWidth: "100%",
+    flexShrink: 1,
+  },
+  brandIcon: {
+    width: 44,
+    height: 44,
+    marginRight: 8,
+    flexShrink: 0,
+  },
+  brandTitle: {
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  formContainer: {
+    width: "100%",
+    maxWidth: 400,
+    alignSelf: "center",
+  },
   buttonShadow: {
     shadowColor: "#f97316",
     shadowOffset: {

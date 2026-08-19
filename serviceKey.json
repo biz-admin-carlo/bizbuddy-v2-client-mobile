@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "625710843467",
+    "project_id": "bizsupport-b452e",
+    "storage_bucket": "bizsupport-b452e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:625710843467:android:b17860572f50f9a04e2fce",
+        "android_client_info": {
+          "package_name": "com.bizsolutions.bizbuddy"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDdfMQTegLrwzNJfV42razrGAxskS6Snz4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:625710843467:android:6f4347b1b6666f684e2fce",
+        "android_client_info": {
+          "package_name": "com.bizsolutions.bizchat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDdfMQTegLrwzNJfV42razrGAxskS6Snz4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

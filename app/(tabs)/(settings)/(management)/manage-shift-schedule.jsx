@@ -69,6 +69,7 @@ const ManageShiftSchedule = () => {
   const [effectiveEndDate, setEffectiveEndDate] = useState(new Date());
   const [showStartDatePicker, setShowStartDatePicker] = useState(false);
   const [showEndDatePicker, setShowEndDatePicker] = useState(false);
+  const [androidDatePicker, setAndroidDatePicker] = useState(null);
 
   // Assignment state – if not assigning to all, we use a dropdown for a single user (saved as assignedUserId)
   const [assignedToAll, setAssignedToAll] = useState(true);
@@ -246,6 +247,7 @@ const ManageShiftSchedule = () => {
       // Hide inline date pickers when closing the modal
       setShowStartDatePicker(false);
       setShowEndDatePicker(false);
+      setAndroidDatePicker(null);
     });
   };
 
@@ -253,6 +255,9 @@ const ManageShiftSchedule = () => {
     setSelectedDays(["MO", "TU", "WE", "TH", "FR"]);
     setEffectiveStartDate(new Date());
     setEffectiveEndDate(new Date());
+    setShowStartDatePicker(false);
+    setShowEndDatePicker(false);
+    setAndroidDatePicker(null);
     setAssignedToAll(true);
     setSelectedUserId(null);
     if (shiftItems.length > 0) {
@@ -539,22 +544,29 @@ const ManageShiftSchedule = () => {
               Effective Start Date <Text className="text-red-500">*</Text>
             </Text>
             <TouchableOpacity
-              onPress={() => setShowStartDatePicker(!showStartDatePicker)}
+              onPress={() => {
+                if (Platform.OS === "android") {
+                  setShowEndDatePicker(false);
+                  setAndroidDatePicker("start");
+                } else {
+                  setShowEndDatePicker(false);
+                  setShowStartDatePicker(!showStartDatePicker);
+                }
+              }}
               className="flex-row items-center bg-slate-50 rounded-lg px-4 py-3.5 border border-slate-100"
             >
               <Ionicons name="calendar-outline" size={18} color="#64748b" />
               <Text className="flex-1 ml-2 text-slate-700">{effectiveStartDate.toLocaleDateString()}</Text>
               <Feather name="chevron-down" size={18} color="#64748b" />
             </TouchableOpacity>
-            {showStartDatePicker && (
+            {Platform.OS === "ios" && showStartDatePicker && (
               <View className="mt-2">
                 <DateTimePicker
                   value={effectiveStartDate}
                   mode="date"
                   display="spinner"
                   textColor="#475569"
-                  onChange={(event, selectedDate) => {
-                    setShowStartDatePicker(Platform.OS === "ios" ? true : false);
+                  onChange={(_event, selectedDate) => {
                     if (selectedDate) setEffectiveStartDate(selectedDate);
                   }}
                   style={{ width: "100%" }}
@@ -565,22 +577,29 @@ const ManageShiftSchedule = () => {
           <View className="mb-4">
             <Text className="text-sm font-semibold text-slate-600 mb-2">Effective End Date (optional)</Text>
             <TouchableOpacity
-              onPress={() => setShowEndDatePicker(!showEndDatePicker)}
+              onPress={() => {
+                if (Platform.OS === "android") {
+                  setShowStartDatePicker(false);
+                  setAndroidDatePicker("end");
+                } else {
+                  setShowStartDatePicker(false);
+                  setShowEndDatePicker(!showEndDatePicker);
+                }
+              }}
               className="flex-row items-center bg-slate-50 rounded-lg px-4 py-3.5 border border-slate-100"
             >
               <Ionicons name="calendar-outline" size={18} color="#64748b" />
               <Text className="flex-1 ml-2 text-slate-700">{effectiveEndDate ? effectiveEndDate.toLocaleDateString() : "No end date"}</Text>
               <Feather name="chevron-down" size={18} color="#64748b" />
             </TouchableOpacity>
-            {showEndDatePicker && (
+            {Platform.OS === "ios" && showEndDatePicker && (
               <View className="mt-2">
                 <DateTimePicker
                   value={effectiveEndDate || new Date()}
                   mode="date"
                   textColor="#475569"
                   display="spinner"
-                  onChange={(event, selectedDate) => {
-                    setShowEndDatePicker(Platform.OS === "ios" ? true : false);
+                  onChange={(_event, selectedDate) => {
                     if (selectedDate) setEffectiveEndDate(selectedDate);
                   }}
                   style={{ width: "100%" }}
@@ -786,6 +805,25 @@ const ManageShiftSchedule = () => {
           </View>
         )}
       </Animated.View>
+
+      {Platform.OS === "android" && androidDatePicker ? (
+        <DateTimePicker
+          value={
+            androidDatePicker === "start"
+              ? effectiveStartDate
+              : effectiveEndDate || new Date()
+          }
+          mode="date"
+          display="default"
+          onChange={(event, selectedDate) => {
+            if (event?.type === "set" && selectedDate) {
+              if (androidDatePicker === "start") setEffectiveStartDate(selectedDate);
+              else setEffectiveEndDate(selectedDate);
+            }
+            setAndroidDatePicker(null);
+          }}
+        />
+      ) : null}
     </SafeAreaView>
   );
 };
