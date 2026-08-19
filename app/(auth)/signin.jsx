@@ -14,7 +14,6 @@ import {
   Image,
   StyleSheet,
   SafeAreaView,
-  Dimensions,
   Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
@@ -49,7 +48,6 @@ import {
   FontAwesome5,
 } from "@expo/vector-icons";
 
-const { width } = Dimensions.get("window");
 const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 /** After device biometric: pick company when user has multiple companies. */
 const STEP_BIOMETRIC_COMPANY = 3;
@@ -687,20 +685,26 @@ export default function SignIn() {
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
             <ScrollView
-              contentContainerStyle={{ flexGrow: 1 }}
+              style={{ flex: 1 }}
+              contentContainerStyle={styles.scrollContent}
               keyboardShouldPersistTaps="handled"
             >
-              <View className="flex-1 justify-center items-center px-5 py-20">
+              <View style={styles.screenContent} className="justify-center px-5 py-20">
                 {/* Logo/Header - Always visible */}
-                <View className="items-center mb-6">
-                  <View className="flex-row justify-center items-center">
+                <View style={styles.header} className="items-center mb-6">
+                  <View style={styles.brandRow} className="flex-row justify-center items-center">
                     <Image
                       source={require("../../assets/images/icon.png")}
-                      style={{ width: 50, height: 50 }}
+                      style={styles.brandIcon}
                       resizeMode="contain"
-                      className=" mb-4"
                     />
-                    <Text className="text-6xl text-orange-400 font-extrabold">
+                    <Text
+                      className="text-4xl text-orange-400 font-extrabold"
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.7}
+                      style={styles.brandTitle}
+                    >
                       BizBuddy
                     </Text>
                   </View>
@@ -710,6 +714,7 @@ export default function SignIn() {
                     style={{
                       opacity: descriptionOpacity,
                       alignItems: "center",
+                      width: "100%",
                     }}
                   >
                     <Text className="text-xs mt-2 text-slate-600">
@@ -723,12 +728,13 @@ export default function SignIn() {
 
                 {/* Main Form Container */}
                 <Animated.View
-                  style={{
-                    opacity: formAnim,
-                    transform: [{ translateY: formSlideAnim }],
-                    width: "100%",
-                    maxWidth: 400,
-                  }}
+                  style={[
+                    styles.formContainer,
+                    {
+                      opacity: formAnim,
+                      transform: [{ translateY: formSlideAnim }],
+                    },
+                  ]}
                   className="p-2"
                 >
                   {/* Step 1: Email Input */}
@@ -1174,6 +1180,40 @@ export default function SignIn() {
 }
 
 const styles = StyleSheet.create({
+  scrollContent: {
+    flexGrow: 1,
+    width: "100%",
+  },
+  screenContent: {
+    flex: 1,
+    width: "100%",
+    maxWidth: "100%",
+    alignItems: "stretch",
+  },
+  header: {
+    width: "100%",
+    maxWidth: "100%",
+  },
+  brandRow: {
+    width: "100%",
+    maxWidth: "100%",
+    flexShrink: 1,
+  },
+  brandIcon: {
+    width: 44,
+    height: 44,
+    marginRight: 8,
+    flexShrink: 0,
+  },
+  brandTitle: {
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  formContainer: {
+    width: "100%",
+    maxWidth: 400,
+    alignSelf: "center",
+  },
   buttonShadow: {
     shadowColor: "#f97316",
     shadowOffset: {

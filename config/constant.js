@@ -22,7 +22,7 @@ export const CONTEST_POLICY_SUBMIT_PATH = "/api/contest-policy/submit";
 /** GET — list current user's time log contests (if enabled on API). */
 export const CONTEST_POLICY_MY_REQUESTS_PATH = "/api/contest-policy/my-requests";
 
-export const VERSION = "1.0.24";
+export const VERSION = "1.0.25";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).
@@ -45,6 +45,32 @@ export const TIME_IN_PUNCH_TYPE_OPTIONS = [
   { value: "DRIVER_AIDE_AM", label: "Driver / Aide (AM)" },
   { value: "DRIVER_AIDE_PM", label: "Driver / Aide (PM)" },
   { value: "TRAINING", label: "Training" },
+];
+
+/**
+ * Reason options for Request punch log (matches web PunchLogs request dialog).
+ * Values are snake_case strings stored in RequestedTimeLog.reason (no server enum).
+ */
+export const REQUEST_PUNCH_LOG_REASON_OPTIONS = [
+  { value: "forgot_to_clock", label: "Forgot To Clock" },
+  { value: "system_malfunction", label: "System Malfunction" },
+  { value: "network_issues", label: "Network Issues" },
+  { value: "emergency", label: "Emergency" },
+  { value: "remote_work", label: "Remote Work" },
+  { value: "power_outage", label: "Power Outage" },
+  { value: "meeting_offsite", label: "Meeting Offsite" },
+  { value: "other", label: "Other" },
+];
+
+/**
+ * Shift type options for Request punch log UI (DayCare companies only).
+ * Maps to server PunchType enum values; current request API ignores this field.
+ */
+export const REQUEST_PUNCH_LOG_SHIFT_TYPE_OPTIONS = [
+  { value: "REGULAR", label: "Regular" },
+  { value: "DRIVER_AIDE", label: "Full Day (AM + Regular + PM)" },
+  { value: "DRIVER_AIDE_AM", label: "AM only" },
+  { value: "DRIVER_AIDE_PM", label: "PM only" },
 ];
 
 // Job titles that always clock out with punchType DRIVER_AIDE (no deviation modal).

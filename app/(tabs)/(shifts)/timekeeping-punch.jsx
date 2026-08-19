@@ -45,6 +45,8 @@ import {
   TIME_IN_PUNCH_TYPE_OPTIONS,
   DRIVER_AIDE_JOB_TITLES,
   REQUEST_PUNCH_LOG_SUBMIT_PATH,
+  REQUEST_PUNCH_LOG_REASON_OPTIONS,
+  REQUEST_PUNCH_LOG_SHIFT_TYPE_OPTIONS,
 } from "../../../config/constant";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -73,6 +75,17 @@ const devLog = (...args) => {
   if (__DEV__) {
     console.log("[BizBuddy Punch]", ...args);
   }
+};
+
+/** DayCare companies use DRIVER_AIDE punch types (same allowlist as clock deviation modals). */
+const isDayCareCompanyId = (companyId) => {
+  if (!companyId) return false;
+  const allowed = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
+    ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(
+        Boolean,
+      )
+    : [];
+  return allowed.includes(String(companyId).trim());
 };
 
 /**
@@ -311,6 +324,7 @@ export default function TimekeepingPunch() {
   const [locationEnabled, setLocationEnabled] = useState(false);
   const [wifiConnected, setWifiConnected] = useState(false);
   const [subscriptionPlan, setSubscriptionPlan] = useState(null);
+  const [isDayCareCompany, setIsDayCareCompany] = useState(false);
   const [pendingOfflinePunches, setPendingOfflinePunches] = useState([]);
 
   // Whether the user is location restricted
@@ -377,10 +391,19 @@ export default function TimekeepingPunch() {
   const [plApproverOpen, setPlApproverOpen] = useState(false);
   const [plApproverItems, setPlApproverItems] = useState([]);
   const [plApproverValue, setPlApproverValue] = useState("");
-  const [plReason, setPlReason] = useState("");
+  const [plShiftTypeOpen, setPlShiftTypeOpen] = useState(false);
+  const [plShiftTypeValue, setPlShiftTypeValue] = useState(null);
+  const [plReasonOpen, setPlReasonOpen] = useState(false);
+  const [plReason, setPlReason] = useState(null);
   const [plDescription, setPlDescription] = useState("");
   const [plSubmitting, setPlSubmitting] = useState(false);
   const [plApproversLoading, setPlApproversLoading] = useState(false);
+
+  const closePlDropdowns = () => {
+    setPlApproverOpen(false);
+    setPlShiftTypeOpen(false);
+    setPlReasonOpen(false);
+  };
   const [plReqDateModalVisible, setPlReqDateModalVisible] = useState(false);
   const [plTimeModalVisible, setPlTimeModalVisible] = useState(false);
   /** "in" | "out" — clock times use calendar day of requested date (out may roll to next day if earlier than in). */
@@ -705,7 +728,7 @@ export default function TimekeepingPunch() {
     }
   }, []);
 
-  // Fetch subscription plan
+  // Fetch subscription plan (+ DayCare company flag for request punch UI)
   const fetchSubscription = async () => {
     try {
       const token = await SecureStore.getItemAsync("token");
@@ -713,8 +736,15 @@ export default function TimekeepingPunch() {
       const res = await axios.get(`${API_BASE_URL}/api/account/profile`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.status === 200 && res.data?.data?.subscription?.plan) {
-        setSubscriptionPlan(res.data.data.subscription.plan.name);
+      if (res.status === 200 && res.data?.data) {
+        const data = res.data.data;
+        if (data?.subscription?.plan) {
+          setSubscriptionPlan(data.subscription.plan.name);
+        }
+        const company = data?.company || data?.profile?.company || null;
+        const companyId =
+          company?.id || company?._id || company?.companyId || null;
+        setIsDayCareCompany(isDayCareCompanyId(companyId));
       }
     } catch {}
   };
@@ -1598,14 +1628,16 @@ export default function TimekeepingPunch() {
     setPlReqDate(cloneJsDate(defaults.reqDate));
     setPlClockInTime(cloneJsDate(defaults.clockIn));
     setPlClockOutTime(cloneJsDate(defaults.clockOut));
-    setPlReason("");
+    setPlShiftTypeValue(null);
+    setPlReason(null);
     setPlDescription("");
     setPlApproverValue("");
     setPlClockOutCrossesNextDay(false);
     setPlReqDateModalVisible(false);
     dismissPlTimePickerSheet();
-    setPlApproverOpen(false);
+    closePlDropdowns();
     setPunchLogRequestModalVisible(true);
+    fetchSubscription();
     fetchPlApprovers();
   };
 
@@ -1613,18 +1645,36 @@ export default function TimekeepingPunch() {
     Keyboard.dismiss();
     setPlReqDateModalVisible(false);
     dismissPlTimePickerSheet();
-    setPlApproverOpen(false);
+    closePlDropdowns();
     setPunchLogRequestModalVisible(false);
   };
 
   const submitPunchLogRequest = async () => {
     const nowMs = Date.now();
 
+    const trimmedShiftType = String(plShiftTypeValue ?? "").trim();
+    if (isDayCareCompany && !trimmedShiftType) {
+      Alert.alert(
+        "Choose a shift type",
+        "Select the shift type that applies to this punch log request.",
+      );
+      return;
+    }
+
     const trimmedApprover = String(plApproverValue ?? "").trim();
     if (!trimmedApprover) {
       Alert.alert(
         "Choose an approver",
         "Pick someone from the Approver list—they need to approve this punch log.",
+      );
+      return;
+    }
+
+    const reasonTrim = String(plReason ?? "").trim();
+    if (!reasonTrim) {
+      Alert.alert(
+        "Choose a reason",
+        "Select a reason for this punch log request.",
       );
       return;
     }
@@ -1704,7 +1754,6 @@ export default function TimekeepingPunch() {
     const estimatedNetHours =
       Math.round((estimatedDuration / 60) * 1000) / 1000;
 
-    const reasonTrim = plReason.trim();
     const descriptionTrim = plDescription.trim();
     const payload = {
       requestedDate,
@@ -1715,6 +1764,10 @@ export default function TimekeepingPunch() {
       description: descriptionTrim,
       estimatedDuration,
       estimatedNetHours,
+      // DayCare only; current request API ignores this field.
+      ...(isDayCareCompany && trimmedShiftType
+        ? { punchType: trimmedShiftType }
+        : {}),
     };
 
     const submitUrl = `${API_BASE_URL}${REQUEST_PUNCH_LOG_SUBMIT_PATH}`;
@@ -3652,7 +3705,12 @@ export default function TimekeepingPunch() {
                     keyboardShouldPersistTaps="handled"
                     nestedScrollEnabled
                     scrollEnabled={
-                      !(plReqDateModalVisible || plTimeModalVisible)
+                      !(
+                        plReqDateModalVisible ||
+                        plTimeModalVisible ||
+                        plApproverOpen ||
+                        plShiftTypeOpen
+                      )
                     }
                     contentContainerStyle={{
                       paddingHorizontal: 16,
@@ -3674,7 +3732,7 @@ export default function TimekeepingPunch() {
                       className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
                       onPress={() => {
                         dismissPlTimePickerSheet();
-                        setPlApproverOpen(false);
+                        closePlDropdowns();
                         if (Platform.OS === "android") {
                           openPlAndroidDateTimePicker("date");
                         } else {
@@ -3692,12 +3750,63 @@ export default function TimekeepingPunch() {
                       />
                     </TouchableOpacity>
 
+                    {isDayCareCompany ? (
+                      <View className="mb-4" style={{ zIndex: 9000 }}>
+                        <Text className="text-base font-semibold text-slate-800 mb-2">
+                          Shift type <Text className="text-red-500">*</Text>
+                        </Text>
+                        <DropDownPicker
+                          open={plShiftTypeOpen}
+                          value={plShiftTypeValue}
+                          items={REQUEST_PUNCH_LOG_SHIFT_TYPE_OPTIONS}
+                          setOpen={(open) => {
+                            const next =
+                              typeof open === "function"
+                                ? open(plShiftTypeOpen)
+                                : open;
+                            setPlShiftTypeOpen(next);
+                            if (next) {
+                              setPlApproverOpen(false);
+                              setPlReasonOpen(false);
+                              setPlReqDateModalVisible(false);
+                              dismissPlTimePickerSheet();
+                              Keyboard.dismiss();
+                            }
+                          }}
+                          setValue={setPlShiftTypeValue}
+                          setItems={() => {}}
+                          placeholder="Select shift type"
+                          textStyle={{ color: "#374151" }}
+                          style={{
+                            borderColor: "#F1F5F9",
+                            backgroundColor: "#F8FAFC",
+                            minHeight: 50,
+                          }}
+                          dropDownContainerStyle={{
+                            borderColor: "#F1F5F9",
+                            backgroundColor: "#F9FAFB",
+                            maxHeight: 220,
+                          }}
+                          placeholderStyle={{ color: "#9CA3AF" }}
+                          zIndex={9000}
+                          zIndexInverse={5000}
+                          listMode="SCROLLVIEW"
+                          nestedScrollEnabled
+                          scrollViewProps={{ nestedScrollEnabled: true }}
+                          autoScroll={false}
+                        />
+                      </View>
+                    ) : null}
+
                     <Text className="text-base font-semibold text-slate-800 mb-2">
                       Requested clock-in <Text className="text-red-500">*</Text>
                     </Text>
                     <TouchableOpacity
                       className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
-                      onPress={() => openPlRequestTimePicker("in")}
+                      onPress={() => {
+                        closePlDropdowns();
+                        openPlRequestTimePicker("in");
+                      }}
                     >
                       <Text className="text-slate-800">
                         {plClockInTime.toLocaleTimeString([], {
@@ -3714,7 +3823,10 @@ export default function TimekeepingPunch() {
                     </Text>
                     <TouchableOpacity
                       className="py-3 px-4 bg-slate-50 rounded-lg mb-4 flex-row justify-between items-center"
-                      onPress={() => openPlRequestTimePicker("out")}
+                      onPress={() => {
+                        closePlDropdowns();
+                        openPlRequestTimePicker("out");
+                      }}
                     >
                       <Text className="text-slate-800">
                         {plClockOutTime.toLocaleTimeString([], {
@@ -3727,9 +3839,10 @@ export default function TimekeepingPunch() {
 
                     <TouchableOpacity
                       className="flex-row items-center mb-4 py-1"
-                      onPress={() =>
-                        setPlClockOutCrossesNextDay((prev) => !prev)
-                      }
+                      onPress={() => {
+                        closePlDropdowns();
+                        setPlClockOutCrossesNextDay((prev) => !prev);
+                      }}
                       activeOpacity={0.7}
                       accessibilityRole="checkbox"
                       accessibilityState={{
@@ -3777,8 +3890,14 @@ export default function TimekeepingPunch() {
                           value={plApproverValue}
                           items={plApproverItems}
                           setOpen={(open) => {
-                            setPlApproverOpen(open);
-                            if (open) {
+                            const next =
+                              typeof open === "function"
+                                ? open(plApproverOpen)
+                                : open;
+                            setPlApproverOpen(next);
+                            if (next) {
+                              setPlShiftTypeOpen(false);
+                              setPlReasonOpen(false);
                               setPlReqDateModalVisible(false);
                               dismissPlTimePickerSheet();
                               Keyboard.dismiss();
@@ -3809,20 +3928,88 @@ export default function TimekeepingPunch() {
                       )}
                     </View>
 
-                    <View style={{ zIndex: 1 }}>
+                    <View className="mb-4">
                       <Text className="text-base font-semibold text-slate-800 mb-2">
-                        Reason (optional)
+                        Reason <Text className="text-red-500">*</Text>
                       </Text>
-                      <TextInput
-                        className="border border-slate-200 rounded-lg px-3 py-3 text-slate-800 mb-4 bg-white"
-                        placeholder="e.g. Forgot to clock in"
-                        placeholderTextColor="#94a3b8"
-                        multiline
-                        value={plReason}
-                        onChangeText={setPlReason}
-                        style={{ minHeight: 72, textAlignVertical: "top" }}
-                      />
+                      <TouchableOpacity
+                        className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center border border-slate-100"
+                        activeOpacity={0.75}
+                        onPress={() => {
+                          const next = !plReasonOpen;
+                          setPlReasonOpen(next);
+                          if (next) {
+                            setPlApproverOpen(false);
+                            setPlShiftTypeOpen(false);
+                            setPlReqDateModalVisible(false);
+                            dismissPlTimePickerSheet();
+                            Keyboard.dismiss();
+                          }
+                        }}
+                      >
+                        <Text
+                          className={
+                            plReason ? "text-slate-800" : "text-slate-400"
+                          }
+                        >
+                          {REQUEST_PUNCH_LOG_REASON_OPTIONS.find(
+                            (o) => o.value === plReason,
+                          )?.label || "Select a reason"}
+                        </Text>
+                        <Ionicons
+                          name={plReasonOpen ? "chevron-up" : "chevron-down"}
+                          size={18}
+                          color="#6B7280"
+                        />
+                      </TouchableOpacity>
+                      {plReasonOpen ? (
+                        <View className="mt-1 rounded-lg border border-slate-100 bg-slate-50 overflow-hidden">
+                          {REQUEST_PUNCH_LOG_REASON_OPTIONS.map((option, idx) => {
+                            const selected = plReason === option.value;
+                            return (
+                              <TouchableOpacity
+                                key={option.value}
+                                className={`px-4 py-3 flex-row items-center justify-between ${
+                                  selected ? "bg-orange-50" : "bg-slate-50"
+                                }`}
+                                style={
+                                  idx > 0
+                                    ? {
+                                        borderTopWidth: 1,
+                                        borderTopColor: "#F1F5F9",
+                                      }
+                                    : undefined
+                                }
+                                activeOpacity={0.7}
+                                onPress={() => {
+                                  setPlReason(option.value);
+                                  setPlReasonOpen(false);
+                                }}
+                              >
+                                <Text
+                                  className={`text-base ${
+                                    selected
+                                      ? "text-orange-600 font-semibold"
+                                      : "text-slate-800"
+                                  }`}
+                                >
+                                  {option.label}
+                                </Text>
+                                {selected ? (
+                                  <Ionicons
+                                    name="checkmark"
+                                    size={18}
+                                    color="#ea580c"
+                                  />
+                                ) : null}
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
 
+                    <View>
                       <Text className="text-base font-semibold text-slate-800 mb-2">
                         Description (optional)
                       </Text>
@@ -3832,7 +4019,11 @@ export default function TimekeepingPunch() {
                         placeholderTextColor="#94a3b8"
                         multiline
                         value={plDescription}
-                        onChangeText={setPlDescription}
+                        onChangeText={(text) => {
+                          closePlDropdowns();
+                          setPlDescription(text);
+                        }}
+                        onFocus={closePlDropdowns}
                         style={{ minHeight: 80, textAlignVertical: "top" }}
                       />
 
