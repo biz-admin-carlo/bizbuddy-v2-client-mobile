@@ -26,6 +26,7 @@ import { useRouter } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../config/constant";
+import { parseApproversPayload } from "../../../utils/approversPayload";
 
 const { height } = Dimensions.get("window");
 
@@ -233,17 +234,9 @@ const SubmitOvertime = () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
+      console.log("[OT Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data.data) {
-        const formattedApprovers = data.data.map((approver) => {
-          const firstName = approver.profile?.firstName || "";
-          const lastName = approver.profile?.lastName || "";
-          const fullName = `${firstName} ${lastName}`.trim();
-          return {
-            label: fullName || approver.username,
-            value: String(approver.id),
-          };
-        });
-        setApproverItems(formattedApprovers);
+        setApproverItems(parseApproversPayload(data));
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch approvers.");
       }

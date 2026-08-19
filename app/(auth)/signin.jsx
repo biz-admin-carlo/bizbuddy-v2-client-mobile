@@ -16,7 +16,7 @@ import {
   SafeAreaView,
   Alert,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import useAuthStore, {
   getTokenUserId,
   getTokenVersion,
@@ -31,8 +31,10 @@ import {
   resolveSessionTokenForCompanyId,
   syncLegacyTokenIntoPerCompanyStore,
 } from "../../utils/authTokenStorage";
+import { getVaultedAccountRows } from "../../utils/vaultedAccounts";
 import { API_BASE_URL, VERSION } from "../../config/constant";
 import { getInstallationId } from "../../utils/deviceId";
+import { cacheCompaniesForEmail } from "../../utils/emailCompanyDirectory";
 import {
   AUTH_ERROR_CODES,
   getLoginErrorMessage,
@@ -51,6 +53,9 @@ import {
 const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 /** After device biometric: pick company when user has multiple companies. */
 const STEP_BIOMETRIC_COMPANY = 3;
+/** Before device biometric: pick which saved account when several different
+ * users are vaulted on this device and there's no "last signed in" hint. */
+const STEP_BIOMETRIC_ACCOUNT_PICKER = 4;
 
 async function fetchAccountEmailForToken(token) {
   if (!token) return null;
@@ -88,6 +93,15 @@ function normalizeCompaniesFromEmailResponse(json) {
 export default function SignIn() {
   const router = useRouter();
   const { login, forceLogout } = useAuthStore();
+  const {
+    mode,
+    email: switchEmailParam,
+    companyId: switchCompanyIdParam,
+  } = useLocalSearchParams();
+  /** Opened from the account switcher to add a brand new account (keeps other saved accounts). */
+  const isAddMode = mode === "add";
+  /** Opened from the account switcher because a saved session went stale — needs a password re-entry. */
+  const isSwitchMode = mode === "switch";
 
   const [step, setStep] = useState(1);
   const [email, setEmail] = useState("");
@@ -106,6 +120,9 @@ export default function SignIn() {
   const [bioCompanyLoading, setBioCompanyLoading] = useState(false);
   /** When user reached password (step 2) from post-biometric company pick (step 3). */
   const [passwordSourceStep, setPasswordSourceStep] = useState(null);
+  // For the ambiguous multi-account biometric picker (step 4)
+  const [biometricAccounts, setBiometricAccounts] = useState([]);
+  const [bioAccountSwitchingKey, setBioAccountSwitchingKey] = useState(null);
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -291,9 +308,14 @@ export default function SignIn() {
     const lastUserId = await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY);
 
     if (vaultUserIds.length > 1 && !lastUserId) {
-      setError(
-        "Multiple accounts are saved on this device. Sign in with your email first."
-      );
+      const rows = await getVaultedAccountRows();
+      if (rows.length === 0) {
+        setError("No saved credentials. Please sign in using email first.");
+        return;
+      }
+      setError(null);
+      setBiometricAccounts(rows);
+      setStep(STEP_BIOMETRIC_ACCOUNT_PICKER);
       return;
     }
 
@@ -352,6 +374,7 @@ export default function SignIn() {
           router.replace("(tabs)/profile");
           return;
         }
+        cacheCompaniesForEmail(emailForLookup, companies);
 
         if (companies.length === 1) {
           const onlyCompanyId = String(companies[0].companyId);
@@ -462,6 +485,48 @@ export default function SignIn() {
     }
   };
 
+  /**
+   * Ambiguous-device biometric flow: user picked which saved account to unlock,
+   * so run the device biometric prompt scoped to that specific account's token.
+   */
+  const handleBiometricAccountRowPress = async (account) => {
+    if (bioAccountSwitchingKey) return;
+    setError(null);
+    setBioAccountSwitchingKey(account.key);
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Sign in to BizBuddy",
+        fallbackLabel: "Enter Passcode",
+        disableDeviceFallback: false,
+      });
+
+      if (!result.success) {
+        setError("Biometric authentication failed. Please try again.");
+        return;
+      }
+
+      if (!(await ensureSavedSessionStillValid(account.token))) {
+        setBiometricAccounts((prev) => {
+          const next = prev.filter((a) => a.key !== account.key);
+          if (next.length === 0) {
+            setStep(1);
+          }
+          return next;
+        });
+        return;
+      }
+
+      await persistSignInContext(account.token, account.email, account.companyId);
+      await login(account.token, true, account.companyId);
+      router.replace("(tabs)/profile");
+    } catch (e) {
+      console.error("Biometric account picker sign-in error:", e);
+      setError("Could not complete sign-in. Please try again.");
+    } finally {
+      setBioAccountSwitchingKey(null);
+    }
+  };
+
   const handleEmailSubmit = async () => {
     if (!email || !email.includes("@")) {
       setError("Please enter a valid email address");
@@ -491,6 +556,7 @@ export default function SignIn() {
         setLoading(false);
         return;
       }
+      cacheCompaniesForEmail(email, list);
       setUsers(list);
       if (list.length === 1) {
         setSelectedCompanyId(list[0].companyId);
@@ -665,6 +731,21 @@ export default function SignIn() {
     setUsers([]);
   };
 
+  const goBackFromBiometricAccountPicker = () => {
+    setStep(1);
+    setBiometricAccounts([]);
+    setError(null);
+  };
+
+  /** Close the add-account / switch-account overlay and return to whatever screen opened it. */
+  const closeAuthOverlay = () => {
+    if (router.canGoBack && router.canGoBack()) {
+      router.back();
+      return;
+    }
+    goBackToEmail();
+  };
+
   const goBackFromPasswordStep = () => {
     if (passwordSourceStep === STEP_BIOMETRIC_COMPANY) {
       setPasswordSourceStep(null);
@@ -673,8 +754,59 @@ export default function SignIn() {
       setStep(STEP_BIOMETRIC_COMPANY);
       return;
     }
+    if (isSwitchMode) {
+      closeAuthOverlay();
+      return;
+    }
     goBackToEmail();
   };
+
+  // Switch-account mode: a saved session was rejected by the server, so jump
+  // straight to the password step for that email/company instead of step 1.
+  useEffect(() => {
+    if (mode !== "switch" || !switchEmailParam) return;
+    const targetEmail = String(switchEmailParam).trim().toLowerCase();
+    setEmail(targetEmail);
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(
+          `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+            targetEmail
+          )}`
+        );
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.message || "Email not found.");
+          return;
+        }
+        const list = normalizeCompaniesFromEmailResponse(data);
+        if (list.length === 0) {
+          setError("No companies found for this email.");
+          return;
+        }
+        cacheCompaniesForEmail(targetEmail, list);
+        setUsers(list);
+        const match = switchCompanyIdParam
+          ? list.find(
+              (u) => String(u.companyId) === String(switchCompanyIdParam)
+            )
+          : null;
+        setSelectedCompanyId(match ? match.companyId : list[0].companyId);
+        setPassword("");
+        setStep(2);
+        setError("Enter your password to sign in to this account.");
+      } catch (err) {
+        console.error("Switch mode prefill error:", err);
+        setError("Network error, please try again.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // Only run once on mount for the switch-mode deep link.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <SafeAreaView style={{ flex: 1 }} className="bg-white">
@@ -740,6 +872,20 @@ export default function SignIn() {
                   {/* Step 1: Email Input */}
                   {step === 1 && (
                     <View>
+                      {!!mode && (
+                        <View className="flex-row items-center justify-between mb-6">
+                          <Text className="text-xl font-bold text-slate-700">
+                            {isAddMode ? "Add another account" : "Sign in"}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={closeAuthOverlay}
+                            className="p-1"
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          >
+                            <Ionicons name="close" size={24} color="#64748b" />
+                          </TouchableOpacity>
+                        </View>
+                      )}
                       <View className="mb-7">
                         <Text className="mb-3 font-medium text-slate-600">
                           Email
@@ -806,8 +952,8 @@ export default function SignIn() {
                         </TouchableOpacity>
                       </Animated.View>
 
-                      {/* Biometric button */}
-                      {biometricAvailable && biometricEnabled && (
+                      {/* Biometric button (hidden when adding a second account — it targets the currently active user) */}
+                      {biometricAvailable && biometricEnabled && !isAddMode && (
                         <Animated.View
                           style={{
                             transform: [{ scale: buttonScale }],
@@ -984,6 +1130,102 @@ export default function SignIn() {
                             </View>
                           )}
                         </TouchableOpacity>
+                      </Animated.View>
+                    </View>
+                  )}
+
+                  {/* Step 4: Multiple different accounts saved — pick which one to unlock with biometrics */}
+                  {step === STEP_BIOMETRIC_ACCOUNT_PICKER && (
+                    <View>
+                      <View className="flex-row items-center mb-4">
+                        <TouchableOpacity
+                          onPress={goBackFromBiometricAccountPicker}
+                          className="mr-4"
+                        >
+                          <View className="w-10 h-10 rounded-full items-center justify-center">
+                            <Ionicons
+                              name="arrow-back"
+                              size={18}
+                              color="#f97316"
+                            />
+                          </View>
+                        </TouchableOpacity>
+                        <Text className="text-xl font-bold text-slate-700 flex-1">
+                          Choose an account
+                        </Text>
+                      </View>
+                      <Text className="text-sm text-slate-600 mb-6">
+                        Several accounts are saved on this device. Tap the one you want to
+                        unlock with biometrics.
+                      </Text>
+
+                      <View className="mb-7">
+                        {biometricAccounts.map((account) => {
+                          const isSwitching = bioAccountSwitchingKey === account.key;
+                          const disabled = !!bioAccountSwitchingKey;
+                          return (
+                            <TouchableOpacity
+                              key={account.key}
+                              disabled={disabled}
+                              onPress={() => handleBiometricAccountRowPress(account)}
+                              className="flex-row items-center p-4 mb-4 rounded-lg border border-slate-200 bg-white"
+                              style={[styles.cardShadow, disabled && !isSwitching && { opacity: 0.5 }]}
+                              activeOpacity={0.7}
+                            >
+                              <View className="w-12 h-12 rounded-full bg-orange-400 items-center justify-center mr-4">
+                                <Text className="text-white text-base font-bold">
+                                  {account.initials}
+                                </Text>
+                              </View>
+                              <View className="flex-1">
+                                <Text className="font-semibold text-base text-slate-700">
+                                  {account.name}
+                                </Text>
+                                {!!account.email && (
+                                  <Text
+                                    className="text-slate-500 text-xs"
+                                    numberOfLines={1}
+                                  >
+                                    {account.email}
+                                  </Text>
+                                )}
+                                <View className="flex-row items-center mt-1">
+                                  <FontAwesome5 name="building" size={10} color="#94a3b8" />
+                                  <Text
+                                    className="text-slate-500 text-xs ml-1"
+                                    numberOfLines={1}
+                                  >
+                                    {account.companyName || "Company"}
+                                    {account.role ? ` • ${account.role}` : ""}
+                                  </Text>
+                                </View>
+                              </View>
+                              {isSwitching ? (
+                                <ActivityIndicator color="#f97316" size="small" />
+                              ) : (
+                                <Ionicons
+                                  name="finger-print-outline"
+                                  size={22}
+                                  color="#f97316"
+                                />
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Animated.View
+                        style={{
+                          opacity: errorAnim,
+                          transform: [{ translateX: errorShake }],
+                          marginBottom: error ? 20 : 0,
+                        }}
+                      >
+                        {error && (
+                          <View className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                            <Text className="text-red-600">{error}</Text>
+                          </View>
+                        )}
                       </Animated.View>
                     </View>
                   )}

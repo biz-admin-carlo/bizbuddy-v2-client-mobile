@@ -13,6 +13,7 @@ import {
   persistCompanySessionToken,
   pruneOlderSessionsForUser,
 } from "../utils/authTokenStorage";
+import { clearKnownEmailCompanies } from "../utils/emailCompanyDirectory";
 
 export {
   getJwtPayload,
@@ -113,6 +114,7 @@ const useAuthStore = create((set) => ({
     await SecureStore.deleteItemAsync("token");
     await clearSignInContextKeys();
     await clearAllCompanySessionTokens();
+    await clearKnownEmailCompanies();
   },
   loadToken: async () => {
     const token = await SecureStore.getItemAsync("token");

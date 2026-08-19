@@ -30,6 +30,7 @@ import {
 } from "../../../config/constant";
 import { formatLocalTimeHm } from "../../../utils/dateOnlyUtils";
 import { buildShiftWindowFromUserShift } from "../../../utils/timekeepingShiftUtils";
+import { parseApproversPayload } from "../../../utils/approversPayload";
 
 const { height } = Dimensions.get("window");
 
@@ -427,17 +428,9 @@ const SubmitLeaves = () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
+      console.log("[Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data.data) {
-        const formattedApprovers = data.data.map((approver) => {
-          const firstName = approver.profile?.firstName || "";
-          const lastName = approver.profile?.lastName || "";
-          const fullName = `${firstName} ${lastName}`.trim();
-          return {
-            label: fullName || approver.username,
-            value: String(approver.id),
-          };
-        });
-        setApproverItems(formattedApprovers);
+        setApproverItems(parseApproversPayload(data));
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch approvers.");
       }

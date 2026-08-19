@@ -35,6 +35,10 @@ import { NotificationService } from "../../utils/notificationService";
 import NotificationPermissionModal from "../../components/NotificationPermissionModal";
 import { useNotificationPermission } from "../../hooks/useNotificationPermission";
 import { useNotifications } from "../../hooks/useNotifications";
+import { getTokenCompanyId, getTokenUserId } from "../../utils/jwtTokenUtils";
+import { upsertAccountDirectoryEntry } from "../../utils/accountDirectory";
+import AccountSwitcherSheet from "../../components/AccountSwitcherSheet";
+import useTutorialStore from "../../store/tutorialStore";
 
 const { height } = Dimensions.get("window");
 
@@ -79,6 +83,8 @@ const Profile = () => {
   const router = useRouter();
   const { showModal, closeModal, openModal } = useNotificationPermission();
   const { unreadCount } = useNotifications();
+  const tutorialSeen = useTutorialStore((s) => s.seen);
+  const tutorialVisible = useTutorialStore((s) => s.visible);
 
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState(null);
@@ -87,6 +93,7 @@ const Profile = () => {
   const [isEditModalVisible, setIsEditModalVisible] = useState(false);
   const [isPassModalVisible, setIsPassModalVisible] = useState(false);
   const [isSignOutModalVisible, setIsSignOutModalVisible] = useState(false);
+  const [isAccountSwitcherVisible, setIsAccountSwitcherVisible] = useState(false);
 
   // Form fields
   const [username, setUsername] = useState("");
@@ -215,6 +222,13 @@ const Profile = () => {
 
   // Show notification modal when profile loads (after login)
   useEffect(() => {
+    if (!token) return;
+    // Never show the notification-permission Modal while the first-run tutorial
+    // Modal hasn't been dismissed yet — two simultaneous RN <Modal>s make the
+    // whole screen untouchable. `seen` is null until hydrated and false until the
+    // user skips/completes the tour, so this naturally waits out that window too.
+    if (tutorialSeen !== true || tutorialVisible) return;
+
     const showNotificationModal = async () => {
       try {
         console.log(
@@ -252,7 +266,7 @@ const Profile = () => {
     // Small delay to ensure profile is loaded
     const timerId = setTimeout(showNotificationModal, 1000);
     return () => clearTimeout(timerId);
-  }, [token]);
+  }, [token, tutorialSeen, tutorialVisible]);
 
   const openEditModal = () => {
     // Prefill data
@@ -408,6 +422,19 @@ const Profile = () => {
       const data = await response.json();
       if (response.ok && data.data?.user && data.data?.profile) {
         setProfile(data.data);
+        const userId = getTokenUserId(currentToken);
+        const companyId = getTokenCompanyId(currentToken);
+        if (userId && companyId) {
+          upsertAccountDirectoryEntry({
+            userId,
+            companyId,
+            email: data.data.user?.email,
+            firstName: data.data.profile?.firstName,
+            lastName: data.data.profile?.lastName,
+            companyName: data.data.company?.name,
+            role: data.data.user?.role,
+          });
+        }
       } else if (response.ok) {
         setProfile(null);
         Alert.alert(
@@ -670,11 +697,29 @@ const Profile = () => {
                   }}
                 >
                   <View className="flex-row items-center mb-1">
-                    <View className="w-[70px] h-[70px] rounded-full bg-orange-400 items-center justify-center mr-4">
-                      <Text className="text-white text-2xl font-bold">
-                        {getInitials()}
-                      </Text>
-                    </View>
+                    <TouchableOpacity
+                      onPress={() => setIsAccountSwitcherVisible(true)}
+                      activeOpacity={0.8}
+                      className="mr-4"
+                    >
+                      <View className="w-[70px] h-[70px] rounded-full bg-orange-400 items-center justify-center">
+                        <Text className="text-white text-2xl font-bold">
+                          {getInitials()}
+                        </Text>
+                      </View>
+                      <View
+                        className="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-white items-center justify-center border border-slate-200"
+                        style={{
+                          shadowColor: "#000",
+                          shadowOffset: { width: 0, height: 1 },
+                          shadowOpacity: 0.1,
+                          shadowRadius: 2,
+                          elevation: 3,
+                        }}
+                      >
+                        <Ionicons name="swap-horizontal" size={13} color="#f97316" />
+                      </View>
+                    </TouchableOpacity>
                     <View className="flex-1">
                       <Text className="text-xl font-bold text-slate-700">
                         {profile.profile.firstName} {profile.profile.lastName}
@@ -1356,6 +1401,12 @@ const Profile = () => {
           console.log("✅ Profile: Notification permissions granted via modal");
           closeModal();
         }}
+      />
+
+      {/* Account Switcher */}
+      <AccountSwitcherSheet
+        visible={isAccountSwitcherVisible}
+        onClose={() => setIsAccountSwitcherVisible(false)}
       />
     </SafeAreaView>
   );

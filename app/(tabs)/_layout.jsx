@@ -412,8 +412,10 @@ const TabsLayout = () => {
   };
 
   useEffect(() => {
+    // Depend on `token` so subscription info refreshes after an account switch
+    // (this layout persists across `router.replace("(tabs)/profile")`, it never remounts).
     fetchSubscription();
-  }, []);
+  }, [token]);
 
   // Socket.IO integration: Listen for real-time subscription updates.
   useEffect(() => {
@@ -428,7 +430,8 @@ const TabsLayout = () => {
     return () => {
       socket.disconnect();
     };
-  }, []);
+    // Reconnect whenever the active account changes so the socket room/context matches.
+  }, [token]);
 
   // Update presence on app state changes.
   const updateUserPresence = async (status) => {

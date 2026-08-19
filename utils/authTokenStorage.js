@@ -8,16 +8,28 @@ import {
 } from "./jwtTokenUtils";
 import { AUTH_ERROR_CODES } from "./authSession";
 
-const COMPANY_SESSION_INDEX_KEY = "bb_company_session_ids";
+// v2: keyed by userId+companyId (not companyId alone) so two different email
+// accounts that both belong to the same company no longer overwrite each
+// other's vaulted session. Bumping the index key lets old bb_cs_* entries
+// age out naturally (no migration needed — worst case a one-time re-login).
+const ACCOUNT_SESSION_INDEX_KEY = "bb_account_session_ids";
 
-function storageKeyForCompany(companyId) {
-  const safe = String(companyId).replace(/[^a-zA-Z0-9_-]/g, "_");
-  return `bb_cs_${safe}`;
+function sanitizeKeyPart(value) {
+  return String(value ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-async function readCompanyIndex() {
+/** Deterministic (not reversible) id for a saved session — never parsed back apart. */
+function accountKeyFor(userId, companyId) {
+  return `${sanitizeKeyPart(userId || "u")}__${sanitizeKeyPart(companyId)}`;
+}
+
+function storageKeyForAccount(accountKey) {
+  return `bb_as_${sanitizeKeyPart(accountKey)}`;
+}
+
+async function readAccountIndex() {
   try {
-    const raw = await SecureStore.getItemAsync(COMPANY_SESSION_INDEX_KEY);
+    const raw = await SecureStore.getItemAsync(ACCOUNT_SESSION_INDEX_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.map(String) : [];
@@ -26,18 +38,47 @@ async function readCompanyIndex() {
   }
 }
 
-async function writeCompanyIndex(ids) {
+async function writeAccountIndex(ids) {
   const unique = [...new Set(ids.map(String))];
   await SecureStore.setItemAsync(
-    COMPANY_SESSION_INDEX_KEY,
+    ACCOUNT_SESSION_INDEX_KEY,
     JSON.stringify(unique)
   );
 }
 
+async function getAccountSessionToken(accountKey) {
+  if (!accountKey) return null;
+  try {
+    return await SecureStore.getItemAsync(storageKeyForAccount(accountKey));
+  } catch {
+    return null;
+  }
+}
+
+async function removeAccountSessionToken(accountKey) {
+  if (!accountKey) return;
+  try {
+    await SecureStore.deleteItemAsync(storageKeyForAccount(accountKey));
+  } catch {
+    /* noop */
+  }
+  const ids = await readAccountIndex();
+  const next = ids.filter((x) => x !== accountKey);
+  if (next.length === 0) {
+    try {
+      await SecureStore.deleteItemAsync(ACCOUNT_SESSION_INDEX_KEY);
+    } catch {
+      /* noop */
+    }
+  } else {
+    await writeAccountIndex(next);
+  }
+}
+
 /**
- * Remember a JWT for this device + company (biometric can restore per company).
- * Writes under both the requested id and the JWT's company claim when they differ
- * (API list vs token payload mismatch).
+ * Remember a JWT for this device + user + company (biometric / switcher restore).
+ * Writes under both the requested company id and the JWT's company claim when they
+ * differ (API list vs token payload mismatch).
  */
 /** True if `incoming` should replace `existing` in the vault (never downgrade tokenVersion). */
 function shouldReplaceVaultToken(existing, incoming) {
@@ -51,24 +92,27 @@ function shouldReplaceVaultToken(existing, incoming) {
 
 export async function persistCompanySessionToken(companyId, token) {
   if (!token) return;
+  const userId = getTokenUserId(token);
   const keys = new Set();
-  if (companyId != null && companyId !== "") keys.add(String(companyId));
+  if (companyId != null && companyId !== "") {
+    keys.add(accountKeyFor(userId, companyId));
+  }
   const jwtCo = getTokenCompanyId(token);
-  if (jwtCo) keys.add(String(jwtCo));
+  if (jwtCo) keys.add(accountKeyFor(userId, jwtCo));
   if (keys.size === 0) return;
 
-  const ids = await readCompanyIndex();
-  const merged = new Set([...ids.map(String), ...keys]);
+  const ids = await readAccountIndex();
+  const merged = new Set([...ids, ...keys]);
   for (const k of keys) {
-    const existing = await getCompanySessionToken(k);
+    const existing = await getAccountSessionToken(k);
     if (!shouldReplaceVaultToken(existing, token)) continue;
-    await SecureStore.setItemAsync(storageKeyForCompany(k), token);
+    await SecureStore.setItemAsync(storageKeyForAccount(k), token);
   }
-  await writeCompanyIndex([...merged]);
+  await writeAccountIndex([...merged]);
 }
 
 /**
- * Drop a rejected JWT from legacy + per-company vault (does not call server sign-out).
+ * Drop a rejected JWT from legacy + per-account vault (does not call server sign-out).
  */
 export async function removeStoredSessionToken(token) {
   if (!token) return;
@@ -80,12 +124,12 @@ export async function removeStoredSessionToken(token) {
   } catch {
     /* noop */
   }
-  const ids = await readCompanyIndex();
+  const ids = await readAccountIndex();
   for (const id of ids) {
     try {
-      const stored = await getCompanySessionToken(id);
+      const stored = await getAccountSessionToken(id);
       if (stored === token) {
-        await removeCompanySessionToken(id);
+        await removeAccountSessionToken(id);
       }
     } catch {
       /* noop */
@@ -120,54 +164,24 @@ export async function pruneOlderSessionsForUser(newToken) {
   }
 }
 
-export async function getCompanySessionToken(companyId) {
-  if (companyId == null) return null;
-  try {
-    return await SecureStore.getItemAsync(storageKeyForCompany(String(companyId)));
-  } catch {
-    return null;
-  }
-}
-
-export async function removeCompanySessionToken(companyId) {
-  if (companyId == null) return;
-  const id = String(companyId);
-  try {
-    await SecureStore.deleteItemAsync(storageKeyForCompany(id));
-  } catch {
-    /* noop */
-  }
-  const ids = await readCompanyIndex();
-  const next = ids.filter((x) => String(x) !== id);
-  if (next.length === 0) {
-    try {
-      await SecureStore.deleteItemAsync(COMPANY_SESSION_INDEX_KEY);
-    } catch {
-      /* noop */
-    }
-  } else {
-    await writeCompanyIndex(next);
-  }
-}
-
 export async function clearAllCompanySessionTokens() {
-  const ids = await readCompanyIndex();
+  const ids = await readAccountIndex();
   for (const id of ids) {
     try {
-      await SecureStore.deleteItemAsync(storageKeyForCompany(id));
+      await SecureStore.deleteItemAsync(storageKeyForAccount(id));
     } catch {
       /* noop */
     }
   }
   try {
-    await SecureStore.deleteItemAsync(COMPANY_SESSION_INDEX_KEY);
+    await SecureStore.deleteItemAsync(ACCOUNT_SESSION_INDEX_KEY);
   } catch {
     /* noop */
   }
 }
 
 /**
- * Mirror legacy `token` into per-company vault only when missing or legacy is newer.
+ * Mirror legacy `token` into per-account vault only when missing or legacy is newer.
  * Never overwrite a fresher company JWT with an older legacy copy.
  */
 export async function syncLegacyTokenIntoPerCompanyStore() {
@@ -176,7 +190,9 @@ export async function syncLegacyTokenIntoPerCompanyStore() {
     if (!legacy || isTokenExpired(legacy)) return;
     const cid = getTokenCompanyId(legacy);
     if (!cid) return;
-    const existing = await getCompanySessionToken(cid);
+    const userId = getTokenUserId(legacy);
+    const key = accountKeyFor(userId, cid);
+    const existing = await getAccountSessionToken(key);
     if (shouldReplaceVaultToken(existing, legacy)) {
       await persistCompanySessionToken(cid, legacy);
     }
@@ -211,10 +227,10 @@ export async function enumerateSessionTokens() {
     /* noop */
   }
 
-  const ids = await readCompanyIndex();
+  const ids = await readAccountIndex();
   for (const id of ids) {
-    const t = await getCompanySessionToken(id);
-    add(t, id);
+    const t = await getAccountSessionToken(id);
+    add(t, getTokenCompanyId(t));
   }
 
   out.sort((a, b) => {
@@ -296,23 +312,29 @@ export async function resolveSessionTokenForCompanyId(companyId, options = {}) {
     return getTokenUserId(token) === String(userId);
   };
 
-  let sessionToken = await getCompanySessionToken(picked);
-  if (
-    sessionToken &&
-    !isTokenExpired(sessionToken) &&
-    matchesUser(sessionToken)
-  ) {
-    return sessionToken;
+  if (userId) {
+    const direct = await getAccountSessionToken(accountKeyFor(userId, picked));
+    if (direct && !isTokenExpired(direct) && matchesUser(direct)) {
+      return direct;
+    }
   }
 
-  const ids = await readCompanyIndex();
-  for (const id of ids) {
-    const t = await getCompanySessionToken(id);
-    if (!t || isTokenExpired(t) || !matchesUser(t)) continue;
-    const tCo = getTokenCompanyId(t);
-    if (tCo != null && String(tCo) === picked) return t;
-    if (String(id) === picked) return t;
+  const candidates = await enumerateSessionTokens();
+  for (const { token, companyId: tCo } of candidates) {
+    if (!token || isTokenExpired(token) || !matchesUser(token)) continue;
+    const claimedCo = getTokenCompanyId(token);
+    if (claimedCo != null && String(claimedCo) === picked) return token;
+    if (tCo != null && String(tCo) === picked) return token;
   }
 
   return null;
+}
+
+/**
+ * Remove a specific saved account (userId + companyId) from the device vault,
+ * without calling the server. Used by the account switcher's "remove" action.
+ */
+export async function removeAccountFromVault(userId, companyId) {
+  if (companyId == null) return;
+  await removeAccountSessionToken(accountKeyFor(userId, companyId));
 }

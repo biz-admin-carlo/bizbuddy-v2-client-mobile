@@ -56,6 +56,7 @@ import {
   getClockOutScheduleSummary,
   hasRelevantScheduledShiftForClockIn,
 } from "../../../utils/timekeepingShiftUtils";
+import { parseApproversPayload } from "../../../utils/approversPayload";
 import {
   parseCompanyTimeZone,
   formatCompanyCalendarDateString,
@@ -1601,17 +1602,9 @@ export default function TimekeepingPunch() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (res.ok && Array.isArray(data.data)) {
-        const items = data.data.map((approver) => {
-          const firstName = approver.profile?.firstName || "";
-          const lastName = approver.profile?.lastName || "";
-          const fullName = `${firstName} ${lastName}`.trim();
-          return {
-            label: fullName || approver.username || `User ${approver.id}`,
-            value: String(approver.id),
-          };
-        });
-        setPlApproverItems(items);
+      console.log("[PL Approvers] raw payload:", JSON.stringify(data));
+      if (res.ok && data?.data) {
+        setPlApproverItems(parseApproversPayload(data));
       } else {
         Alert.alert("Error", data?.message || "Failed to fetch approvers.");
       }

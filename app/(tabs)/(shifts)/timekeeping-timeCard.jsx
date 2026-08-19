@@ -49,6 +49,7 @@ import {
   persistContestedTimeLogIds,
   tagTimeLogsWithContestedState,
 } from "../../../utils/timeLogContestUtils";
+import { parseApproversPayload } from "../../../utils/approversPayload";
 import { useFocusEffect } from "expo-router";
 import {
   buildInstantInCompanyZone,
@@ -532,17 +533,9 @@ const TimekeepingTimeCard = () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (res.ok && Array.isArray(data.data)) {
-        const items = data.data.map((approver) => {
-          const firstName = approver.profile?.firstName || "";
-          const lastName = approver.profile?.lastName || "";
-          const fullName = `${firstName} ${lastName}`.trim();
-          return {
-            label: fullName || approver.username || `User ${approver.id}`,
-            value: String(approver.id),
-          };
-        });
-        setCtApproverItems(items);
+      console.log("[CT Approvers] raw payload:", JSON.stringify(data));
+      if (res.ok && data?.data) {
+        setCtApproverItems(parseApproversPayload(data));
       } else {
         Alert.alert("Error", data?.message || "Failed to fetch approvers.");
       }
