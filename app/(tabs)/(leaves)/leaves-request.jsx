@@ -36,6 +36,8 @@ const { height } = Dimensions.get("window");
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
+const MIN_LEAVE_REASON_LENGTH = 15;
+
 const getLocalDateKey = (dateInput) => {
   const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
   if (!Number.isFinite(date.getTime())) return "";
@@ -513,6 +515,14 @@ const SubmitLeaves = () => {
       );
       return;
     }
+    const trimmedReason = leaveReason.trim();
+    if (trimmedReason.length < MIN_LEAVE_REASON_LENGTH) {
+      RNAlert.alert(
+        "Reason Required",
+        `Please provide a reason of at least ${MIN_LEAVE_REASON_LENGTH} characters.`,
+      );
+      return;
+    }
     const combinedStart = combineDateAndTime(leaveStartDate, leaveStartTime);
     const combinedEnd = combineDateAndTime(leaveEndDate, leaveEndTime);
     if (combinedStart > combinedEnd) {
@@ -547,7 +557,7 @@ const SubmitLeaves = () => {
         startTime: formatLocalTimeHm(combinedStart),
         endTime: formatLocalTimeHm(combinedEnd),
         approverId: approverValue,
-        leaveReason,
+        leaveReason: trimmedReason,
         isPaid: isPaidLeave,
       };
 
@@ -1301,17 +1311,27 @@ const SubmitLeaves = () => {
 
               {/* Reason for Leave (TEXTINPUT) */}
               <View className="px-5 mb-5">
-                <FormLabel text="Reason (optional)" required={false} />
+                <FormLabel text="Reason" />
                 <View className="bg-slate-50 rounded-lg px-3 py-3">
                   <TextInput
                     multiline
                     style={{ color: "#374151", minHeight: 80 }}
                     value={leaveReason}
                     onChangeText={setLeaveReason}
-                    placeholder="Explain your reason (optional)"
+                    placeholder="Explain your reason (at least 15 characters)"
                     placeholderTextColor="#9CA3AF"
                   />
                 </View>
+                <Text
+                  className={`text-xs mt-1.5 ${
+                    leaveReason.trim().length >= MIN_LEAVE_REASON_LENGTH
+                      ? "text-slate-400"
+                      : "text-slate-500"
+                  }`}
+                >
+                  {leaveReason.trim().length}/{MIN_LEAVE_REASON_LENGTH} characters
+                  minimum
+                </Text>
               </View>
 
               {/* Date Time Selectors */}

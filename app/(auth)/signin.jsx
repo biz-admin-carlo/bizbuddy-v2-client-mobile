@@ -556,7 +556,10 @@ export default function SignIn() {
         setLoading(false);
         return;
       }
-      cacheCompaniesForEmail(email, list);
+      // Don't cache sibling companies yet — this email hasn't been authenticated on
+      // this device. Caching happens only after a successful sign-in (see
+      // completePasswordSignIn) so the switcher never leaks another person's
+      // company/role info just because their email was typed here.
       setUsers(list);
       if (list.length === 1) {
         setSelectedCompanyId(list[0].companyId);
@@ -578,6 +581,12 @@ export default function SignIn() {
     }
     const normalizedEmail = email.trim().toLowerCase();
     await persistSignInContext(token, normalizedEmail, selectedCompanyId);
+    // Only now that sign-in actually succeeded do we cache this email's companies,
+    // so the switcher can offer sibling companies without leaking info for emails
+    // that were merely typed but never authenticated on this device.
+    if (users.length > 0) {
+      cacheCompaniesForEmail(normalizedEmail, users);
+    }
 
     await login(token, true, String(selectedCompanyId));
     setPasswordSourceStep(null);
