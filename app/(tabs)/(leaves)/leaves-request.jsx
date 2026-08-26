@@ -36,7 +36,7 @@ const { height } = Dimensions.get("window");
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
-const MIN_LEAVE_REASON_LENGTH = 15;
+const MIN_LEAVE_REASON_LENGTH = 10;
 
 const getLocalDateKey = (dateInput) => {
   const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
@@ -1318,7 +1318,7 @@ const SubmitLeaves = () => {
                     style={{ color: "#374151", minHeight: 80 }}
                     value={leaveReason}
                     onChangeText={setLeaveReason}
-                    placeholder="Explain your reason (at least 15 characters)"
+                    placeholder="Explain your reason (at least 10 characters)"
                     placeholderTextColor="#9CA3AF"
                   />
                 </View>

@@ -40,7 +40,7 @@ const DEFAULT_STEPS = [
         items: [
           { label: "Leave Type", description: "Pick the type of leave (Vacation, Sick, etc.)." },
           { label: "Approver", description: "Select who will approve your leave request." },
-          { label: "Reason", description: "Required. Explain why you need the leave (at least 15 characters)." },
+          { label: "Reason", description: "Required. Explain why you need the leave (at least 10 characters)." },
           { label: "Leave Start / Leave End", description: "Choose your dates and times." },
           { label: "Confirm", description: "Confirm the date/time (iOS picker modal)." },
           { label: "Submit Leave Request", description: "Send your request." },

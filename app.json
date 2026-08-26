@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizBuddy",
     "slug": "biz-buddy-slug",
-    "version": "1.0.26",
+    "version": "1.0.28",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "myapp",
@@ -12,6 +12,7 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": true,
       "bundleIdentifier": "com.bizsolutions.bizbuddy",
+      "buildNumber": "31",
       "infoPlist": {
         "LSApplicationQueriesSchemes": ["mailto"],
         "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
@@ -26,7 +27,7 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.bizsolutions.mybizbuddy",
-      "versionCode": 35,
+      "versionCode": 37,
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -65,7 +66,7 @@
         "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
-    "runtimeVersion": "1.0.26",
+    "runtimeVersion": "1.0.28",
     "owner": "miguelalviar"
   }
 }
