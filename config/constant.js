@@ -35,8 +35,6 @@ export const CLOCK_OUT_DEVIATION_COMPANY_IDS = [
 ];
 // Set to true to always show the "no scheduled shift" clock-in modal (timekeeping punch, online flow).
 export const DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL = false;
-// Clock-in: treat user as having a schedule only if in an active shift or next shift starts within this many minutes (e.g. weekend gap before Mon–Fri).
-export const NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES = 12 * 60;
 
 /** Punch types offered when clocking in without a scheduled shift (no-schedule modal). */
 export const TIME_IN_PUNCH_TYPE_OPTIONS = [

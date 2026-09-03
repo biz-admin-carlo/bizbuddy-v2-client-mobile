@@ -535,7 +535,11 @@ const TimekeepingTimeCard = () => {
       const data = await res.json();
       console.log("[CT Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data?.data) {
-        setCtApproverItems(parseApproversPayload(data));
+        setCtApproverItems(
+          parseApproversPayload(data, {
+            supervisorGroupLabel: "Team Supervisors",
+          }),
+        );
       } else {
         Alert.alert("Error", data?.message || "Failed to fetch approvers.");
       }
@@ -2674,6 +2678,12 @@ const TimekeepingTimeCard = () => {
                             maxHeight: 220,
                           }}
                           placeholderStyle={{ color: TC.mutedLight }}
+                          categorySelectable={false}
+                          listParentLabelStyle={{
+                            fontWeight: "700",
+                            color: TC.muted,
+                            fontSize: 12,
+                          }}
                           zIndex={8000}
                           zIndexInverse={6000}
                           listMode="SCROLLVIEW"

@@ -238,7 +238,11 @@ const SubmitOvertime = () => {
       const data = await res.json();
       console.log("[OT Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data.data) {
-        setApproverItems(parseApproversPayload(data));
+        setApproverItems(
+          parseApproversPayload(data, {
+            supervisorGroupLabel: "Team Supervisors",
+          }),
+        );
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch approvers.");
       }
@@ -798,6 +802,12 @@ const SubmitOvertime = () => {
                     backgroundColor: "#F9FAFB",
                   }}
                   placeholderStyle={{ color: "#9CA3AF" }}
+                  categorySelectable={false}
+                  listParentLabelStyle={{
+                    fontWeight: "700",
+                    color: "#64748b",
+                    fontSize: 12,
+                  }}
                   zIndex={2000}
                   zIndexInverse={2000}
                   nestedScrollEnabled={true}

@@ -1300,6 +1300,12 @@ const SubmitLeaves = () => {
                     backgroundColor: "#F9FAFB",
                   }}
                   placeholderStyle={{ color: "#9CA3AF" }}
+                  categorySelectable={false}
+                  listParentLabelStyle={{
+                    fontWeight: "700",
+                    color: "#64748b",
+                    fontSize: 12,
+                  }}
                   zIndex={2000}
                   zIndexInverse={2000}
                   nestedScrollEnabled={true}
