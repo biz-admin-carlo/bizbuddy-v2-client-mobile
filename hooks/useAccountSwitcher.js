@@ -1,14 +1,11 @@
 import { useCallback, useState } from "react";
 import { useRouter } from "expo-router";
-import * as SecureStore from "expo-secure-store";
 import useAuthStore, { persistSignInContext } from "../store/useAuthStore";
 import {
   getTokenCompanyId,
-  getTokenEmail,
   getTokenUserId,
 } from "../utils/jwtTokenUtils";
 import {
-  enumerateSessionTokens,
   removeAccountFromVault,
   removeStoredSessionToken,
 } from "../utils/authTokenStorage";
@@ -37,9 +34,8 @@ export function useAccountSwitcher() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [vaultedRows, candidates, knownEmailCompanies] = await Promise.all([
+      const [vaultedRows, knownEmailCompanies] = await Promise.all([
         getVaultedAccountRows(),
-        enumerateSessionTokens(),
         getAllKnownEmailCompanies(),
       ]);
 
@@ -55,27 +51,42 @@ export function useAccountSwitcher() {
         needsPassword: false,
       }));
 
-      // Companies already represented by a saved session (matched by email+companyId,
-      // not just userId, since a never-logged-in sibling company has no userId yet).
-      const vaultedKeys = new Set(
-        candidates
-          .map(({ token, companyId }) => {
-            const tokenEmail = getTokenEmail(token);
-            const cid = companyId ?? getTokenCompanyId(token);
-            return tokenEmail && cid != null
-              ? `${tokenEmail}::${String(cid)}`
-              : null;
-          })
+      // JWTs typically have no email claim, so match siblings against the
+      // directory-backed vaulted rows (email + companyId, plus company name
+      // in case the API list id and the JWT company id differ).
+      const vaultedKeys = new Set();
+      const vaultedEmailCompanyNames = new Set();
+      for (const row of rows) {
+        const email = row.email ? String(row.email).trim().toLowerCase() : null;
+        if (email && row.companyId != null) {
+          vaultedKeys.add(`${email}::${String(row.companyId)}`);
+        }
+        if (email && row.companyName) {
+          vaultedEmailCompanyNames.add(
+            `${email}::${String(row.companyName).trim().toLowerCase()}`,
+          );
+        }
+      }
+
+      // Sibling companies discovered from a prior email lookup, scoped to emails that
+      // already have a fully signed-in (vaulted) session on this device. This prevents
+      // surfacing companies for an email someone merely typed at the login screen but
+      // never actually signed into — which would otherwise leak another person's
+      // company/role info into this device's switcher.
+      const vaultedEmails = new Set(
+        rows
+          .map((row) => (row.email ? String(row.email).trim().toLowerCase() : null))
           .filter(Boolean),
       );
 
-      // Sibling companies discovered from a prior email lookup that the user hasn't
-      // signed into on this device yet — shown so they don't have to retype the email.
       const siblingRows = [];
       for (const [email, companies] of Object.entries(knownEmailCompanies)) {
+        if (!vaultedEmails.has(email)) continue;
         for (const company of companies) {
           const matchKey = `${email}::${String(company.companyId)}`;
           if (vaultedKeys.has(matchKey)) continue;
+          const nameKey = `${email}::${String(company.companyName || "").trim().toLowerCase()}`;
+          if (company.companyName && vaultedEmailCompanyNames.has(nameKey)) continue;
           siblingRows.push({
             key: `needs-password::${matchKey}`,
             userId: null,

@@ -30,6 +30,8 @@ import { parseApproversPayload } from "../../../utils/approversPayload";
 
 const { height } = Dimensions.get("window");
 
+const MIN_OVERTIME_REASON_LENGTH = 30;
+
 const combineDateAndTime = (date, time) => {
   const combined = new Date(date);
   combined.setHours(time.getHours());
@@ -236,7 +238,11 @@ const SubmitOvertime = () => {
       const data = await res.json();
       console.log("[OT Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data.data) {
-        setApproverItems(parseApproversPayload(data));
+        setApproverItems(
+          parseApproversPayload(data, {
+            supervisorGroupLabel: "Team Supervisors",
+          }),
+        );
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch approvers.");
       }
@@ -306,10 +312,11 @@ const SubmitOvertime = () => {
       return;
     }
 
-    if (!overtimeReason || !overtimeReason.trim()) {
+    const trimmedReason = overtimeReason.trim();
+    if (trimmedReason.length < MIN_OVERTIME_REASON_LENGTH) {
       RNAlert.alert(
-        "Incomplete Form",
-        "Please provide a reason for your overtime request."
+        "Reason Required",
+        `Please provide a reason of at least ${MIN_OVERTIME_REASON_LENGTH} characters.`
       );
       return;
     }
@@ -349,8 +356,8 @@ const SubmitOvertime = () => {
         timeLogId: otLogValue,
         approverId: approverValue,
         // Keep both keys so we stay compatible with backend shapes
-        overtimeReason,
-        requesterReason: overtimeReason,
+        overtimeReason: trimmedReason,
+        requesterReason: trimmedReason,
         requestedHours,
       };
 
@@ -795,6 +802,12 @@ const SubmitOvertime = () => {
                     backgroundColor: "#F9FAFB",
                   }}
                   placeholderStyle={{ color: "#9CA3AF" }}
+                  categorySelectable={false}
+                  listParentLabelStyle={{
+                    fontWeight: "700",
+                    color: "#64748b",
+                    fontSize: 12,
+                  }}
                   zIndex={2000}
                   zIndexInverse={2000}
                   nestedScrollEnabled={true}
@@ -813,10 +826,20 @@ const SubmitOvertime = () => {
                     style={{ color: "#374151", minHeight: 80 }}
                     value={overtimeReason}
                     onChangeText={setOvertimeReason}
-                    placeholder="Explain your reason"
+                    placeholder="Explain your reason (at least 30 characters)"
                     placeholderTextColor="#9CA3AF"
                   />
                 </View>
+                <Text
+                  className={`text-xs mt-1.5 ${
+                    overtimeReason.trim().length >= MIN_OVERTIME_REASON_LENGTH
+                      ? "text-slate-400"
+                      : "text-slate-500"
+                  }`}
+                >
+                  {overtimeReason.trim().length}/{MIN_OVERTIME_REASON_LENGTH}{" "}
+                  characters minimum
+                </Text>
               </View>
 
               {/* Date Time Selectors */}

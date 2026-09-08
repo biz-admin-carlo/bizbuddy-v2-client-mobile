@@ -18,6 +18,7 @@ import {
   TouchableOpacity,
   Modal,
   ScrollView,
+  TextInput,
 } from "react-native";
 import {
   SafeAreaView,
@@ -25,6 +26,7 @@ import {
 } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
+import DropDownPicker from "react-native-dropdown-picker";
 import { API_BASE_URL } from "../../../config/constant";
 import { getTokenUserId } from "../../../store/useAuthStore";
 import {
@@ -32,6 +34,11 @@ import {
   formatLeaveDateTimeLabel,
   normalizeLeaveRecord,
 } from "../../../utils/dateOnlyUtils";
+import {
+  fetchMultiApprovalEnabled,
+  fetchEscalationTargets,
+  fetchEmployeeDirectory,
+} from "../../../utils/leaveEscalation";
 import { Ionicons } from "@expo/vector-icons";
 
 const { height } = Dimensions.get("window");
@@ -267,11 +274,11 @@ const resolveRequesterLabel = (item) => {
     requester?.username ||
     requester?.email ||
     item?.requesterEmail ||
-    (requester?.id != null ? `ID ${requester.id}` : null)
+    (requester?.id != null || item?.userId != null ? "Unknown requester" : null)
   );
 };
 
-const resolveApproverLabel = (item) => {
+const resolveApproverLabel = (item, directory) => {
   const approver =
     item?.approver ?? item?.Approver ?? item?.approverUser ?? null;
   const profile = approver?.profile ?? null;
@@ -286,14 +293,44 @@ const resolveApproverLabel = (item) => {
     .map((value) => String(value ?? "").trim())
     .find(Boolean);
 
+  const fromDirectory =
+    directory?.[String(approver?.id ?? item?.approverId ?? "")] || null;
+
   return (
     fullName ||
     approver?.username ||
     approver?.email ||
     item?.approverEmail ||
+    fromDirectory ||
     (approver?.id != null || item?.approverId != null
-      ? `ID ${approver?.id ?? item?.approverId}`
+      ? "Assigned approver"
       : null)
+  );
+};
+
+const resolveSecondaryApproverLabel = (item, directory) => {
+  const secondaryApprover = item?.secondaryApprover ?? null;
+  const profile = secondaryApprover?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? secondaryApprover?.firstName ?? ""} ${profile?.lastName ?? secondaryApprover?.lastName ?? ""}`.trim(),
+    secondaryApprover?.name,
+    profile?.name,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  // The server doesn't join a secondaryApprover object on this endpoint —
+  // resolve the display name client-side from the company employee directory.
+  const fromDirectory =
+    directory?.[String(secondaryApprover?.id ?? item?.secondaryApproverId ?? "")] ||
+    null;
+
+  return (
+    fullName ||
+    secondaryApprover?.username ||
+    secondaryApprover?.email ||
+    fromDirectory ||
+    (item?.secondaryApproverId != null ? "Another approver" : null)
   );
 };
 
@@ -399,6 +436,16 @@ export default function LeavesApproval() {
   const [userRole, setUserRole] = useState("");
   const [currentUserId, setCurrentUserId] = useState(null);
   const [processingLeaves, setProcessingLeaves] = useState({});
+  const [multiApprovalEnabled, setMultiApprovalEnabled] = useState(false);
+  const [employeeDirectory, setEmployeeDirectory] = useState({});
+  const [escalateModalVisible, setEscalateModalVisible] = useState(false);
+  const [escalateLeave, setEscalateLeave] = useState(null);
+  const [escalateOpen, setEscalateOpen] = useState(false);
+  const [escalateValue, setEscalateValue] = useState(null);
+  const [escalateItems, setEscalateItems] = useState([]);
+  const [escalateComments, setEscalateComments] = useState("");
+  const [escalateTargetsLoading, setEscalateTargetsLoading] = useState(false);
+  const [escalating, setEscalating] = useState(false);
   const router = useRouter();
 
   // Animations
@@ -469,6 +516,13 @@ export default function LeavesApproval() {
       setCurrentUserId(getTokenUserId(token));
       setIsCompanyView(companyView);
 
+      if (companyView) {
+        fetchMultiApprovalEnabled(token).then(setMultiApprovalEnabled);
+        fetchEmployeeDirectory(token).then(setEmployeeDirectory);
+      } else {
+        setMultiApprovalEnabled(false);
+      }
+
       const res = await fetch(`${API_BASE_URL}${leavesPath}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -477,16 +531,12 @@ export default function LeavesApproval() {
         const rows = Array.isArray(data.data)
           ? data.data.map(normalizeLeaveRecord)
           : [];
-        const canViewAllCompanyLeaves =
-          role === "admin" || role === "superadmin";
-        const visibleRows =
-          companyView && !canViewAllCompanyLeaves
-            ? rows.filter((leave) =>
-                isApproverMatch(leave, getTokenUserId(token)),
-              )
-            : rows;
-        setLeaves(visibleRows);
-        applyFiltersAndSort(visibleRows, activeFilter, sortOption);
+        // The server already scopes visibility correctly (company-wide for
+        // admin/superadmin, department/direct-reports for supervisor — see
+        // leaveVisibilityWhere on the server) — every returned row is meant
+        // to be viewable, whether or not the viewer can act on it.
+        setLeaves(rows);
+        applyFiltersAndSort(rows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leave logs.");
       }
@@ -649,6 +699,42 @@ export default function LeavesApproval() {
       if (!isCompanyView) return false;
       const status = String(item?.status ?? "").toLowerCase();
       if (!status.includes("pending")) return false;
+
+      const currentId = toStr(currentUserId);
+
+      if (status === "pending_secondary") {
+        const escalatedByUserId = toStr(
+          item?.escalatedByUserId ?? item?.escalatedBy?.id,
+        );
+        const originalApproverId = toStr(
+          item?.approverId ?? item?.approver?.id,
+        );
+        // Whoever escalated this (and the originally assigned approver) already
+        // made their call — they're locked out of acting again, even as an
+        // admin/superadmin, and even if the server's canAct flag says
+        // otherwise (its eligibility check doesn't account for who escalated
+        // the request, only department/role-based eligibility).
+        if (
+          currentId &&
+          (currentId === escalatedByUserId || currentId === originalApproverId)
+        ) {
+          return false;
+        }
+      }
+
+      // Trust the server's per-leave eligibility if it's ever present, but the
+      // deployed API doesn't return one today — compute a stage-aware fallback
+      // entirely from fields already on the leave record instead.
+      if (typeof item?.canAct === "boolean") return item.canAct;
+
+      if (status === "pending_secondary") {
+        const secondaryApproverId = toStr(
+          item?.secondaryApproverId ?? item?.secondaryApprover?.id,
+        );
+        if (userRole === "admin" || userRole === "superadmin") return true;
+        return !!secondaryApproverId && currentId === secondaryApproverId;
+      }
+
       if (userRole === "admin" || userRole === "superadmin") return true;
       if (userRole === "supervisor") {
         return isApproverMatch(item, currentUserId);
@@ -656,6 +742,17 @@ export default function LeavesApproval() {
       return false;
     },
     [isCompanyView, userRole, currentUserId],
+  );
+
+  // Escalation is only valid from the first-stage "pending" status (not
+  // "pending_secondary") and only when the company has two-step approval on.
+  const canEscalateLeave = useCallback(
+    (item) => {
+      if (!multiApprovalEnabled) return false;
+      if (!canActOnLeave(item)) return false;
+      return String(item?.status ?? "").toLowerCase() === "pending";
+    },
+    [multiApprovalEnabled, canActOnLeave],
   );
 
   const canCancelLeave = useCallback(
@@ -761,6 +858,93 @@ export default function LeavesApproval() {
     ]);
   };
 
+  const openEscalateModal = async (item) => {
+    setEscalateLeave(item);
+    setEscalateValue(null);
+    setEscalateOpen(false);
+    setEscalateComments("");
+    setEscalateItems([]);
+    setEscalateModalVisible(true);
+    setEscalateTargetsLoading(true);
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const targets = await fetchEscalationTargets(token, {
+        excludeUserIds: [currentUserId, item?.userId],
+      });
+      setEscalateItems(targets);
+    } finally {
+      setEscalateTargetsLoading(false);
+    }
+  };
+
+  const closeEscalateModal = () => {
+    setEscalateModalVisible(false);
+    setEscalateOpen(false);
+    setEscalateLeave(null);
+    setEscalateValue(null);
+    setEscalateComments("");
+    setEscalateItems([]);
+  };
+
+  const submitEscalate = async () => {
+    const leaveId = resolveLeaveId(escalateLeave);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      return;
+    }
+    if (!escalateValue) {
+      RNAlert.alert("Select an approver", "Please choose who to escalate this leave to.");
+      return;
+    }
+    setEscalating(true);
+    setProcessingLeaves((prev) => ({ ...prev, [leaveId]: "escalating" }));
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/approve`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            escalateTo: escalateValue,
+            approverComments: escalateComments,
+          }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok) {
+        RNAlert.alert("Success", "Leave escalated for final approval.");
+        closeEscalateModal();
+        if (selectedLeave && resolveLeaveId(selectedLeave) === leaveId) {
+          closeLeaveDetail();
+        }
+        fetchLeaves();
+      } else {
+        const message = data.message || "Failed to escalate leave.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed") ||
+          String(message).toLowerCase().includes("already actioned")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          closeEscalateModal();
+          fetchLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
+      }
+    } catch (error) {
+      console.error("Error escalating leave:", error);
+      RNAlert.alert("Error", "An error occurred while escalating the leave.");
+    } finally {
+      setEscalating(false);
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
+    }
+  };
+
   const submitCancelLeave = async (item) => {
     const leaveId = resolveLeaveId(item);
     if (!leaveId) {
@@ -856,11 +1040,13 @@ export default function LeavesApproval() {
     const reason = item.leaveReason?.trim();
     const paidLabel = resolvePaidLabel(item);
     const requesterName = resolveRequesterLabel(item);
-    const approverName = resolveApproverLabel(item);
+    const approverName = resolveApproverLabel(item, employeeDirectory);
+    const secondaryApproverName = resolveSecondaryApproverLabel(item, employeeDirectory);
     const leaveId = resolveLeaveId(item);
     const isProcessing = leaveId != null && !!processingLeaves[leaveId];
     const showActions = canActOnLeave(item);
     const showCancel = canCancelLeave(item);
+    const showEscalate = canEscalateLeave(item);
 
     return (
       <TouchableOpacity
@@ -930,6 +1116,14 @@ export default function LeavesApproval() {
                 Approver: {approverName}
               </Text>
             ) : null}
+            {secondaryApproverName ? (
+              <Text
+                className="text-xs text-blue-600 mt-1 font-medium"
+                numberOfLines={1}
+              >
+                Escalated to: {secondaryApproverName}
+              </Text>
+            ) : null}
           </View>
           <Ionicons name="chevron-forward" size={18} color="#cbd5e1" />
         </View>
@@ -961,6 +1155,26 @@ export default function LeavesApproval() {
               )}
             </TouchableOpacity>
           </View>
+        ) : null}
+
+        {showEscalate ? (
+          <TouchableOpacity
+            onPress={() => openEscalateModal(item)}
+            activeOpacity={0.85}
+            disabled={isProcessing}
+            className="flex-row mt-2 py-2.5 rounded-lg border border-blue-200 bg-blue-50 items-center justify-center"
+          >
+            {processingLeaves[leaveId] === "escalating" ? (
+              <ActivityIndicator size="small" color="#1d4ed8" />
+            ) : (
+              <>
+                <Ionicons name="arrow-redo-outline" size={16} color="#1d4ed8" />
+                <Text className="text-blue-700 font-semibold ml-1.5">
+                  Escalate to another supervisor
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
         ) : null}
 
         {showCancel ? (
@@ -1183,14 +1397,25 @@ export default function LeavesApproval() {
                         : "No reason provided"
                     }
                   />
-                  {selectedLeave.approver?.email || resolveApproverLabel(selectedLeave) ? (
+                  {selectedLeave.approver?.email ||
+                  resolveApproverLabel(selectedLeave, employeeDirectory) ? (
                     <DetailRow
                       icon="shield-checkmark-outline"
                       label="Approver"
                       value={
-                        resolveApproverLabel(selectedLeave) ||
+                        resolveApproverLabel(selectedLeave, employeeDirectory) ||
                         selectedLeave.approver?.email
                       }
+                    />
+                  ) : null}
+                  {resolveSecondaryApproverLabel(selectedLeave, employeeDirectory) ? (
+                    <DetailRow
+                      icon="arrow-redo-outline"
+                      label="Escalated to"
+                      value={resolveSecondaryApproverLabel(
+                        selectedLeave,
+                        employeeDirectory,
+                      )}
                     />
                   ) : null}
                   <DetailRow
@@ -1250,6 +1475,31 @@ export default function LeavesApproval() {
                       </TouchableOpacity>
                     </View>
                   ) : null}
+                  {canEscalateLeave(selectedLeave) ? (
+                    <TouchableOpacity
+                      onPress={() => {
+                        closeLeaveDetail();
+                        openEscalateModal(selectedLeave);
+                      }}
+                      activeOpacity={0.85}
+                      disabled={
+                        !!processingLeaves[resolveLeaveId(selectedLeave)]
+                      }
+                      className="flex-row mb-2 rounded-xl py-3.5 items-center justify-center border border-blue-200 bg-blue-50"
+                    >
+                      {processingLeaves[resolveLeaveId(selectedLeave)] ===
+                      "escalating" ? (
+                        <ActivityIndicator size="small" color="#1d4ed8" />
+                      ) : (
+                        <>
+                          <Ionicons name="arrow-redo-outline" size={18} color="#1d4ed8" />
+                          <Text className="text-blue-700 font-semibold text-base ml-1.5">
+                            Escalate to another supervisor
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  ) : null}
                   {canCancelLeave(selectedLeave) ? (
                     <TouchableOpacity
                       onPress={() => promptCancelLeave(selectedLeave)}
@@ -1279,6 +1529,124 @@ export default function LeavesApproval() {
                 </View>
               </>
             ) : null}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Escalate modal */}
+      <Modal
+        visible={escalateModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeEscalateModal}
+      >
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity
+            style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(0,0,0,0.45)" }]}
+            activeOpacity={1}
+            onPress={closeEscalateModal}
+          />
+          <View
+            className="bg-white rounded-t-3xl px-5"
+            style={{
+              maxHeight: height * 0.85,
+              paddingBottom: Platform.OS === "ios" ? 34 : 24,
+            }}
+          >
+            <View className="items-center py-3">
+              <View className="w-10 h-1 bg-slate-200 rounded-full" />
+            </View>
+
+            <View className="flex-row justify-between items-start pb-4 border-b border-slate-100">
+              <View className="flex-1 pr-3">
+                <Text className="text-xl font-bold text-slate-800">
+                  Escalate for final approval
+                </Text>
+                <Text className="text-slate-500 text-sm mt-0.5">
+                  Pass this leave request to another supervisor or admin for final sign-off.
+                </Text>
+              </View>
+              <TouchableOpacity onPress={closeEscalateModal} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <Ionicons name="close" size={26} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ zIndex: 2000 }} className="pt-4">
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Escalate to
+              </Text>
+              {escalateTargetsLoading ? (
+                <View className="py-4 items-center">
+                  <ActivityIndicator size="small" color="#f97316" />
+                </View>
+              ) : (
+                <DropDownPicker
+                  open={escalateOpen}
+                  value={escalateValue}
+                  items={escalateItems}
+                  setOpen={setEscalateOpen}
+                  setValue={setEscalateValue}
+                  setItems={setEscalateItems}
+                  placeholder="Select an approver"
+                  textStyle={{ color: "#374151" }}
+                  style={{
+                    borderColor: "#f8fafc",
+                    backgroundColor: "#f8fafc",
+                    minHeight: 50,
+                  }}
+                  dropDownContainerStyle={{
+                    borderColor: "#f8fafc",
+                    backgroundColor: "#F9FAFB",
+                  }}
+                  placeholderStyle={{ color: "#9CA3AF" }}
+                  zIndex={2000}
+                  zIndexInverse={2000}
+                  nestedScrollEnabled={true}
+                  listMode="SCROLLVIEW"
+                  scrollViewProps={{ nestedScrollEnabled: true }}
+                  autoScroll={false}
+                />
+              )}
+            </View>
+
+            <View className="pt-4 pb-2">
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Comments (optional)
+              </Text>
+              <View className="bg-slate-50 rounded-lg px-3 py-3">
+                <TextInput
+                  multiline
+                  style={{ color: "#374151", minHeight: 70 }}
+                  value={escalateComments}
+                  onChangeText={setEscalateComments}
+                  placeholder="Add a note for the next approver"
+                  placeholderTextColor="#9CA3AF"
+                />
+              </View>
+            </View>
+
+            <View className="pt-2 pb-2">
+              <TouchableOpacity
+                onPress={submitEscalate}
+                activeOpacity={0.85}
+                disabled={escalating || !escalateValue}
+                className="bg-blue-600 rounded-xl py-3.5 items-center mb-2"
+                style={{ opacity: !escalateValue ? 0.6 : 1 }}
+              >
+                {escalating ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text className="text-white font-semibold text-base">Escalate</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={closeEscalateModal}
+                activeOpacity={0.85}
+                className="rounded-xl py-3.5 items-center border border-slate-200"
+              >
+                <Text className="text-slate-700 font-semibold text-base">Cancel</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>

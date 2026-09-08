@@ -2,7 +2,7 @@
 
 "use client";
 import "react-native-reanimated";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import {
   ActivityIndicator,
   View,
@@ -14,22 +14,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
 import { VERSION } from "../config/constant";
-import { getNativeAppVersion } from "../utils/versionCheck";
 import useAuthStore from "../store/useAuthStore";
 
 export default function Index() {
   const router = useRouter();
-  const [deviceVersion, setDeviceVersion] = useState(null);
-  const displayVersion = String(deviceVersion || VERSION).startsWith("v")
-    ? deviceVersion || VERSION
-    : `v${deviceVersion || VERSION}`;
+  const displayVersion = String(VERSION).startsWith("v")
+    ? VERSION
+    : `v${VERSION}`;
 
   useEffect(() => {
     const initApp = async () => {
       try {
-        const nativeVersion = getNativeAppVersion() || VERSION;
-        setDeviceVersion(nativeVersion);
-
         const storedVersion = await SecureStore.getItemAsync("appVersion");
         if (!storedVersion) {
           await SecureStore.setItemAsync("appVersion", VERSION);

@@ -41,7 +41,6 @@ import {
   CLOCK_OUT_DEVIATION_THRESHOLD_MINUTES,
   CLOCK_OUT_DEVIATION_COMPANY_IDS,
   DEMO_FORCE_NO_SCHEDULED_SHIFT_CLOCK_IN_MODAL,
-  NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
   TIME_IN_PUNCH_TYPE_OPTIONS,
   DRIVER_AIDE_JOB_TITLES,
   REQUEST_PUNCH_LOG_SUBMIT_PATH,
@@ -1205,7 +1204,14 @@ export default function TimekeepingPunch() {
               userShifts,
             );
             const windows = Array.isArray(userShifts)
-              ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
+              ? userShifts
+                  .map((shift) =>
+                    buildShiftWindowFromUserShift(
+                      shift,
+                      companySettingsTimeZoneRef.current,
+                    ),
+                  )
+                  .filter(Boolean)
               : [];
             setClockOutConfirmSchedule(
               getClockOutScheduleSummary(windows, new Date()),
@@ -1604,7 +1610,11 @@ export default function TimekeepingPunch() {
       const data = await res.json();
       console.log("[PL Approvers] raw payload:", JSON.stringify(data));
       if (res.ok && data?.data) {
-        setPlApproverItems(parseApproversPayload(data));
+        setPlApproverItems(
+          parseApproversPayload(data, {
+            supervisorGroupLabel: "Team Supervisors",
+          }),
+        );
       } else {
         Alert.alert("Error", data?.message || "Failed to fetch approvers.");
       }
@@ -1890,7 +1900,12 @@ export default function TimekeepingPunch() {
         return { showModal: false };
 
       const windows = userShifts
-        .map(buildShiftWindowFromUserShift)
+        .map((shift) =>
+          buildShiftWindowFromUserShift(
+            shift,
+            companySettingsTimeZoneRef.current,
+          ),
+        )
         .filter(Boolean);
       if (!windows.length) return { showModal: false };
 
@@ -1997,7 +2012,8 @@ export default function TimekeepingPunch() {
    *   minutesEarly <= shiftAssignmentWindowMinutes (assignment window bypass -> default REGULAR).
    * - If employment `isDriver === true`: skip that modal (no automatic DRIVER_AIDE_AM).
    * - If `isDriver` is unknown (null): legacy allowed-company + job-title rules (DRIVER_AIDE_AM default).
-   * - `hasScheduledShift`: in an active shift or next shift within NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES (12h).
+   * - `hasScheduledShift`: in an active shift, or a shift that starts on the same
+   *   company calendar day as clock-in.
    */
   const checkClockInEarly = async ({ token, clockInAt }) => {
     const baseResult = (over = {}) => ({
@@ -2038,18 +2054,30 @@ export default function TimekeepingPunch() {
         "Timekeeping punch userShifts (clock-in early check):",
         userShifts,
       );
+      const fallbackTimeZone = companySettingsTimeZoneRef.current;
       const windows = Array.isArray(userShifts)
-        ? userShifts.map(buildShiftWindowFromUserShift).filter(Boolean)
+        ? userShifts
+            .map((shift) =>
+              buildShiftWindowFromUserShift(shift, fallbackTimeZone),
+            )
+            .filter(Boolean)
         : [];
       const hasScheduledShift = hasRelevantScheduledShiftForClockIn(
         windows,
         clockInAt,
-        NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
       );
       devLog("checkClockInEarly: schedule relevance", {
         shiftWindowCount: windows.length,
         hasScheduledShift,
-        lookaheadMinutes: NO_SCHEDULE_SHIFT_LOOKAHEAD_MINUTES,
+        fallbackTimeZone,
+        assignedDates: Array.isArray(userShifts)
+          ? userShifts.map((shift) => shift?.assignedDate)
+          : [],
+        windows: windows.map((w) => ({
+          start: w.start?.toISOString?.(),
+          end: w.end?.toISOString?.(),
+          timeZone: w.timeZone,
+        })),
       });
       const allowedCompanyIds = Array.isArray(CLOCK_OUT_DEVIATION_COMPANY_IDS)
         ? CLOCK_OUT_DEVIATION_COMPANY_IDS.map((id) => String(id).trim()).filter(
@@ -3911,6 +3939,12 @@ export default function TimekeepingPunch() {
                             maxHeight: 220,
                           }}
                           placeholderStyle={{ color: "#9CA3AF" }}
+                          categorySelectable={false}
+                          listParentLabelStyle={{
+                            fontWeight: "700",
+                            color: "#64748b",
+                            fontSize: 12,
+                          }}
                           zIndex={8000}
                           zIndexInverse={6000}
                           listMode="SCROLLVIEW"

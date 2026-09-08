@@ -22,6 +22,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { useRouter } from "expo-router";
+import DropDownPicker from "react-native-dropdown-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../../config/constant";
 import { getTokenUserId } from "../../../../store/useAuthStore";
@@ -30,6 +31,11 @@ import {
   formatLeaveDateTimeLabel,
   normalizeLeaveRecord,
 } from "../../../../utils/dateOnlyUtils";
+import {
+  fetchMultiApprovalEnabled,
+  fetchEscalationTargets,
+  fetchEmployeeDirectory,
+} from "../../../../utils/leaveEscalation";
 
 const { height } = Dimensions.get("window");
 
@@ -235,11 +241,11 @@ const resolveRequesterLabel = (item) => {
     requester?.username ||
     requester?.email ||
     item?.requesterEmail ||
-    (requester?.id != null ? `ID ${requester.id}` : "Unknown requester")
+    "Unknown requester"
   );
 };
 
-const resolveApproverLabel = (item) => {
+const resolveApproverLabel = (item, directory) => {
   const approver =
     item?.approver ?? item?.Approver ?? item?.approverUser ?? null;
   const profile = approver?.profile ?? null;
@@ -254,14 +260,44 @@ const resolveApproverLabel = (item) => {
     .map((value) => String(value ?? "").trim())
     .find(Boolean);
 
+  const fromDirectory =
+    directory?.[String(approver?.id ?? item?.approverId ?? "")] || null;
+
   return (
     fullName ||
     approver?.username ||
     approver?.email ||
     item?.approverEmail ||
+    fromDirectory ||
     (approver?.id != null || item?.approverId != null
-      ? `ID ${approver?.id ?? item?.approverId}`
+      ? "Assigned approver"
       : null)
+  );
+};
+
+const resolveSecondaryApproverLabel = (item, directory) => {
+  const secondaryApprover = item?.secondaryApprover ?? null;
+  const profile = secondaryApprover?.profile ?? null;
+  const fullName = [
+    `${profile?.firstName ?? secondaryApprover?.firstName ?? ""} ${profile?.lastName ?? secondaryApprover?.lastName ?? ""}`.trim(),
+    secondaryApprover?.name,
+    profile?.name,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean);
+
+  // The server doesn't join a secondaryApprover object on this endpoint —
+  // resolve the display name client-side from the company employee directory.
+  const fromDirectory =
+    directory?.[String(secondaryApprover?.id ?? item?.secondaryApproverId ?? "")] ||
+    null;
+
+  return (
+    fullName ||
+    secondaryApprover?.username ||
+    secondaryApprover?.email ||
+    fromDirectory ||
+    (item?.secondaryApproverId != null ? "Another approver" : null)
   );
 };
 
@@ -308,6 +344,45 @@ const isApproverMatch = (leave, currentUserId) => {
     : false;
 };
 
+const resolveCanAct = (item, currentUserId, userRole) => {
+  const status = String(item?.status ?? "").toLowerCase();
+  const currentId = toStr(currentUserId);
+
+  if (status === "pending_secondary") {
+    const escalatedByUserId = toStr(
+      item?.escalatedByUserId ?? item?.escalatedBy?.id,
+    );
+    const originalApproverId = toStr(item?.approverId ?? item?.approver?.id);
+    // Whoever escalated this (and the originally assigned approver) already
+    // made their call — they're locked out of acting again, even as an
+    // admin/superadmin, and even if the server's canAct flag says otherwise
+    // (its eligibility check doesn't account for who escalated the request,
+    // only department/role-based eligibility).
+    if (
+      currentId &&
+      (currentId === escalatedByUserId || currentId === originalApproverId)
+    ) {
+      return false;
+    }
+  }
+
+  // Trust the server's per-leave eligibility if it's ever present, but the
+  // deployed API doesn't return one today — compute a stage-aware fallback
+  // entirely client-side from fields already on the leave record instead.
+  if (typeof item?.canAct === "boolean") return item.canAct;
+
+  if (status === "pending_secondary") {
+    const secondaryApproverId = toStr(
+      item?.secondaryApproverId ?? item?.secondaryApprover?.id,
+    );
+    if (userRole === "admin" || userRole === "superadmin") return true;
+    return !!secondaryApproverId && currentId === secondaryApproverId;
+  }
+
+  if (userRole === "admin" || userRole === "superadmin") return true;
+  return isApproverMatch(item, currentUserId);
+};
+
 // ---------------------------------------------------------------------
 // Main ManageLeaves Component
 // ---------------------------------------------------------------------
@@ -321,16 +396,27 @@ export default function ManageLeaves() {
   const [sortModalVisible, setSortModalVisible] = useState(false);
   const [sortOption, setSortOption] = useState("newest");
   const [processingLeaves, setProcessingLeaves] = useState({});
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [userRole, setUserRole] = useState("");
+  const [employeeDirectory, setEmployeeDirectory] = useState({});
+  const [multiApprovalEnabled, setMultiApprovalEnabled] = useState(false);
 
   // ACTIONS Modal state (for when a leave card is tapped)
   const [actionsModalVisible, setActionsModalVisible] = useState(false);
   const [actionsLeave, setActionsLeave] = useState(null);
-  // Expanded section: "approve", "reject", "delete" or null
+  // Expanded section: "approve", "reject", "escalate", "delete" or null
   const [expandedSection, setExpandedSection] = useState(null);
 
   // For optional comments when approving or rejecting.
   const [approveComments, setApproveComments] = useState("");
   const [rejectComments, setRejectComments] = useState("");
+
+  // For the "Escalate Leave" action.
+  const [escalateOpen, setEscalateOpen] = useState(false);
+  const [escalateValue, setEscalateValue] = useState(null);
+  const [escalateItems, setEscalateItems] = useState([]);
+  const [escalateComments, setEscalateComments] = useState("");
+  const [escalateTargetsLoading, setEscalateTargetsLoading] = useState(false);
 
   const router = useRouter();
 
@@ -380,35 +466,39 @@ export default function ManageLeaves() {
         );
         return;
       }
-      let userRole = "";
+      let role = "";
       try {
         const profileRes = await fetch(`${API_BASE_URL}/api/account/profile`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const profileData = await profileRes.json();
         if (profileRes.ok) {
-          userRole = String(profileData?.data?.user?.role ?? "").toLowerCase();
+          role = String(profileData?.data?.user?.role ?? "").toLowerCase();
         }
       } catch (profileError) {
         console.error("Error resolving leave management role:", profileError);
       }
+      setUserRole(role);
+
+      fetchMultiApprovalEnabled(token).then(setMultiApprovalEnabled);
+      fetchEmployeeDirectory(token).then(setEmployeeDirectory);
 
       const res = await fetch(`${API_BASE_URL}/api/leaves/`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
       if (res.ok) {
-        const currentUserId = getTokenUserId(token);
+        const tokenUserId = getTokenUserId(token);
+        setCurrentUserId(tokenUserId);
         const rows = Array.isArray(data.data)
           ? data.data.map(normalizeLeaveRecord)
           : [];
-        const canViewAllCompanyLeaves =
-          userRole === "admin" || userRole === "superadmin";
-        const visibleRows = canViewAllCompanyLeaves
-          ? rows
-          : rows.filter((leave) => isApproverMatch(leave, currentUserId));
-        setApproverLeaves(visibleRows);
-        applyFiltersAndSort(visibleRows, activeFilter, sortOption);
+        // The server already scopes visibility correctly (company-wide for
+        // admin/superadmin, department/direct-reports for supervisor — see
+        // leaveVisibilityWhere on the server) — every returned row is meant
+        // to be viewable, whether or not the viewer can act on it (canAct).
+        setApproverLeaves(rows);
+        applyFiltersAndSort(rows, activeFilter, sortOption);
       } else {
         RNAlert.alert("Error", data.message || "Failed to fetch leaves.");
       }
@@ -527,11 +617,32 @@ export default function ManageLeaves() {
   // ACTIONS MODAL (mimicking Department modal styling)
   // ---------------------------------------------------------------------
 
+  const resetEscalateState = () => {
+    setEscalateOpen(false);
+    setEscalateValue(null);
+    setEscalateItems([]);
+    setEscalateComments("");
+  };
+
+  const loadEscalationTargets = async (leaveItem) => {
+    setEscalateTargetsLoading(true);
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const targets = await fetchEscalationTargets(token, {
+        excludeUserIds: [currentUserId, leaveItem?.userId],
+      });
+      setEscalateItems(targets);
+    } finally {
+      setEscalateTargetsLoading(false);
+    }
+  };
+
   const openActionsModal = (leaveItem) => {
     setActionsLeave(leaveItem);
     setExpandedSection(null);
     setApproveComments("");
     setRejectComments("");
+    resetEscalateState();
     setActionsModalVisible(true);
     actionsModalY.setValue(height);
     Animated.parallel([
@@ -554,8 +665,12 @@ export default function ManageLeaves() {
     setExpandedSection(section);
     setApproveComments("");
     setRejectComments("");
+    resetEscalateState();
     setActionsModalVisible(true);
     actionsModalY.setValue(height);
+    if (section === "escalate") {
+      loadEscalationTargets(leaveItem);
+    }
     Animated.parallel([
       Animated.timing(modalBgAnim, {
         toValue: 1,
@@ -706,6 +821,70 @@ export default function ManageLeaves() {
     }
   };
 
+  const confirmEscalate = async () => {
+    const leaveId = resolveLeaveId(actionsLeave);
+    if (!leaveId) {
+      RNAlert.alert("Error", "Missing leave request ID. Please refresh and try again.");
+      closeActionsModal();
+      return;
+    }
+    if (!escalateValue) {
+      RNAlert.alert("Select an approver", "Please choose who to escalate this leave to.");
+      return;
+    }
+    const selectedStatus = String(actionsLeave?.status ?? "").toLowerCase();
+    if (selectedStatus !== "pending") {
+      RNAlert.alert("Request updated", "This leave can no longer be escalated. Refreshing leave list.");
+      fetchApproverLeaves();
+      closeActionsModal();
+      return;
+    }
+    setProcessingLeaves((prev) => ({
+      ...prev,
+      [leaveId]: "escalating",
+    }));
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const res = await fetch(
+        `${API_BASE_URL}/api/leaves/${encodeURIComponent(String(leaveId))}/approve`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            escalateTo: escalateValue,
+            approverComments: escalateComments,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        RNAlert.alert("Success", "Leave escalated for final approval.");
+        fetchApproverLeaves();
+      } else {
+        const message = data.message || "Failed to escalate leave.";
+        if (
+          String(message).toLowerCase().includes("not found") ||
+          String(message).toLowerCase().includes("already processed") ||
+          String(message).toLowerCase().includes("already actioned")
+        ) {
+          RNAlert.alert("Request updated", `${message} Refreshing leave list.`);
+          fetchApproverLeaves();
+        } else {
+          RNAlert.alert("Error", message);
+        }
+      }
+    } catch (error) {
+      console.error("Error escalating leave:", error);
+      RNAlert.alert("Error", "An error occurred while escalating the leave.");
+    } finally {
+      setProcessingLeaves((prev) => ({ ...prev, [leaveId]: null }));
+      closeActionsModal();
+    }
+  };
+
   const confirmDelete = async () => {
     const leaveId = resolveLeaveId(actionsLeave);
     if (!leaveId) {
@@ -752,6 +931,8 @@ export default function ManageLeaves() {
   // ---------------------------------------------------------------------
 
   const renderItem = ({ item }) => {
+    const canAct = resolveCanAct(item, currentUserId, userRole);
+    const secondaryApproverName = resolveSecondaryApproverLabel(item, employeeDirectory);
     const cardScale = new Animated.Value(1);
     const animatePress = () => {
       Animated.sequence([
@@ -804,7 +985,7 @@ export default function ManageLeaves() {
                   Requester: {resolveRequesterLabel(item)}
                 </Text>
               </View>
-              {resolveApproverLabel(item) ? (
+              {resolveApproverLabel(item, employeeDirectory) ? (
                 <View className="flex-row items-center mb-1">
                   <Ionicons
                     name="shield-checkmark-outline"
@@ -812,7 +993,19 @@ export default function ManageLeaves() {
                     color="#6B7280"
                   />
                   <Text className="text-gray-600 text-sm ml-2">
-                    Approver: {resolveApproverLabel(item)}
+                    Approver: {resolveApproverLabel(item, employeeDirectory)}
+                  </Text>
+                </View>
+              ) : null}
+              {secondaryApproverName ? (
+                <View className="flex-row items-center mb-1">
+                  <Ionicons
+                    name="arrow-redo-outline"
+                    size={16}
+                    color="#1d4ed8"
+                  />
+                  <Text className="text-blue-700 text-sm ml-2 font-medium">
+                    Escalated to: {secondaryApproverName}
                   </Text>
                 </View>
               ) : null}
@@ -849,7 +1042,8 @@ export default function ManageLeaves() {
                 </Text>
               </View>
             </View>
-            {String(item?.status || "").toLowerCase().includes("pending") ? (
+            {canAct &&
+            String(item?.status || "").toLowerCase().includes("pending") ? (
               <View className="flex-row gap-2 px-3 pb-3">
                 <TouchableOpacity
                   onPress={() => openActionSection(item, "approve")}
@@ -864,6 +1058,22 @@ export default function ManageLeaves() {
                   className="flex-1 py-2.5 rounded-lg bg-red-500 items-center"
                 >
                   <Text className="text-white font-semibold">Reject</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+            {canAct &&
+            multiApprovalEnabled &&
+            String(item?.status || "").toLowerCase() === "pending" ? (
+              <View className="px-3 pb-3">
+                <TouchableOpacity
+                  onPress={() => openActionSection(item, "escalate")}
+                  activeOpacity={0.85}
+                  className="flex-row py-2.5 rounded-lg border border-blue-200 bg-blue-50 items-center justify-center"
+                >
+                  <Ionicons name="arrow-redo-outline" size={16} color="#1d4ed8" />
+                  <Text className="text-blue-700 font-semibold ml-1.5">
+                    Escalate to another supervisor
+                  </Text>
                 </TouchableOpacity>
               </View>
             ) : null}
@@ -979,6 +1189,93 @@ export default function ManageLeaves() {
     );
   };
 
+  const renderEscalateSection = () => {
+    const leaveId = resolveLeaveId(actionsLeave);
+    const isProcessing =
+      leaveId != null && processingLeaves[leaveId] === "escalating";
+    return (
+      <View className="bg-slate-50 rounded-lg p-4 mb-4">
+        <Text className="text-lg font-bold text-slate-700 mb-3">
+          Escalate Leave
+        </Text>
+        <Text className="text-slate-600 mb-4">
+          Pass this leave request to another supervisor or admin for final
+          approval:
+        </Text>
+        <View style={{ zIndex: 2000 }} className="mb-4">
+          {escalateTargetsLoading ? (
+            <View className="py-4 items-center">
+              <ActivityIndicator size="small" color="#f97316" />
+            </View>
+          ) : (
+            <DropDownPicker
+              open={escalateOpen}
+              value={escalateValue}
+              items={escalateItems}
+              setOpen={setEscalateOpen}
+              setValue={setEscalateValue}
+              setItems={setEscalateItems}
+              placeholder="Select an approver"
+              textStyle={{ color: "#374151" }}
+              style={{
+                borderColor: "#e2e8f0",
+                backgroundColor: "#fff",
+                minHeight: 50,
+              }}
+              dropDownContainerStyle={{
+                borderColor: "#e2e8f0",
+                backgroundColor: "#fff",
+              }}
+              placeholderStyle={{ color: "#9CA3AF" }}
+              zIndex={2000}
+              zIndexInverse={2000}
+              nestedScrollEnabled={true}
+              listMode="SCROLLVIEW"
+              scrollViewProps={{ nestedScrollEnabled: true }}
+              autoScroll={false}
+            />
+          )}
+        </View>
+        <View className="bg-white rounded-lg px-3 py-2 mb-4">
+          <TextInput
+            value={escalateComments}
+            onChangeText={setEscalateComments}
+            placeholder="Add a note for the next approver (optional)"
+            placeholderTextColor="#9CA3AF"
+            multiline
+            style={{ minHeight: 80, color: "#374151" }}
+          />
+        </View>
+        <View className="w-full flex-col gap-2 p-1">
+          <TouchableOpacity
+            onPress={confirmEscalate}
+            activeOpacity={0.8}
+            className="bg-blue-600 py-3 px-5 rounded-lg"
+            disabled={isProcessing || !escalateValue}
+            style={{ opacity: !escalateValue ? 0.6 : 1 }}
+          >
+            {isProcessing ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <Text className="text-white font-semibold text-center text-lg ">
+                Escalate
+              </Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setExpandedSection(null)}
+            activeOpacity={0.8}
+            className="border border-slate-200 py-3 px-5 rounded-lg"
+          >
+            <Text className="text-slate-700  text-center text-lg font-semibold">
+              Cancel
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   const renderDeleteSection = () => {
     const leaveId = resolveLeaveId(actionsLeave);
     const isProcessing =
@@ -1024,6 +1321,10 @@ export default function ManageLeaves() {
   // ---------------------------------------------------------------------
   // Render Main Component
   // ---------------------------------------------------------------------
+
+  const actionsCanAct = actionsLeave
+    ? resolveCanAct(actionsLeave, currentUserId, userRole)
+    : false;
 
   return (
     <SafeAreaView className="flex-1 bg-white">
@@ -1247,10 +1548,24 @@ export default function ManageLeaves() {
             <ScrollView style={{ paddingHorizontal: 20, paddingBottom: 20 }}>
               {expandedSection === null && (
                 <>
-                  {/* Only show Approve & Reject if leave is pending */}
-                  {String(actionsLeave?.status || "")
-                    .toLowerCase()
-                    .includes("pending") && (
+                  {resolveSecondaryApproverLabel(actionsLeave, employeeDirectory) ? (
+                    <View className="flex-row items-center p-3 mb-3 bg-blue-50 rounded-lg border border-blue-200">
+                      <Ionicons
+                        name="arrow-redo-outline"
+                        size={18}
+                        color="#1d4ed8"
+                      />
+                      <Text className="text-blue-700 text-sm ml-2 font-medium">
+                        Escalated to{" "}
+                        {resolveSecondaryApproverLabel(actionsLeave, employeeDirectory)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {/* Only show Approve & Reject if leave is pending and this viewer is eligible to act */}
+                  {actionsCanAct &&
+                    String(actionsLeave?.status || "")
+                      .toLowerCase()
+                      .includes("pending") && (
                     <>
                       <TouchableOpacity
                         onPress={() => setExpandedSection("approve")}
@@ -1290,14 +1605,44 @@ export default function ManageLeaves() {
                             Reject Leave
                           </Text>
                         </View>
+                      <Ionicons
+                        name="chevron-forward"
+                        size={24}
+                        color="#64748b"
+                      />
+                    </TouchableOpacity>
+                    </>
+                  )}
+                  {actionsCanAct &&
+                    multiApprovalEnabled &&
+                    String(actionsLeave?.status || "").toLowerCase() ===
+                      "pending" && (
+                      <TouchableOpacity
+                        onPress={() => {
+                          setExpandedSection("escalate");
+                          loadEscalationTargets(actionsLeave);
+                        }}
+                        className="flex-row items-center justify-between p-4 mb-3 bg-slate-50 rounded-lg"
+                      >
+                        <View className="flex-row items-center">
+                          <View className="w-10 h-10 rounded-md bg-orange-400 items-center justify-center mr-3">
+                            <Ionicons
+                              name="arrow-redo-outline"
+                              size={18}
+                              color="#fff"
+                            />
+                          </View>
+                          <Text className="text-slate-700 font-medium">
+                            Escalate Leave
+                          </Text>
+                        </View>
                         <Ionicons
                           name="chevron-forward"
                           size={24}
                           color="#64748b"
                         />
                       </TouchableOpacity>
-                    </>
-                  )}
+                    )}
                   <TouchableOpacity
                     onPress={() => setExpandedSection("delete")}
                     className="flex-row items-center justify-between p-4 mb-3 bg-slate-50 rounded-lg"
@@ -1320,6 +1665,7 @@ export default function ManageLeaves() {
               )}
               {expandedSection === "approve" && renderApproveSection()}
               {expandedSection === "reject" && renderRejectSection()}
+              {expandedSection === "escalate" && renderEscalateSection()}
               {expandedSection === "delete" && renderDeleteSection()}
             </ScrollView>
           </Animated.View>
