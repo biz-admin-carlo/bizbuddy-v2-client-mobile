@@ -10,33 +10,25 @@ import {
   ActivityIndicator,
   Alert as RNAlert,
   Animated,
-  PanResponder,
-  Dimensions,
   TouchableOpacity,
   TextInput,
   ScrollView,
   TouchableWithoutFeedback,
   RefreshControl,
+  Modal,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import DropDownPicker from "react-native-dropdown-picker";
 import { useRouter, useFocusEffect } from "expo-router";
 import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
-import {
-  API_BASE_URL,
-  DEFAULT_SHIFT_DISPLAY_TIMEZONE,
-} from "../../../config/constant";
+import { API_BASE_URL } from "../../../config/constant";
 import { formatLocalTimeHm } from "../../../utils/dateOnlyUtils";
-import { buildShiftWindowFromUserShift } from "../../../utils/timekeepingShiftUtils";
 import { parseApproversPayload } from "../../../utils/approversPayload";
 
-const { height } = Dimensions.get("window");
-
-const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
 const MIN_LEAVE_REASON_LENGTH = 10;
+const ACTIVE_LEAVE_STATUSES = ["pending", "pending_secondary", "approved"];
 
 const getLocalDateKey = (dateInput) => {
   const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
@@ -47,35 +39,27 @@ const getLocalDateKey = (dateInput) => {
   return `${year}-${month}-${day}`;
 };
 
-const getDateKeyInTimeZone = (dateInput, timeZone) => {
-  if (!dateInput) return "";
-  const normalizedDateInput = String(dateInput).trim();
-  if (DATE_ONLY_REGEX.test(normalizedDateInput)) return normalizedDateInput;
-  const date = new Date(dateInput);
-  if (!Number.isFinite(date.getTime())) return "";
-  const tz = timeZone || DEFAULT_SHIFT_DISPLAY_TIMEZONE;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const year = parts.find((p) => p.type === "year")?.value;
-  const month = parts.find((p) => p.type === "month")?.value;
-  const day = parts.find((p) => p.type === "day")?.value;
-  if (!year || !month || !day) return "";
-  return `${year}-${month}-${day}`;
+const scheduleDateKey = (assignedDate) => String(assignedDate ?? "").slice(0, 10);
+
+const formatDateKey = (dateKey, options) => {
+  const [year, month, day] = String(dateKey).slice(0, 10).split("-").map(Number);
+  if (!year || !month || !day) return String(dateKey ?? "");
+  return new Date(year, month - 1, day).toLocaleDateString("en-US", options);
 };
 
-const getShiftTimeZone = (shift) =>
-  shift?.shift?.timeZone ||
-  shift?.shift?.time_zone ||
-  shift?.timeZone ||
-  shift?.time_zone ||
-  DEFAULT_SHIFT_DISPLAY_TIMEZONE;
-
-const getShiftDateKey = (shift) =>
-  getDateKeyInTimeZone(shift?.assignedDate, getShiftTimeZone(shift));
+/** Pending or approved leave whose dates overlap the requested range. */
+const findOverlappingLeave = (leaves, startKey, endKey) => {
+  if (!startKey || !endKey || startKey > endKey) return null;
+  return (
+    leaves.find((row) => {
+      if (!ACTIVE_LEAVE_STATUSES.includes(row.status)) return false;
+      const start = String(row.startDate ?? "").slice(0, 10);
+      const end = String(row.endDate ?? "").slice(0, 10);
+      if (!start || !end) return false;
+      return startKey <= end && start <= endKey;
+    }) ?? null
+  );
+};
 
 const parseNaiveTime = (value) => {
   if (value == null || value === "") return null;
@@ -99,7 +83,6 @@ const formatNaiveTimeInZone = (naiveTimeStr) => {
   return `${h}:${m} ${ampm}`;
 };
 
-/** Compact hour label matching web leave UI (e.g. "3h", "1.5h"). */
 const formatCompactHours = (value) => {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return null;
@@ -110,14 +93,24 @@ const formatCompactHours = (value) => {
   return `${label}h`;
 };
 
-// Utility to combine date and time into one
-const combineDateAndTime = (date, time) => {
-  const combined = new Date(date);
-  combined.setHours(time.getHours());
-  combined.setMinutes(time.getMinutes());
-  combined.setSeconds(time.getSeconds());
-  combined.setMilliseconds(time.getMilliseconds());
-  return combined;
+/** Native UIDatePicker may mutate the `value` Date in place — never reuse one instance for multiple pickers or state fields. */
+const cloneJsDate = (d) =>
+  d instanceof Date && Number.isFinite(d.getTime())
+    ? new Date(d.getTime())
+    : new Date();
+
+/** Pin date-mode values to local noon so the spinner does not shift the calendar day across timezones. */
+const toPickerDateValue = (d, mode) => {
+  const next = cloneJsDate(d);
+  if (mode === "date") next.setHours(12, 0, 0, 0);
+  return next;
+};
+
+/** Default leave window is 8:00 AM – 5:00 PM on the given (or current) calendar day. */
+const defaultLeaveTime = (hour, minute = 0) => {
+  const d = new Date();
+  d.setHours(hour, minute, 0, 0);
+  return d;
 };
 
 /** Pull an array of balance rows from typical API wrapper shapes */
@@ -234,15 +227,16 @@ const balanceCardShadow = Platform.select({
 
 const SubmitLeaves = () => {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   // Additional state for the "Reason" text
   const [leaveReason, setLeaveReason] = useState("");
 
   const [leaveType, setLeaveType] = useState("");
   const [leaveStartDate, setLeaveStartDate] = useState(new Date());
-  const [leaveStartTime, setLeaveStartTime] = useState(new Date());
+  const [leaveStartTime, setLeaveStartTime] = useState(() => defaultLeaveTime(8));
   const [leaveEndDate, setLeaveEndDate] = useState(new Date());
-  const [leaveEndTime, setLeaveEndTime] = useState(new Date());
+  const [leaveEndTime, setLeaveEndTime] = useState(() => defaultLeaveTime(17));
   const [approverOpen, setApproverOpen] = useState(false);
   const [approverItems, setApproverItems] = useState([]);
   const [approverValue, setApproverValue] = useState("");
@@ -261,7 +255,12 @@ const SubmitLeaves = () => {
   const [balancesLoading, setBalancesLoading] = useState(true);
   const [balancesError, setBalancesError] = useState(null);
   const [refreshingBalances, setRefreshingBalances] = useState(false);
-  const [userShifts, setUserShifts] = useState([]);
+  const [policies, setPolicies] = useState([]);
+  const [myLeaves, setMyLeaves] = useState([]);
+  const [affectedSchedules, setAffectedSchedules] = useState([]);
+  const [loadingSchedules, setLoadingSchedules] = useState(false);
+  const [shiftSelection, setShiftSelection] = useState({});
+  const [includeWeekends, setIncludeWeekends] = useState(true);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -269,31 +268,9 @@ const SubmitLeaves = () => {
   const submitButtonScale = useRef(new Animated.Value(1)).current;
   const dateButtonScale = useRef(new Animated.Value(1)).current;
   const timeButtonScale = useRef(new Animated.Value(1)).current;
-  const modalBgAnim = useRef(new Animated.Value(0)).current;
-  const dateTimeModalAnim = useRef(new Animated.Value(height)).current;
   const confirmButtonScale = useRef(new Animated.Value(1)).current;
-
-  // Pan responder for date time modal
-  const dateTimePanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        if (gestureState.dy > 0) {
-          dateTimeModalAnim.setValue(gestureState.dy);
-        }
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dy > 100) {
-          closeDateTimeModal();
-        } else {
-          Animated.spring(dateTimeModalAnim, {
-            toValue: 0,
-            useNativeDriver: true,
-          }).start();
-        }
-      },
-    }),
-  ).current;
+  const pickerSessionRef = useRef(0);
+  const scheduleTimerRef = useRef(null);
 
   useEffect(() => {
     // Initial animations
@@ -323,26 +300,22 @@ const SubmitLeaves = () => {
       await Promise.all([
         fetchApprovers(token),
         fetchLeavePolicies(token),
-        fetchUserShifts(token),
+        fetchMyLeaves(token),
       ]);
     };
     initialize();
   }, [router]);
 
-  const fetchUserShifts = async (token) => {
+  const fetchMyLeaves = async (token) => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/usershifts`, {
+      const res = await fetch(`${API_BASE_URL}/api/leaves/my`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (res.ok && Array.isArray(data?.data)) {
-        setUserShifts(data.data);
-      } else {
-        setUserShifts([]);
-      }
+      setMyLeaves(res.ok && Array.isArray(data?.data) ? data.data : []);
     } catch (error) {
-      console.error("Error fetching user shifts:", error);
-      setUserShifts([]);
+      console.error("Error fetching leave requests:", error);
+      setMyLeaves([]);
     }
   };
 
@@ -466,6 +439,7 @@ const SubmitLeaves = () => {
         //
         // To fix this, we now use the policy's *type-like* field as the
         // dropdown value so `payload.type` matches what the API expects.
+        setPolicies(list);
         const formatted = list.map((policy) => {
           // This should line up with whatever the backend uses as its type key.
           const typeKey =
@@ -523,12 +497,31 @@ const SubmitLeaves = () => {
       );
       return;
     }
-    const combinedStart = combineDateAndTime(leaveStartDate, leaveStartTime);
-    const combinedEnd = combineDateAndTime(leaveEndDate, leaveEndTime);
-    if (combinedStart > combinedEnd) {
+    const startKey = getLocalDateKey(leaveStartDate);
+    const endKey = getLocalDateKey(leaveEndDate);
+    if (!startKey || !endKey || startKey > endKey) {
       RNAlert.alert(
         "Invalid Dates",
-        "Start Date and Time cannot be after End Date and Time.",
+        "End date cannot be before the start date.",
+      );
+      return;
+    }
+    const conflict = findOverlappingLeave(myLeaves, startKey, endKey);
+    if (conflict) {
+      const statusLabel = conflict.status === "approved" ? "approved" : "pending";
+      const fromLabel = formatDateKey(conflict.startDate, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+      const toLabel = formatDateKey(conflict.endDate, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+      RNAlert.alert(
+        "Overlapping request",
+        `You already have a ${statusLabel} leave request for ${fromLabel} – ${toLabel}. Please choose a different date range.`,
       );
       return;
     }
@@ -543,22 +536,18 @@ const SubmitLeaves = () => {
         return;
       }
 
-      // Include leaveReason in the payload
-      const startIso = combinedStart.toISOString();
-      const endIso = combinedEnd.toISOString();
       const payload = {
         type: leaveType,
-        fromDate: startIso,
-        toDate: endIso,
-        startDate: startIso,
-        endDate: endIso,
-        fromTime: formatLocalTimeHm(combinedStart),
-        toTime: formatLocalTimeHm(combinedEnd),
-        startTime: formatLocalTimeHm(combinedStart),
-        endTime: formatLocalTimeHm(combinedEnd),
         approverId: approverValue,
         leaveReason: trimmedReason,
-        isPaid: isPaidLeave,
+        fromDate: startKey,
+        toDate: endKey,
+        isPaid: resolvedIsPaid,
+        ...(affectedShiftIds.length > 0 ? { affectedShiftIds } : {}),
+        ...(excludedShiftIds.length > 0 ? { excludedShiftIds } : {}),
+        includeWeekends,
+        fromTime: formatLocalTimeHm(leaveStartTime),
+        toTime: formatLocalTimeHm(leaveEndTime),
       };
 
       const res = await fetch(`${API_BASE_URL}/api/leaves/submit`, {
@@ -576,12 +565,18 @@ const SubmitLeaves = () => {
         setLeaveType("");
         setLeaveReason("");
         setLeaveStartDate(new Date());
-        setLeaveStartTime(new Date());
+        setLeaveStartTime(defaultLeaveTime(8));
         setLeaveEndDate(new Date());
-        setLeaveEndTime(new Date());
+        setLeaveEndTime(defaultLeaveTime(17));
         setApproverValue("");
         setIsPaidLeave(true);
-        await fetchLeaveBalances(token, { soft: true });
+        setIncludeWeekends(true);
+        setShiftSelection({});
+        setAffectedSchedules([]);
+        await Promise.all([
+          fetchLeaveBalances(token, { soft: true }),
+          fetchMyLeaves(token),
+        ]);
       } else {
         RNAlert.alert(
           "Error",
@@ -641,23 +636,13 @@ const SubmitLeaves = () => {
         break;
     }
 
-    setTempPickerValue(initialValue);
+    setTempPickerValue(toPickerDateValue(initialValue, mode));
+    setOpenLeaveType(false);
+    setApproverOpen(false);
+    pickerSessionRef.current += 1;
 
     if (Platform.OS === "ios") {
       setDateTimeModalVisible(true);
-      Animated.parallel([
-        Animated.timing(modalBgAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.spring(dateTimeModalAnim, {
-          toValue: 0,
-          tension: 70,
-          friction: 12,
-          useNativeDriver: true,
-        }),
-      ]).start();
     } else {
       // Android -> show the native picker
       setCurrentPicker(field);
@@ -665,20 +650,7 @@ const SubmitLeaves = () => {
   };
 
   const closeDateTimeModal = () => {
-    Animated.parallel([
-      Animated.timing(modalBgAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-      Animated.timing(dateTimeModalAnim, {
-        toValue: height,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      setDateTimeModalVisible(false);
-    });
+    setDateTimeModalVisible(false);
   };
 
   const handleDateTimeConfirm = () => {
@@ -686,16 +658,16 @@ const SubmitLeaves = () => {
 
     switch (currentDateTimeField) {
       case "startDate":
-        setLeaveStartDate(tempPickerValue);
+        setLeaveStartDate(cloneJsDate(tempPickerValue));
         break;
       case "startTime":
-        setLeaveStartTime(tempPickerValue);
+        setLeaveStartTime(cloneJsDate(tempPickerValue));
         break;
       case "endDate":
-        setLeaveEndDate(tempPickerValue);
+        setLeaveEndDate(cloneJsDate(tempPickerValue));
         break;
       case "endTime":
-        setLeaveEndTime(tempPickerValue);
+        setLeaveEndTime(cloneJsDate(tempPickerValue));
         break;
     }
 
@@ -704,25 +676,141 @@ const SubmitLeaves = () => {
     }, 100);
   };
 
-  const leaveRangeStartKey = getLocalDateKey(leaveStartDate);
-  const leaveRangeEndKey = getLocalDateKey(leaveEndDate);
-  const affectedShifts = useMemo(() => {
-    if (!leaveRangeStartKey || !leaveRangeEndKey) return [];
-    const startKey =
-      leaveRangeStartKey <= leaveRangeEndKey
-        ? leaveRangeStartKey
-        : leaveRangeEndKey;
-    const endKey =
-      leaveRangeStartKey <= leaveRangeEndKey
-        ? leaveRangeEndKey
-        : leaveRangeStartKey;
-    return userShifts
-      .filter((userShift) => {
-        const shiftDate = getShiftDateKey(userShift);
-        return shiftDate && shiftDate >= startKey && shiftDate <= endKey;
-      })
-      .sort((a, b) => getShiftDateKey(a).localeCompare(getShiftDateKey(b)));
-  }, [userShifts, leaveRangeStartKey, leaveRangeEndKey]);
+  const startDateKey = getLocalDateKey(leaveStartDate);
+  const endDateKey = getLocalDateKey(leaveEndDate);
+  const fromTimeHm = formatLocalTimeHm(leaveStartTime);
+  const toTimeHm = formatLocalTimeHm(leaveEndTime);
+  const rangeIsValid = Boolean(
+    startDateKey && endDateKey && startDateKey <= endDateKey,
+  );
+
+  useEffect(() => {
+    if (scheduleTimerRef.current) clearTimeout(scheduleTimerRef.current);
+    if (!rangeIsValid) {
+      setAffectedSchedules([]);
+      setLoadingSchedules(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingSchedules(true);
+    scheduleTimerRef.current = setTimeout(async () => {
+      try {
+        const token = await SecureStore.getItemAsync("token");
+        if (!token) {
+          if (!cancelled) setAffectedSchedules([]);
+          return;
+        }
+        const params = new URLSearchParams({
+          startDate: startDateKey,
+          endDate: endDateKey,
+          fromTime: fromTimeHm,
+          toTime: toTimeHm,
+          includeWeekends: String(includeWeekends),
+        });
+        const res = await fetch(
+          `${API_BASE_URL}/api/leaves/affected-schedules?${params.toString()}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        const data = await res.json();
+        if (!cancelled) {
+          setAffectedSchedules(
+            res.ok && Array.isArray(data?.data) ? data.data : [],
+          );
+        }
+      } catch (error) {
+        console.error("Error fetching affected schedules:", error);
+        if (!cancelled) setAffectedSchedules([]);
+      } finally {
+        if (!cancelled) setLoadingSchedules(false);
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      if (scheduleTimerRef.current) clearTimeout(scheduleTimerRef.current);
+    };
+  }, [rangeIsValid, startDateKey, endDateKey, fromTimeHm, toTimeHm, includeWeekends]);
+
+  useEffect(() => {
+    setShiftSelection((prev) => {
+      const next = {};
+      affectedSchedules
+        .filter((row) => row.userShiftId)
+        .forEach((row) => {
+          next[row.userShiftId] = prev[row.userShiftId] ?? true;
+        });
+      return next;
+    });
+  }, [affectedSchedules]);
+
+  const selectedPolicy = useMemo(
+    () => policies.find((policy) => policy.leaveType === leaveType) ?? null,
+    [policies, leaveType],
+  );
+  const policyAllowsPaid = selectedPolicy ? selectedPolicy.isPaid !== false : true;
+  const policyAllowsUnpaid = selectedPolicy
+    ? selectedPolicy.isNotPaid !== false
+    : false;
+  const bothPayModesAllowed = policyAllowsPaid && policyAllowsUnpaid;
+  const resolvedIsPaid = !selectedPolicy
+    ? true
+    : bothPayModesAllowed
+      ? isPaidLeave
+      : policyAllowsPaid;
+
+  const duplicateConflict = useMemo(
+    () => findOverlappingLeave(myLeaves, startDateKey, endDateKey),
+    [myLeaves, startDateKey, endDateKey],
+  );
+  const affectedShiftIds = useMemo(
+    () =>
+      affectedSchedules
+        .filter((row) => row.userShiftId)
+        .map((row) => row.userShiftId),
+    [affectedSchedules],
+  );
+  const excludedShiftIds = useMemo(
+    () =>
+      affectedSchedules
+        .filter(
+          (row) => row.userShiftId && shiftSelection[row.userShiftId] === false,
+        )
+        .map((row) => row.userShiftId),
+    [affectedSchedules, shiftSelection],
+  );
+  const realShiftCountByDate = useMemo(() => {
+    const counts = {};
+    affectedSchedules.forEach((row) => {
+      if (row.isFallback) return;
+      const key = scheduleDateKey(row.assignedDate);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return counts;
+  }, [affectedSchedules]);
+  const hasRealShiftDay = useMemo(
+    () => affectedSchedules.some((row) => !row.isFallback),
+    [affectedSchedules],
+  );
+  const hasFallbackDay = useMemo(
+    () => affectedSchedules.some((row) => row.isFallback),
+    [affectedSchedules],
+  );
+  const totalAffectedHours = useMemo(
+    () =>
+      affectedSchedules.reduce((sum, row) => {
+        if (row.userShiftId && shiftSelection[row.userShiftId] === false) {
+          return sum;
+        }
+        return sum + (Number(row.scheduledHours) || 0);
+      }, 0),
+    [affectedSchedules, shiftSelection],
+  );
+  const durationDays = rangeIsValid
+    ? Math.round(
+        (new Date(endDateKey) - new Date(startDateKey)) / 864e5,
+      ) + 1
+    : null;
 
   const selectedLeaveBalance = useMemo(() => {
     if (!leaveType || !leaveBalances.length) return null;
@@ -740,32 +828,13 @@ const SubmitLeaves = () => {
     );
   }, [leaveType, leaveBalances]);
 
-  const estimatedHoursUsed = useMemo(() => {
-    let totalMs = 0;
-    if (affectedShifts.length > 0) {
-      for (const userShift of affectedShifts) {
-        const window = buildShiftWindowFromUserShift(userShift);
-        if (window?.start && window?.end) {
-          totalMs += Math.max(0, window.end.getTime() - window.start.getTime());
-        }
-      }
-    }
-    if (totalMs <= 0) {
-      const start = combineDateAndTime(leaveStartDate, leaveStartTime);
-      const end = combineDateAndTime(leaveEndDate, leaveEndTime);
-      totalMs = Math.max(0, end.getTime() - start.getTime());
-    }
-    if (totalMs <= 0) return null;
-    return totalMs / (1000 * 60 * 60);
-  }, [
-    affectedShifts,
-    leaveStartDate,
-    leaveStartTime,
-    leaveEndDate,
-    leaveEndTime,
-  ]);
+  const estimatedHoursUsed =
+    rangeIsValid && !loadingSchedules ? totalAffectedHours : null;
 
   const availableBalanceLabel = (() => {
+    if (selectedPolicy) {
+      return `${formatCompactHours(selectedPolicy.balanceHours) ?? "0h"} available balance`;
+    }
     const hoursLabel = formatCompactHours(selectedLeaveBalance?.hours);
     if (hoursLabel) return `${hoursLabel} available balance`;
     if (selectedLeaveBalance?.credits != null) {
@@ -784,7 +853,15 @@ const SubmitLeaves = () => {
     }
     return null;
   })();
-  const hoursUsedLabel = formatCompactHours(estimatedHoursUsed);
+  const hoursUsedLabel =
+    estimatedHoursUsed == null ? null : formatCompactHours(estimatedHoursUsed);
+  const canSubmit =
+    !isSubmitting &&
+    !!leaveType &&
+    !!approverValue &&
+    rangeIsValid &&
+    leaveReason.trim().length >= MIN_LEAVE_REASON_LENGTH &&
+    !duplicateConflict;
 
   // Android-specific date/time picker
   const renderAndroidPicker = () => {
@@ -843,6 +920,7 @@ const SubmitLeaves = () => {
     time,
     onDatePress,
     onTimePress,
+    timeDisabled = false,
   }) => (
     <View className="mb-5">
       <FormLabel text={label} />
@@ -867,11 +945,14 @@ const SubmitLeaves = () => {
           style={{ flex: 1, transform: [{ scale: timeButtonScale }] }}
         >
           <TouchableOpacity
-            className="py-3 px-4 bg-slate-50 rounded-lg flex-row justify-between items-center"
+            className={`py-3 px-4 rounded-lg flex-row justify-between items-center ${
+              timeDisabled ? "bg-slate-100" : "bg-slate-50"
+            }`}
             onPress={onTimePress}
+            disabled={timeDisabled}
             activeOpacity={0.8}
           >
-            <Text className="text-slate-800">
+            <Text className={timeDisabled ? "text-slate-400" : "text-slate-800"}>
               {time.toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
@@ -885,7 +966,7 @@ const SubmitLeaves = () => {
   );
 
   return (
-    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: 70 }}>
+    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: 12 }}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
@@ -1144,6 +1225,7 @@ const SubmitLeaves = () => {
                   setValue={setLeaveType}
                   setItems={setLeaveTypeItems}
                   onChangeValue={(val) => {
+                    setIsPaidLeave(true);
                     console.log("[LeaveType] value:", val, "type:", typeof val);
                   }}
                   onSelectItem={(item) => {
@@ -1175,47 +1257,52 @@ const SubmitLeaves = () => {
                 />
               </View>
 
-              {/* Paid / unpaid leave — matches web segmented control + info card */}
+              {/* Paid / unpaid — toggle only when the policy allows both, same as web */}
+              {leaveType && selectedPolicy ? (
               <View className="px-5 mb-5">
-                <FormLabel text="Leave compensation" required={false} />
-                <View className="flex-row gap-2">
-                  <TouchableOpacity
-                    onPress={() => setIsPaidLeave(true)}
-                    activeOpacity={0.85}
-                    className={`flex-1 py-3 rounded-xl border items-center ${
-                      isPaidLeave
-                        ? "bg-emerald-50 border-emerald-600"
-                        : "bg-white border-slate-200"
-                    }`}
-                  >
-                    <Text
-                      className={`text-base font-semibold ${
-                        isPaidLeave ? "text-emerald-800" : "text-slate-500"
-                      }`}
-                    >
-                      Paid
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={() => setIsPaidLeave(false)}
-                    activeOpacity={0.85}
-                    className={`flex-1 py-3 rounded-xl border items-center ${
-                      !isPaidLeave
-                        ? "bg-slate-100 border-slate-400"
-                        : "bg-white border-slate-200"
-                    }`}
-                  >
-                    <Text
-                      className={`text-base font-semibold ${
-                        !isPaidLeave ? "text-slate-700" : "text-slate-500"
-                      }`}
-                    >
-                      Unpaid
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+                {bothPayModesAllowed ? (
+                  <>
+                    <FormLabel text="Leave compensation" required={false} />
+                    <View className="flex-row gap-2">
+                      <TouchableOpacity
+                        onPress={() => setIsPaidLeave(true)}
+                        activeOpacity={0.85}
+                        className={`flex-1 py-3 rounded-xl border items-center ${
+                          isPaidLeave
+                            ? "bg-emerald-50 border-emerald-600"
+                            : "bg-white border-slate-200"
+                        }`}
+                      >
+                        <Text
+                          className={`text-base font-semibold ${
+                            isPaidLeave ? "text-emerald-800" : "text-slate-500"
+                          }`}
+                        >
+                          Paid
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => setIsPaidLeave(false)}
+                        activeOpacity={0.85}
+                        className={`flex-1 py-3 rounded-xl border items-center ${
+                          !isPaidLeave
+                            ? "bg-slate-100 border-slate-400"
+                            : "bg-white border-slate-200"
+                        }`}
+                      >
+                        <Text
+                          className={`text-base font-semibold ${
+                            !isPaidLeave ? "text-slate-700" : "text-slate-500"
+                          }`}
+                        >
+                          Unpaid
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                ) : null}
 
-                {isPaidLeave ? (
+                {resolvedIsPaid ? (
                   <View className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3.5">
                     <View className="flex-row items-center mb-1.5">
                       <Ionicons
@@ -1272,11 +1359,12 @@ const SubmitLeaves = () => {
                       </Text>
                     </View>
                     <Text className="text-sm text-slate-600 leading-5">
-                      This leave will not deduct from your paid leave balance.
+                      This leave will not be compensated by your employer.
                     </Text>
                   </View>
                 )}
               </View>
+              ) : null}
 
               {/* Approver Dropdown */}
               <View style={{ zIndex: 2000 }} className="px-5 mb-5">
@@ -1346,6 +1434,7 @@ const SubmitLeaves = () => {
                   label="Leave Start"
                   date={leaveStartDate}
                   time={leaveStartTime}
+                  timeDisabled={hasRealShiftDay}
                   onDatePress={() => openDateTimeModal("startDate", "date")}
                   onTimePress={() => openDateTimeModal("startTime", "time")}
                 />
@@ -1354,75 +1443,186 @@ const SubmitLeaves = () => {
                   label="Leave End"
                   date={leaveEndDate}
                   time={leaveEndTime}
+                  timeDisabled={hasRealShiftDay}
                   onDatePress={() => openDateTimeModal("endDate", "date")}
                   onTimePress={() => openDateTimeModal("endTime", "time")}
                 />
 
-                <View className="mb-5">
-                  <Text className="text-base font-semibold text-slate-800 mb-2">
-                    Affected schedule
+                {startDateKey && endDateKey && startDateKey > endDateKey ? (
+                  <Text className="text-sm text-red-600 mb-4">
+                    End date cannot be before the start date.
                   </Text>
-                  {affectedShifts.length === 0 ? (
-                    <Text className="text-sm text-slate-500">
-                      No scheduled shifts in this date range
+                ) : null}
+                {hasRealShiftDay ? (
+                  <Text className="text-xs text-slate-400 mb-4">
+                    Time window not needed — every day in this range already has a scheduled shift.
+                  </Text>
+                ) : hasFallbackDay ? (
+                  <Text className="text-xs text-slate-400 mb-4">
+                    Used to compute hours for days with no scheduled shift (including weekends and holidays), capped at your company&apos;s default shift length.
+                  </Text>
+                ) : null}
+                {durationDays ? (
+                  <Text className="text-xs text-slate-500 mb-4">
+                    {durationDays} day{durationDays === 1 ? "" : "s"}
+                  </Text>
+                ) : null}
+
+                {duplicateConflict ? (
+                  <View className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3.5">
+                    <Text className="text-sm font-semibold text-red-900">
+                      A request already exists for this period
                     </Text>
-                  ) : (
-                    <>
-                      {(affectedShifts.length >= 5
-                        ? affectedShifts.slice(0, 4)
-                        : affectedShifts
-                      ).map((userShift, index) => {
-                        const shiftName =
-                          userShift?.shift?.shiftName ||
-                          userShift?.shift?.name ||
-                          "Shift";
-                        const startLabel = formatNaiveTimeInZone(
-                          userShift?.shift?.startTime,
-                        );
-                        const endLabel = formatNaiveTimeInZone(
-                          userShift?.shift?.endTime,
-                        );
-                        const timeRange =
-                          startLabel && endLabel
-                            ? `${startLabel} - ${endLabel}`
-                            : startLabel || endLabel || "—";
-                        const assignedKey = getShiftDateKey(userShift);
-                        return (
-                          <View
-                            key={String(userShift?.id ?? index)}
-                            className="mb-2 p-3 bg-slate-50 rounded-xl border border-slate-100"
-                          >
-                            <Text className="text-sm font-semibold text-slate-800">
-                              {shiftName}
-                            </Text>
-                            <View className="flex-row items-center mt-1">
-                              <Ionicons
-                                name="time-outline"
-                                size={14}
-                                color="#64748b"
-                              />
-                              <Text className="ml-1 text-slate-600 text-sm">
-                                {timeRange}
+                    <Text className="text-sm text-red-800 mt-1 leading-5">
+                      You have a{" "}
+                      {duplicateConflict.status === "approved"
+                        ? "approved"
+                        : "pending"}{" "}
+                      {duplicateConflict.leaveType} request from{" "}
+                      {formatDateKey(duplicateConflict.startDate, {
+                        month: "short",
+                        day: "numeric",
+                      })}{" "}
+                      –{" "}
+                      {formatDateKey(duplicateConflict.endDate, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                      . Please choose a different date range.
+                    </Text>
+                  </View>
+                ) : null}
+
+                {rangeIsValid ? (
+                  <View className="mb-5">
+                    <View className="flex-row items-center justify-between mb-1">
+                      <Text className="text-base font-semibold text-slate-800">
+                        Affected schedules
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setIncludeWeekends((value) => !value)}
+                        activeOpacity={0.8}
+                        className="flex-row items-center"
+                      >
+                        <Ionicons
+                          name={includeWeekends ? "checkbox" : "square-outline"}
+                          size={20}
+                          color={includeWeekends ? "#EA580C" : "#94a3b8"}
+                        />
+                        <Text className="ml-1.5 text-xs text-slate-500">
+                          Include weekends
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text className="text-xs text-slate-400 mb-3 leading-4">
+                      When off, Saturdays and Sundays with no scheduled shift won&apos;t count toward this leave. A weekend day with a real scheduled shift is always included.
+                    </Text>
+                    {loadingSchedules ? (
+                      <View className="py-6 items-center">
+                        <ActivityIndicator size="small" color="#EA580C" />
+                      </View>
+                    ) : affectedSchedules.length === 0 ? (
+                      <Text className="text-sm text-slate-500">
+                        No scheduled shifts for this period.
+                      </Text>
+                    ) : (
+                      <View className="rounded-xl border border-slate-200 overflow-hidden">
+                        {affectedSchedules.map((row, index) => {
+                          const dateKey = scheduleDateKey(row.assignedDate);
+                          const isMultiShiftDay =
+                            !row.isFallback &&
+                            (realShiftCountByDate[dateKey] || 0) >= 2;
+                          const isDeselected =
+                            !!row.userShiftId &&
+                            shiftSelection[row.userShiftId] === false;
+                          const isExcluded = row.excludedByWeekend || isDeselected;
+                          const startLabel = formatNaiveTimeInZone(row.startTime);
+                          const endLabel = formatNaiveTimeInZone(row.endTime);
+                          return (
+                            <View
+                              key={String(row.userShiftId ?? `fallback-${dateKey}-${index}`)}
+                              className={`flex-row items-center px-3 py-3 ${
+                                index < affectedSchedules.length - 1
+                                  ? "border-b border-slate-100"
+                                  : ""
+                              } ${isExcluded ? "opacity-50" : ""}`}
+                            >
+                              {isMultiShiftDay ? (
+                                <TouchableOpacity
+                                  onPress={() =>
+                                    setShiftSelection((prev) => ({
+                                      ...prev,
+                                      [row.userShiftId]:
+                                        prev[row.userShiftId] === false,
+                                    }))
+                                  }
+                                  activeOpacity={0.8}
+                                  className="mr-2"
+                                >
+                                  <Ionicons
+                                    name={
+                                      shiftSelection[row.userShiftId] !== false
+                                        ? "checkbox"
+                                        : "square-outline"
+                                    }
+                                    size={22}
+                                    color={
+                                      shiftSelection[row.userShiftId] !== false
+                                        ? "#EA580C"
+                                        : "#94a3b8"
+                                    }
+                                  />
+                                </TouchableOpacity>
+                              ) : null}
+                              <View className="flex-1">
+                                <Text className="text-sm font-semibold text-slate-800">
+                                  {formatDateKey(dateKey, {
+                                    weekday: "short",
+                                    month: "short",
+                                    day: "numeric",
+                                  })}
+                                </Text>
+                                {row.isFallback ? (
+                                  <Text className="text-xs text-slate-400 mt-0.5">
+                                    No shift scheduled
+                                    {row.excludedByWeekend
+                                      ? " — excluded (weekend)"
+                                      : ""}
+                                  </Text>
+                                ) : (
+                                  <>
+                                    <Text className="text-xs text-slate-600 mt-0.5">
+                                      {row.shiftName || "Shift"}
+                                    </Text>
+                                    <Text className="text-xs text-slate-400 mt-0.5">
+                                      {startLabel || "—"} → {endLabel || "—"}
+                                    </Text>
+                                  </>
+                                )}
+                              </View>
+                              <Text
+                                className={`text-sm font-semibold text-orange-500 ${
+                                  isExcluded ? "line-through" : ""
+                                }`}
+                              >
+                                {Number(row.scheduledHours || 0).toFixed(2)}h
                               </Text>
                             </View>
-                            {assignedKey ? (
-                              <Text className="text-xs text-slate-500 mt-1">
-                                {new Date(
-                                  `${assignedKey}T12:00:00`,
-                                ).toLocaleDateString()}
-                              </Text>
-                            ) : null}
-                          </View>
-                        );
-                      })}
-                      {affectedShifts.length >= 5 ? (
-                        <Text className="text-sm text-slate-500 mt-1 text-right">
-                          and {affectedShifts.length - 4} more
-                        </Text>
-                      ) : null}
-                    </>
-                  )}
-                </View>
+                          );
+                        })}
+                        <View className="flex-row items-center justify-between px-3 py-2.5 bg-slate-50 border-t border-slate-100">
+                          <Text className="text-xs text-slate-500">
+                            Total hours affected
+                          </Text>
+                          <Text className="text-xs font-semibold text-orange-500">
+                            {totalAffectedHours.toFixed(2)}h
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                ) : null}
 
                 {/* Submit Button */}
                 <View className="mt-6">
@@ -1431,9 +1631,9 @@ const SubmitLeaves = () => {
                   >
                     <TouchableOpacity
                       onPress={handleSubmit}
-                      disabled={isSubmitting}
+                      disabled={!canSubmit}
                       className={`py-4 rounded-lg flex-row justify-center items-center ${
-                        isSubmitting ? "bg-orange-400" : "bg-orange-400"
+                        canSubmit ? "bg-orange-400" : "bg-orange-300"
                       }`}
                       activeOpacity={0.8}
                     >
@@ -1467,92 +1667,77 @@ const SubmitLeaves = () => {
 
       {Platform.OS === "android" && renderAndroidPicker()}
 
-      {/* iOS Date/Time Modal */}
-      {dateTimeModalVisible && (
+      <Modal
+        visible={Platform.OS === "ios" && dateTimeModalVisible}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        onRequestClose={closeDateTimeModal}
+      >
         <View
-          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+          style={{
+            flex: 1,
+            justifyContent: "center",
+            paddingHorizontal: 20,
+            paddingBottom: insets.bottom,
+          }}
         >
-          <Animated.View
-            style={[
-              {
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-              },
-              { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
-            ]}
-          >
-            <TouchableOpacity
-              style={{ flex: 1 }}
-              activeOpacity={1}
-              onPress={closeDateTimeModal}
-            />
-          </Animated.View>
-
-          <Animated.View
-            className="absolute bottom-0 left-0 right-0 bg-white rounded-t-lg"
+          <TouchableOpacity
             style={{
-              transform: [{ translateY: dateTimeModalAnim }],
-              bottom: 0,
+              position: "absolute",
+              top: 0,
               left: 0,
               right: 0,
-              backgroundColor: "white",
-              borderTopLeftRadius: 10,
-              borderTopRightRadius: 10,
-              minHeight: height * 0.4,
-              maxHeight: Platform.OS === "ios" ? height * 0.4 : height * 0.5,
-              paddingBottom: Platform.OS === "ios" ? 0 : 20,
+              bottom: 0,
+              backgroundColor: "rgba(15, 23, 42, 0.55)",
+            }}
+            activeOpacity={1}
+            onPress={closeDateTimeModal}
+          />
+          <View
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: 16,
+              padding: 16,
+              width: "100%",
+              zIndex: 1,
             }}
           >
-            <View
-              className="items-center py-3"
-              {...dateTimePanResponder.panHandlers}
+            <Text className="text-lg font-bold text-slate-800 mb-2 text-center">
+              {pickerTitle}
+            </Text>
+            <DateTimePicker
+              key={`leave-picker-${currentDateTimeField}-${pickerSessionRef.current}`}
+              value={tempPickerValue}
+              mode={pickerMode}
+              is24Hour={true}
+              display={pickerMode === "date" ? "inline" : "spinner"}
+              onChange={(_event, selectedValue) => {
+                if (selectedValue) {
+                  setTempPickerValue(
+                    toPickerDateValue(selectedValue, pickerMode),
+                  );
+                }
+              }}
+              themeVariant="light"
+              accentColor="#EA580C"
+              textColor="#0f172a"
+              style={
+                pickerMode === "date"
+                  ? { width: "100%" }
+                  : { width: "100%", height: 216 }
+              }
+            />
+            <TouchableOpacity
+              onPress={handleDateTimeConfirm}
+              className="bg-orange-400 py-3 rounded-xl items-center mt-2"
+              activeOpacity={0.8}
             >
-              <View className="w-10 h-1 bg-slate-200 rounded-full" />
-            </View>
-
-            <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-              <Text className="text-lg font-bold text-slate-800">
-                {pickerTitle}
-              </Text>
-            </View>
-
-            <View className="items-center justify-center px-4 py-2">
-              <DateTimePicker
-                value={tempPickerValue}
-                mode={pickerMode}
-                is24Hour={true}
-                display="spinner"
-                onChange={(event, selectedValue) => {
-                  if (selectedValue) {
-                    setTempPickerValue(selectedValue);
-                  }
-                }}
-                textColor="#000000"
-                style={{ height: 200, alignSelf: "center" }}
-              />
-            </View>
-
-            <View className="px-4 pt-2 pb-4">
-              <Animated.View
-                style={{ transform: [{ scale: confirmButtonScale }] }}
-              >
-                <TouchableOpacity
-                  onPress={handleDateTimeConfirm}
-                  className="bg-orange-400 py-3.5 rounded-lg w-full items-center"
-                  activeOpacity={0.8}
-                >
-                  <Text className="text-white font-bold text-base">
-                    Confirm
-                  </Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </View>
-          </Animated.View>
+              <Text className="text-white font-bold">Confirm</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      )}
+      </Modal>
     </SafeAreaView>
   );
 };

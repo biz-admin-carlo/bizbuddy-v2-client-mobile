@@ -532,7 +532,20 @@ export const formatRequestedPunchLogDateOnlyDisplay = (
   companyTimeZone,
 ) => {
   if (value == null || value === "") return null;
-  const s = (typeof value === "string" ? value.trim() : String(value)).trim();
+  const s = (
+    value instanceof Date
+      ? value.toISOString()
+      : typeof value === "string"
+        ? value.trim()
+        : String(value)
+  ).trim();
+  // `requestedDate` is stored as UTC midnight from `new Date("YYYY-MM-DD")`.
+  // Converting that instant into a US company zone shows the previous calendar day.
+  const utcMidnight = /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.\d+)?Z$/i.exec(s);
+  if (utcMidnight) {
+    const [y, mo, d] = utcMidnight[1].split("-").map(Number);
+    if (y && mo && d) return formatFriendlyDateOnly(y, mo, d);
+  }
   if (isPunchLogApiInstantString(s)) {
     const instant = new Date(s);
     if (!Number.isFinite(instant.getTime())) return null;

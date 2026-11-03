@@ -286,7 +286,13 @@ const Settings = () => {
       if (response.ok) {
         setProfile(data.data);
       } else {
-        setError(data.message || "Failed to fetch profile.");
+        setError(
+          (data?.code === "SYSTEM_AGENT_NOT_ALLOWED" && "Not available for B. Buddy.") ||
+            (data?.code === "SYSTEM_AGENT_PROTECTED" &&
+              (data.message || "This account can't be changed.")) ||
+            data.message ||
+            "Failed to fetch profile.",
+        );
       }
     } catch (err) {
       console.error("Error fetching profile:", err);
@@ -478,6 +484,10 @@ const Settings = () => {
   const firstName = profile?.profile?.firstName || "";
   const lastName = profile?.profile?.lastName || "";
   const userRole = (profile?.user?.role || "").toLowerCase();
+  const isSystemAgent = profile?.user?.isSystemAgent === true;
+  const roleLabel = isSystemAgent
+    ? "Internal"
+    : userRole.charAt(0).toUpperCase() + userRole.slice(1);
   const companyName = profile?.company?.name || "Unknown Company";
   const subscriptionPlan =
     profile?.subscription?.plan?.name || "No Subscription";
@@ -523,25 +533,23 @@ const Settings = () => {
 
     {
       title: "Leave Requests",
-      route: "./(management)/manage-leaves",
+      route: "/(tabs)/(requests)?type=leave",
       roles: ["supervisor", "admin", "superadmin"],
       icon: "calendar-outline",
       iconType: "ionicons",
       group: "Schedule Management",
     },
-    // Employee-facing Leave Requests (submit/view own)
     {
       title: "Leave Requests",
-      route: "/(tabs)/(leaves)/leaves-request",
+      route: "/(tabs)/(requests)?type=leave",
       roles: ["employee"],
       icon: "calendar-outline",
       iconType: "ionicons",
       group: "Schedule Management",
     },
-    // Overtime Management / Requests
     {
       title: "Overtime Requests",
-      route: "/(tabs)/(overtime)",
+      route: "/(tabs)/(requests)?type=overtime",
       roles: ["employee"],
       icon: "stopwatch-outline",
       iconType: "ionicons",
@@ -549,8 +557,8 @@ const Settings = () => {
     },
     {
       title: "Overtime Requests",
-      route: "./(management)/manage-overtimes",
-      roles: ["admin", "superadmin"],
+      route: "/(tabs)/(requests)?type=overtime",
+      roles: ["supervisor", "admin", "superadmin"],
       icon: "stopwatch-outline",
       iconType: "ionicons",
       group: "Schedule Management",
@@ -785,7 +793,7 @@ const Settings = () => {
               >
             <View className="flex-row items-center justify-between mb-4">
               <Text className="text-[24px] font-bold text-[#1e293b]">
-                Settings
+                {isSystemAgent ? "Company" : "Settings"}
               </Text>
 
               <Animated.View
@@ -844,7 +852,7 @@ const Settings = () => {
                   <View className="flex-row flex-wrap items-center mt-1">
                     <View className="bg-orange-400 rounded-[12px] px-2 py-0.5 mr-2">
                       <Text className="text-[12px] text-white font-[500]">
-                        {userRole.charAt(0).toUpperCase() + userRole.slice(1)}
+                        {roleLabel}
                       </Text>
                     </View>
                     <Text
@@ -879,6 +887,7 @@ const Settings = () => {
             </View>
 
             {/* App tutorial replay */}
+            {!isSystemAgent ? (
             <TouchableOpacity
               onPress={replayTutorial}
               activeOpacity={0.85}
@@ -915,6 +924,7 @@ const Settings = () => {
                 style={{ marginTop: 4, marginLeft: 8 }}
               />
             </TouchableOpacity>
+            ) : null}
 
             {/* Device settings: Face ID + Location (collapsible) */}
             <TouchableOpacity
@@ -968,6 +978,7 @@ const Settings = () => {
                 })}
               >
                 {/* Face ID */}
+                {!isSystemAgent ? (
                 <Animated.View
                   style={{ transform: [{ scale: biometricButtonScale }] }}
                 >
@@ -1027,6 +1038,7 @@ const Settings = () => {
                       )}
                   </TouchableOpacity>
                 </Animated.View>
+                ) : null}
 
                 {/* Location */}
                 <Animated.View

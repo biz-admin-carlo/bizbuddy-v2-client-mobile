@@ -1767,7 +1767,7 @@ export default function TimekeepingPunch() {
       description: descriptionTrim,
       estimatedDuration,
       estimatedNetHours,
-      // DayCare only; current request API ignores this field.
+      // DayCare only; stored as requestedPunchType.
       ...(isDayCareCompany && trimmedShiftType
         ? { punchType: trimmedShiftType }
         : {}),
@@ -1841,9 +1841,11 @@ export default function TimekeepingPunch() {
       } else if (status === 404) {
         friendlyBody = rawServerMsg || "This action isn't available right now.";
       } else if (status === 409) {
-        friendlyBody =
-          rawServerMsg ||
-          "A punch log for this date may already exist. Check your requests or pick another date.";
+        const pendingDup = /pending request/i.test(rawServerMsg);
+        friendlyBody = pendingDup
+          ? `${rawServerMsg} Open Requests → Pending to find it, or wait for your approver.`
+          : rawServerMsg ||
+            "A punch log for this date may already exist. Check your requests or pick another date.";
       } else if (status >= 500) {
         friendlyBody =
           rawServerMsg ||

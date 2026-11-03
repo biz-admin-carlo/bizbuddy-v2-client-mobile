@@ -1,0 +1,7 @@
+BizBuddy 1.0.32
+Android version code: 43
+iOS build: 36
+
+Employees, admins, and superadmins can add the US bank account used for their pay.
+
+The Payroll tab checks whether a payout account is already set up before showing the form.

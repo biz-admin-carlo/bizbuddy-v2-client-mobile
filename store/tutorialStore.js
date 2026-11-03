@@ -29,11 +29,11 @@ const DEFAULT_STEPS = [
     ],
   },
   {
-    title: "Leaves",
-    body: "Request time off, review requests, and track leave status in the Leaves tab.",
-    route: "/(tabs)/(leaves)/leaves-request",
-    routeLabel: "Open Leaves",
-    highlight: { kind: "tab", tab: "leaves" },
+    title: "Requests",
+    body: "Review leave, overtime, and punch requests, and start a new request from the Requests tab.",
+    route: "/(tabs)/(requests)?type=leave",
+    routeLabel: "Open Requests",
+    highlight: { kind: "tab", tab: "requests" },
     details: [
       {
         title: "Request Leave screen",

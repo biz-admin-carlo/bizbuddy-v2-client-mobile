@@ -1,6 +1,6 @@
 // app/(tabs)/(overtime)/index.jsx
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -10,8 +10,6 @@ import {
   ActivityIndicator,
   Alert as RNAlert,
   Animated,
-  PanResponder,
-  Dimensions,
   TouchableOpacity,
   TextInput,
   ScrollView,
@@ -19,7 +17,7 @@ import {
   RefreshControl,
   Modal,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import DropDownPicker from "react-native-dropdown-picker";
 import { useRouter } from "expo-router";
@@ -27,8 +25,12 @@ import * as SecureStore from "expo-secure-store";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL } from "../../../config/constant";
 import { parseApproversPayload } from "../../../utils/approversPayload";
-
-const { height } = Dimensions.get("window");
+import {
+  dateKeyInInclusiveRange,
+  fetchAllPaged,
+  pickerDateKey,
+} from "../../../utils/requestListFilters";
+import RequestDateFilter from "../../../components/request-date-filter";
 
 const MIN_OVERTIME_REASON_LENGTH = 30;
 
@@ -39,6 +41,19 @@ const combineDateAndTime = (date, time) => {
   combined.setSeconds(time.getSeconds());
   combined.setMilliseconds(time.getMilliseconds());
   return combined;
+};
+
+/** Native UIDatePicker may mutate the `value` Date in place — never reuse one instance for multiple pickers or state fields. */
+const cloneJsDate = (d) =>
+  d instanceof Date && Number.isFinite(d.getTime())
+    ? new Date(d.getTime())
+    : new Date();
+
+/** Pin date-mode values to local noon so the spinner does not shift the calendar day across timezones. */
+const toPickerDateValue = (d, mode) => {
+  const next = cloneJsDate(d);
+  if (mode === "date") next.setHours(12, 0, 0, 0);
+  return next;
 };
 
 const getLocalDateString = (dateInput) => {
@@ -58,6 +73,7 @@ const toLocalTimeString = (value) => {
 
 const SubmitOvertime = () => {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   const [overtimeReason, setOvertimeReason] = useState("");
   const [otDate, setOtDate] = useState(new Date()); // start date
@@ -74,6 +90,7 @@ const SubmitOvertime = () => {
 
   // Overtime requests list state
   const [overtimeRequests, setOvertimeRequests] = useState([]);
+  const [dateFilter, setDateFilter] = useState(null);
   const [loadingRequests, setLoadingRequests] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [currentPicker, setCurrentPicker] = useState(null);
@@ -94,30 +111,26 @@ const SubmitOvertime = () => {
   const submitButtonScale = useRef(new Animated.Value(1)).current;
   const dateButtonScale = useRef(new Animated.Value(1)).current;
   const timeButtonScale = useRef(new Animated.Value(1)).current;
-  const modalBgAnim = useRef(new Animated.Value(0)).current;
-  const dateTimeModalAnim = useRef(new Animated.Value(height)).current;
   const confirmButtonScale = useRef(new Animated.Value(1)).current;
-
-  const dateTimePanResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        if (gestureState.dy > 0) {
-          dateTimeModalAnim.setValue(gestureState.dy);
-        }
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dy > 100) {
-          closeDateTimeModal();
-        } else {
-          Animated.spring(dateTimeModalAnim, {
-            toValue: 0,
-            useNativeDriver: true,
-          }).start();
-        }
-      },
-    })
-  ).current;
+  const pickerSessionRef = useRef(0);
+  const dateFilterKey = pickerDateKey(dateFilter);
+  const visibleOvertimeRequests = useMemo(() => {
+    if (!dateFilterKey) return overtimeRequests;
+    return overtimeRequests.filter((item) =>
+      dateKeyInInclusiveRange(
+        dateFilterKey,
+        item.fromDate ??
+          item.start ??
+          item.timeLog?.timeIn ??
+          item.createdAt,
+        item.toDate ??
+          item.end ??
+          item.timeLog?.timeOut ??
+          item.fromDate ??
+          item.createdAt,
+      ),
+    );
+  }, [overtimeRequests, dateFilterKey]);
 
   useEffect(() => {
     Animated.parallel([
@@ -255,42 +268,19 @@ const SubmitOvertime = () => {
   const fetchOvertimeRequests = async (token) => {
     setLoadingRequests(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/overtime/my`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const rows = await fetchAllPaged({
+        url: `${API_BASE_URL}/api/overtime/my`,
+        token,
       });
-      const data = await res.json();
-      console.log("[OT] Fetch requests → status:", res.status, "ok:", res.ok);
-      console.log("[OT] Raw response:", data);
-      if (res.ok && Array.isArray(data.data)) {
-        const sorted = [...data.data].sort((a, b) => {
-          const aT = new Date(a.createdAt || a.fromDate || 0).getTime();
-          const bT = new Date(b.createdAt || b.fromDate || 0).getTime();
-          return bT - aT;
-        });
-        console.log(
-          "[OT] Mapped for cards:",
-          sorted.map((req) => ({
-            id: req.id ?? req._id ?? req.requestId ?? null,
-            status: req.status ?? req.state ?? null,
-            fromDate: req.fromDate ?? req.start ?? null,
-            toDate: req.toDate ?? req.end ?? null,
-            requestedHours:
-              req.requestedHours ?? req.hours ?? req.durationHours ?? null,
-            timeLogId: req.timeLogId ?? req.logId ?? null,
-            approverId: req.approverId ?? req.approver ?? null,
-            reason:
-              req.overtimeReason ?? req.requesterReason ?? req.reason ?? null,
-          }))
-        );
-        setOvertimeRequests(sorted);
-      } else {
-        console.log(
-          "[OT] Unexpected response shape; data.data missing or not array"
-        );
-        setOvertimeRequests([]);
-      }
+      const sorted = [...rows].sort((a, b) => {
+        const aT = new Date(a.createdAt || a.fromDate || 0).getTime();
+        const bT = new Date(b.createdAt || b.fromDate || 0).getTime();
+        return bT - aT;
+      });
+      setOvertimeRequests(sorted);
     } catch (error) {
       console.error("Error fetching overtime requests:", error);
+      setOvertimeRequests([]);
     } finally {
       setLoadingRequests(false);
       setRefreshing(false);
@@ -449,43 +439,20 @@ const SubmitOvertime = () => {
         break;
     }
 
-    setTempPickerValue(initialValue);
+    setTempPickerValue(toPickerDateValue(initialValue, mode));
+    setOtLogOpen(false);
+    setApproverOpen(false);
+    pickerSessionRef.current += 1;
 
     if (Platform.OS === "ios") {
       setDateTimeModalVisible(true);
-      Animated.parallel([
-        Animated.timing(modalBgAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.spring(dateTimeModalAnim, {
-          toValue: 0,
-          tension: 70,
-          friction: 12,
-          useNativeDriver: true,
-        }),
-      ]).start();
     } else {
       setCurrentPicker(field);
     }
   };
 
   const closeDateTimeModal = () => {
-    Animated.parallel([
-      Animated.timing(modalBgAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-      Animated.timing(dateTimeModalAnim, {
-        toValue: height,
-        duration: 300,
-        useNativeDriver: true,
-      }),
-    ]).start(() => {
-      setDateTimeModalVisible(false);
-    });
+    setDateTimeModalVisible(false);
   };
 
   const handleDateTimeConfirm = () => {
@@ -493,16 +460,16 @@ const SubmitOvertime = () => {
 
     switch (currentDateTimeField) {
       case "startDate":
-        setOtDate(tempPickerValue);
+        setOtDate(cloneJsDate(tempPickerValue));
         break;
       case "startTime":
-        setOtStartTime(tempPickerValue);
+        setOtStartTime(cloneJsDate(tempPickerValue));
         break;
       case "endDate":
-        setOtEndDate(tempPickerValue);
+        setOtEndDate(cloneJsDate(tempPickerValue));
         break;
       case "endTime":
-        setOtEndTime(tempPickerValue);
+        setOtEndTime(cloneJsDate(tempPickerValue));
         break;
     }
 
@@ -609,7 +576,7 @@ const SubmitOvertime = () => {
   );
 
   return (
-    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: 70 }}>
+    <SafeAreaView className="flex-1 bg-white" style={{ paddingTop: 12 }}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
@@ -898,24 +865,31 @@ const SubmitOvertime = () => {
 
                 {/* Requests List */}
                 <View className="mt-6 mb-4">
-                  <Text className="text-xl font-bold text-slate-800 mb-3">
+                  <Text className="text-xl font-bold text-slate-800 mb-1">
                     My Overtime Requests
                   </Text>
+                  <RequestDateFilter
+                    value={dateFilter}
+                    onChange={setDateFilter}
+                    placeholder="Search by overtime date"
+                  />
                   {loadingRequests ? (
                     <View className="items-center py-6">
                       <ActivityIndicator size="large" color="#cbd5e1" />
                       <Text className="mt-2 text-slate-500">Loading...</Text>
                     </View>
-                  ) : overtimeRequests.length === 0 ? (
-                    <View className="bg-slate-50 rounded-xl p-5 items-center">
+                  ) : visibleOvertimeRequests.length === 0 ? (
+                    <View className="bg-slate-50 rounded-xl p-5 items-center mt-3">
                       <Ionicons name="time-outline" size={28} color="#94a3b8" />
                       <Text className="text-slate-500 mt-2">
-                        No overtime requests yet.
+                        {dateFilterKey
+                          ? "No overtime requests for that date."
+                          : "No overtime requests yet."}
                       </Text>
                     </View>
                   ) : (
-                    <View>
-                      {overtimeRequests.map((req) => {
+                    <View className="mt-3">
+                      {visibleOvertimeRequests.map((req) => {
                         const created = req.createdAt
                           ? new Date(req.createdAt)
                           : null;
@@ -1083,92 +1057,77 @@ const SubmitOvertime = () => {
 
       {Platform.OS === "android" && renderAndroidPicker()}
 
-      {/* iOS Date/Time Modal */}
-      {dateTimeModalVisible && (
+      <Modal
+        visible={Platform.OS === "ios" && dateTimeModalVisible}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        onRequestClose={closeDateTimeModal}
+      >
         <View
-          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+          style={{
+            flex: 1,
+            justifyContent: "center",
+            paddingHorizontal: 20,
+            paddingBottom: insets.bottom,
+          }}
         >
-          <Animated.View
-            style={[
-              {
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-              },
-              { backgroundColor: "rgba(0, 0, 0, 0.5)", opacity: modalBgAnim },
-            ]}
-          >
-            <TouchableOpacity
-              style={{ flex: 1 }}
-              activeOpacity={1}
-              onPress={closeDateTimeModal}
-            />
-          </Animated.View>
-
-          <Animated.View
-            className="absolute bottom-0 left-0 right-0 bg-white rounded-t-lg"
+          <TouchableOpacity
             style={{
-              transform: [{ translateY: dateTimeModalAnim }],
-              bottom: 0,
+              position: "absolute",
+              top: 0,
               left: 0,
               right: 0,
-              backgroundColor: "white",
-              borderTopLeftRadius: 10,
-              borderTopRightRadius: 10,
-              minHeight: height * 0.4,
-              maxHeight: Platform.OS === "ios" ? height * 0.4 : height * 0.5,
-              paddingBottom: Platform.OS === "ios" ? 0 : 20,
+              bottom: 0,
+              backgroundColor: "rgba(15, 23, 42, 0.55)",
+            }}
+            activeOpacity={1}
+            onPress={closeDateTimeModal}
+          />
+          <View
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: 16,
+              padding: 16,
+              width: "100%",
+              zIndex: 1,
             }}
           >
-            <View
-              className="items-center py-3"
-              {...dateTimePanResponder.panHandlers}
+            <Text className="text-lg font-bold text-slate-800 mb-2 text-center">
+              {pickerTitle}
+            </Text>
+            <DateTimePicker
+              key={`ot-picker-${currentDateTimeField}-${pickerSessionRef.current}`}
+              value={tempPickerValue}
+              mode={pickerMode}
+              is24Hour={true}
+              display={pickerMode === "date" ? "inline" : "spinner"}
+              onChange={(_event, selectedValue) => {
+                if (selectedValue) {
+                  setTempPickerValue(
+                    toPickerDateValue(selectedValue, pickerMode),
+                  );
+                }
+              }}
+              themeVariant="light"
+              accentColor="#EA580C"
+              textColor="#0f172a"
+              style={
+                pickerMode === "date"
+                  ? { width: "100%" }
+                  : { width: "100%", height: 216 }
+              }
+            />
+            <TouchableOpacity
+              onPress={handleDateTimeConfirm}
+              className="bg-orange-400 py-3 rounded-xl items-center mt-2"
+              activeOpacity={0.8}
             >
-              <View className="w-10 h-1 bg-slate-200 rounded-full" />
-            </View>
-
-            <View className="flex-row justify-between items-center px-5 pb-4 border-b border-slate-100">
-              <Text className="text-lg font-bold text-slate-800">
-                {pickerTitle}
-              </Text>
-            </View>
-
-            <View className="items-center justify-center px-4 py-2">
-              <DateTimePicker
-                value={tempPickerValue}
-                mode={pickerMode}
-                is24Hour={true}
-                display="spinner"
-                onChange={(event, selectedValue) => {
-                  if (selectedValue) {
-                    setTempPickerValue(selectedValue);
-                  }
-                }}
-                textColor="#000000"
-                style={{ height: 200, alignSelf: "center" }}
-              />
-            </View>
-
-            <View className="px-4 pt-2 pb-4">
-              <Animated.View
-                style={{ transform: [{ scale: confirmButtonScale }] }}
-              >
-                <TouchableOpacity
-                  onPress={handleDateTimeConfirm}
-                  className="bg-orange-400 py-3.5 rounded-lg w-full items-center"
-                  activeOpacity={0.8}
-                >
-                  <Text className="text-white font-bold text-base">
-                    Confirm
-                  </Text>
-                </TouchableOpacity>
-              </Animated.View>
-            </View>
-          </Animated.View>
+              <Text className="text-white font-bold">Confirm</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      )}
+      </Modal>
       {/* Approver Comments Modal */}
       <Modal
         visible={commentsModalVisible}
@@ -1228,6 +1187,3 @@ const SubmitOvertime = () => {
 };
 
 export default SubmitOvertime;
-
-// Hide this route from tab linking/navigation menus
-export const href = null;

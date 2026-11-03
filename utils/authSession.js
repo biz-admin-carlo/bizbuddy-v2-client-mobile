@@ -54,6 +54,14 @@ function formatSwitchAllowedAt(isoString) {
   });
 }
 
+export function systemAgentDeniedMessage(data) {
+  if (data?.code === "SYSTEM_AGENT_NOT_ALLOWED") return "Not available for B. Buddy.";
+  if (data?.code === "SYSTEM_AGENT_PROTECTED") {
+    return data.message || "This account can't be changed.";
+  }
+  return null;
+}
+
 export function getLoginErrorMessage(data, fallback = "Invalid credentials.") {
   if (!data) return fallback;
   if (isDeviceSwitchCooldownError(data)) {

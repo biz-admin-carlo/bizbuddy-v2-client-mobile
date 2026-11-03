@@ -19,6 +19,7 @@ import {
   Linking,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as SecureStore from "expo-secure-store";
 import { WebView } from "react-native-webview";
@@ -51,7 +52,9 @@ const formatRange = (startIso, endIso) =>
   })}`;
 
 function Payroll() {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [showPayoutAccount, setShowPayoutAccount] = useState(false);
   const [payslips, setPayslips] = useState([]);
   const [selectedSlip, setSelectedSlip] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
@@ -197,13 +200,58 @@ function Payroll() {
     }
   };
 
+  const loadPayoutAccess = async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) {
+        setShowPayoutAccount(false);
+        return;
+      }
+      const response = await fetch(`${API_BASE_URL}/api/account/profile`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await response.json().catch(() => ({}));
+      const role = String(data?.data?.user?.role || "").toLowerCase();
+      setShowPayoutAccount(
+        response.ok &&
+          (role === "employee" || role === "admin" || role === "superadmin")
+      );
+    } catch (error) {
+      console.error("[Payroll] Profile role fetch error:", error);
+      setShowPayoutAccount(false);
+    }
+  };
+
   useEffect(() => {
     loadPayslips({ showLoader: true });
+    loadPayoutAccess();
   }, []);
 
   const onRefresh = () => {
     loadPayslips({ showLoader: false });
+    loadPayoutAccess();
   };
+
+  const payoutAccountCard = showPayoutAccount ? (
+    <TouchableOpacity
+      className="mb-4 flex-row items-center rounded-xl border border-slate-200 bg-white px-4 py-3"
+      activeOpacity={0.85}
+      onPress={() => router.push("/(tabs)/payout-account")}
+    >
+      <View className="h-10 w-10 items-center justify-center rounded-full bg-orange-100">
+        <Ionicons name="card-outline" size={20} color="#fb923c" />
+      </View>
+      <View className="ml-3 flex-1">
+        <Text className="text-sm font-semibold text-slate-700">
+          Payout account
+        </Text>
+        <Text className="mt-0.5 text-xs text-slate-500">
+          Bank account used for your pay
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+    </TouchableOpacity>
+  ) : null;
 
   const mapApiPayslipToUi = (item) => {
     if (!item || typeof item !== "object") return null;
@@ -1066,6 +1114,7 @@ function Payroll() {
                 <Text className="text-xl font-bold text-slate-700 mb-3">
                   Payroll
                 </Text>
+                {payoutAccountCard}
                 <SummaryCard slip={null} />
                 <View className="items-center justify-center py-8 bg-slate-50 rounded-xl">
                   <Ionicons
@@ -1086,6 +1135,7 @@ function Payroll() {
                 <Text className="text-xl font-bold text-slate-700 mb-3">
                   Payroll
                 </Text>
+                {payoutAccountCard}
                 <SummaryCard slip={latest} />
                 <Text className="text-xl font-bold text-slate-700 mb-3">
                   Payslip History

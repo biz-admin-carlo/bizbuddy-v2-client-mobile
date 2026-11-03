@@ -101,6 +101,10 @@ const Profile = () => {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
+  const [addressLine, setAddressLine] = useState("");
+  const [city, setCity] = useState("");
+  const [state, setAddressState] = useState("");
+  const [postalCode, setPostalCode] = useState("");
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -222,7 +226,11 @@ const Profile = () => {
 
   // Show notification modal when profile loads (after login)
   useEffect(() => {
-    if (!token) return;
+    if (!token || !profile) return;
+    if (profile.user?.isSystemAgent) {
+      router.replace("/(tabs)/(settings)");
+      return;
+    }
     // Never show the notification-permission Modal while the first-run tutorial
     // Modal hasn't been dismissed yet — two simultaneous RN <Modal>s make the
     // whole screen untouchable. `seen` is null until hydrated and false until the
@@ -266,7 +274,7 @@ const Profile = () => {
     // Small delay to ensure profile is loaded
     const timerId = setTimeout(showNotificationModal, 1000);
     return () => clearTimeout(timerId);
-  }, [token, tutorialSeen, tutorialVisible]);
+  }, [token, tutorialSeen, tutorialVisible, profile, router]);
 
   const openEditModal = () => {
     // Prefill data
@@ -276,6 +284,10 @@ const Profile = () => {
       setFirstName(profile.profile.firstName || "");
       setLastName(profile.profile.lastName || "");
       setPhoneNumber(profile.profile.phoneNumber || "");
+      setAddressLine(profile.profile.addressLine || "");
+      setCity(profile.profile.city || "");
+      setAddressState(profile.profile.state || "");
+      setPostalCode(profile.profile.postalCode || "");
     }
 
     setIsEditModalVisible(true);
@@ -442,7 +454,13 @@ const Profile = () => {
           "Your profile could not be loaded (unexpected response). Please try again or sign in with your password.",
         );
       } else {
-        Alert.alert("Error", data.message || "Failed to fetch profile.");
+        const denied =
+          data?.code === "SYSTEM_AGENT_NOT_ALLOWED"
+            ? "Not available for B. Buddy."
+            : data?.code === "SYSTEM_AGENT_PROTECTED"
+              ? data.message || "This account can't be changed."
+              : data.message || "Failed to fetch profile.";
+        Alert.alert("Error", denied);
       }
     } catch (error) {
       console.error("Error fetching profile:", error);
@@ -486,7 +504,17 @@ const Profile = () => {
         router.replace("(auth)/signin");
         return;
       }
-      const payload = { username, email, firstName, lastName, phoneNumber };
+      const payload = {
+        username,
+        email,
+        firstName,
+        lastName,
+        phoneNumber,
+        addressLine,
+        city,
+        state,
+        postalCode,
+      };
       const response = await fetch(`${API_BASE_URL}/api/account/profile`, {
         method: "PUT",
         headers: {
@@ -583,19 +611,17 @@ const Profile = () => {
         },
         body: JSON.stringify({ deviceId }),
       });
-      if (response.ok) {
-        await logout();
-        router.replace("(auth)/signin");
-      } else {
-        const data = await response.json();
-        Alert.alert("Error", data.message || "Failed to sign out.");
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        console.log("[Profile] Sign-out request was not accepted", response.status, data?.message);
       }
     } catch (error) {
       console.error("Sign-out error:", error);
-      Alert.alert("Error", "An error occurred during sign out.");
     } finally {
+      await logout();
       setSigningOut(false);
       closeSignOutModal();
+      router.replace("(auth)/signin");
     }
   };
 
@@ -803,6 +829,39 @@ const Profile = () => {
                       </View>
                     </View>
 
+                    {[
+                      profile.profile.addressLine,
+                      profile.profile.city,
+                      profile.profile.state,
+                      profile.profile.postalCode,
+                    ].some(Boolean) ? (
+                      <View className="flex-row items-center mb-4">
+                        <View className="w-10 h-10 rounded-md bg-orange-50 items-center justify-center mr-3">
+                          <Feather name="map-pin" size={18} color="#f97316" />
+                        </View>
+                        <View className="flex-1">
+                          <Text className="text-slate-600 text-xs font-medium mb-1">
+                            Address
+                          </Text>
+                          <Text className="text-slate-600 font-medium">
+                            {[
+                              profile.profile.addressLine,
+                              [
+                                [profile.profile.city, profile.profile.state]
+                                  .filter(Boolean)
+                                  .join(", "),
+                                profile.profile.postalCode,
+                              ]
+                                .filter(Boolean)
+                                .join(" "),
+                            ]
+                              .filter(Boolean)
+                              .join("\n")}
+                          </Text>
+                        </View>
+                      </View>
+                    ) : null}
+
                     <View className="flex-row items-center">
                       <View className="w-10 h-10 rounded-md bg-orange-50 items-center justify-center mr-3">
                         <FontAwesome5
@@ -890,38 +949,6 @@ const Profile = () => {
                       />
                     </TouchableOpacity>
                   </Animated.View>
-
-                  <Animated.View
-                    style={{ transform: [{ scale: signOutButtonScale }] }}
-                  >
-                    <TouchableOpacity
-                      onPress={() => {
-                        animateButtonPress(signOutButtonScale);
-                        setTimeout(openSignOutModal, 100);
-                      }}
-                      className="flex-row items-center bg-white border border-slate-200 rounded-lg p-4"
-                      style={{
-                        shadowColor: "#000",
-                        shadowOffset: { width: 0, height: 2 },
-                        shadowOpacity: 0.05,
-                        shadowRadius: 3,
-                        elevation: 2,
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <View className="w-10 h-10 rounded-lg bg-orange-400 items-center justify-center mr-3">
-                        <Feather name="log-out" size={18} color="#ffff" />
-                      </View>
-                      <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">
-                        Sign Out
-                      </Text>
-                      <Ionicons
-                        name="chevron-forward"
-                        size={20}
-                        color="#9ca3af"
-                      />
-                    </TouchableOpacity>
-                  </Animated.View>
                 </View>
               </>
             ) : (
@@ -942,6 +969,39 @@ const Profile = () => {
                 </TouchableOpacity>
               </View>
             )}
+
+            <Animated.View
+              className="mt-4"
+              style={{ transform: [{ scale: signOutButtonScale }] }}
+            >
+              <TouchableOpacity
+                onPress={() => {
+                  animateButtonPress(signOutButtonScale);
+                  setTimeout(openSignOutModal, 100);
+                }}
+                className="flex-row items-center bg-white border border-slate-200 rounded-lg p-4"
+                style={{
+                  shadowColor: "#000",
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.05,
+                  shadowRadius: 3,
+                  elevation: 2,
+                }}
+                activeOpacity={0.8}
+              >
+                <View className="w-10 h-10 rounded-lg bg-orange-400 items-center justify-center mr-3">
+                  <Feather name="log-out" size={18} color="#ffff" />
+                </View>
+                <Text className="text-slate-600 font-semibold text-medium tracking-wider flex-1">
+                  Sign Out
+                </Text>
+                <Ionicons
+                  name="chevron-forward"
+                  size={20}
+                  color="#9ca3af"
+                />
+              </TouchableOpacity>
+            </Animated.View>
           </View>
         </ScrollView>
       </Animated.View>
@@ -1099,6 +1159,64 @@ const Profile = () => {
                   onChangeText={setPhoneNumber}
                   keyboardType="phone-pad"
                   placeholderTextColor="#9ca3af"
+                />
+              </View>
+
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                Address
+              </Text>
+              <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
+                <Feather name="map-pin" size={18} color="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={addressLine}
+                  onChangeText={setAddressLine}
+                  placeholder="Street address"
+                  placeholderTextColor="#9ca3af"
+                />
+              </View>
+
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                City
+              </Text>
+              <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
+                <Feather name="map-pin" size={18} color="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={city}
+                  onChangeText={setCity}
+                  placeholder="City"
+                  placeholderTextColor="#9ca3af"
+                />
+              </View>
+
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                State
+              </Text>
+              <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
+                <Feather name="map-pin" size={18} color="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={state}
+                  onChangeText={setAddressState}
+                  placeholder="State"
+                  placeholderTextColor="#9ca3af"
+                  autoCapitalize="characters"
+                />
+              </View>
+
+              <Text className="text-sm font-semibold text-slate-600 mb-2">
+                ZIP
+              </Text>
+              <View className="flex-row items-center border border-slate-200 bg-white rounded-lg px-4 py-3 mb-4">
+                <Feather name="map-pin" size={18} color="#9ca3af" />
+                <TextInput
+                  className="flex-1 ml-2 text-slate-700"
+                  value={postalCode}
+                  onChangeText={setPostalCode}
+                  placeholder="ZIP"
+                  placeholderTextColor="#9ca3af"
+                  keyboardType="number-pad"
                 />
               </View>
 

@@ -1,7 +1,6 @@
 import * as SecureStore from "expo-secure-store";
 import {
   getTokenCompanyId,
-  getTokenEmail,
   getTokenUserId,
   getTokenVersion,
   isTokenExpired,
@@ -112,6 +111,25 @@ export async function persistCompanySessionToken(companyId, token) {
 }
 
 /**
+ * Remove a JWT from the biometric company vault only.
+ * Leaves the active `token` session alone.
+ */
+export async function dropBiometricVaultToken(token) {
+  if (!token) return;
+  const ids = await readAccountIndex();
+  for (const id of ids) {
+    try {
+      const stored = await getAccountSessionToken(id);
+      if (stored === token) {
+        await removeAccountSessionToken(id);
+      }
+    } catch {
+      /* noop */
+    }
+  }
+}
+
+/**
  * Drop a rejected JWT from legacy + per-account vault (does not call server sign-out).
  */
 export async function removeStoredSessionToken(token) {
@@ -137,28 +155,25 @@ export async function removeStoredSessionToken(token) {
   }
 }
 
-/** After password login, remove older vault copies for the same user/company. */
+/** After password login, remove older vault copies for the same user+company. */
 export async function pruneOlderSessionsForUser(newToken) {
   if (!newToken) return;
   const newVer = getTokenVersion(newToken);
   if (newVer == null) return;
   const newCo = getTokenCompanyId(newToken);
-  const newEmail = getTokenEmail(newToken);
+  const newUserId = getTokenUserId(newToken);
+  if (!newUserId || !newCo) return;
 
   const candidates = await enumerateSessionTokens();
   for (const { token, companyId } of candidates) {
     if (token === newToken) continue;
     const ver = getTokenVersion(token);
     if (ver == null || ver >= newVer) continue;
+    const sameUser = getTokenUserId(token) === newUserId;
     const sameCo =
-      newCo != null &&
       companyId != null &&
       (String(companyId) === newCo || getTokenCompanyId(token) === newCo);
-    const sameEmail =
-      newEmail != null &&
-      getTokenEmail(token) != null &&
-      getTokenEmail(token) === newEmail;
-    if (sameCo || sameEmail) {
+    if (sameUser && sameCo) {
       await removeStoredSessionToken(token);
     }
   }
@@ -248,6 +263,17 @@ function filterCandidatesByUserId(candidates, userId) {
   return candidates.filter((c) => getTokenUserId(c.token) === want);
 }
 
+function filterCandidatesByScope(candidates, { userId = null, allowedUserIds = null } = {}) {
+  if (Array.isArray(allowedUserIds) && allowedUserIds.length > 0) {
+    const allowed = new Set(allowedUserIds.map(String));
+    return candidates.filter((c) => {
+      const uid = getTokenUserId(c.token);
+      return uid != null && allowed.has(String(uid));
+    });
+  }
+  return filterCandidatesByUserId(candidates, userId);
+}
+
 /**
  * Distinct user ids among locally stored JWTs (well-formed only).
  */
@@ -265,12 +291,11 @@ export async function getDistinctVaultUserIds() {
 /**
  * First stored JWT that passes server verification (for biometric restore).
  * @param {(token: string) => Promise<{ valid: boolean }>} verifyFn
- * @param {{ userId?: string | null }} [options] — prefer sessions for this user
+ * @param {{ userId?: string | null, allowedUserIds?: Array<string|number> | null }} [options]
  */
 export async function findVerifiedSessionToken(verifyFn, options = {}) {
-  const { userId = null } = options;
   let candidates = await enumerateSessionTokens();
-  candidates = filterCandidatesByUserId(candidates, userId);
+  candidates = filterCandidatesByScope(candidates, options);
   for (const candidate of candidates) {
     const check = await verifyFn(candidate.token);
     if (check?.valid) return candidate;
@@ -286,42 +311,61 @@ export async function findVerifiedSessionToken(verifyFn, options = {}) {
 }
 
 /**
- * @param {{ userId?: string | null }} [options]
+ * @param {{ userId?: string | null, allowedUserIds?: Array<string|number> | null }} [options]
  * @returns {{ token: string, companyId: string | null } | null}
  */
 export async function findAnyValidSessionToken(options = {}) {
-  const { userId = null } = options;
   let candidates = await enumerateSessionTokens();
-  candidates = filterCandidatesByUserId(candidates, userId);
+  candidates = filterCandidatesByScope(candidates, options);
   return candidates.length > 0 ? candidates[0] : null;
 }
 
 /**
  * Find a non-expired JWT for the given company (API id), including when the vault
  * key used a different id than the email/company list returns.
+ * Sibling companies for one email have different userIds — pass `allowedUserIds`
+ * (memberships from get-user-email) so a saved session for another company of
+ * the same person can still be found without picking a different person's token.
  * @param {string|number} companyId
- * @param {{ userId?: string | null }} [options] — only return a token for this user
+ * @param {{ userId?: string | null, allowedUserIds?: Array<string|number> | null }} [options]
  */
 export async function resolveSessionTokenForCompanyId(companyId, options = {}) {
-  const { userId = null } = options;
+  const { userId = null, allowedUserIds = null } = options;
   const picked = String(companyId ?? "").trim();
   if (!picked) return null;
 
-  const matchesUser = (token) => {
-    if (!userId) return true;
-    return getTokenUserId(token) === String(userId);
+  const allowed =
+    Array.isArray(allowedUserIds) && allowedUserIds.length > 0
+      ? new Set(allowedUserIds.map(String))
+      : null;
+
+  const matchesScope = (token) => {
+    const uid = getTokenUserId(token);
+    if (allowed) return uid != null && allowed.has(String(uid));
+    if (userId) return uid === String(userId);
+    return true;
   };
 
-  if (userId) {
-    const direct = await getAccountSessionToken(accountKeyFor(userId, picked));
-    if (direct && !isTokenExpired(direct) && matchesUser(direct)) {
-      return direct;
+  const tryDirect = async (uid) => {
+    if (!uid) return null;
+    const direct = await getAccountSessionToken(accountKeyFor(uid, picked));
+    if (direct && !isTokenExpired(direct) && matchesScope(direct)) return direct;
+    return null;
+  };
+
+  const preferred = await tryDirect(userId);
+  if (preferred) return preferred;
+
+  if (allowed) {
+    for (const uid of allowed) {
+      const hit = await tryDirect(uid);
+      if (hit) return hit;
     }
   }
 
   const candidates = await enumerateSessionTokens();
   for (const { token, companyId: tCo } of candidates) {
-    if (!token || isTokenExpired(token) || !matchesUser(token)) continue;
+    if (!token || isTokenExpired(token) || !matchesScope(token)) continue;
     const claimedCo = getTokenCompanyId(token);
     if (claimedCo != null && String(claimedCo) === picked) return token;
     if (tCo != null && String(tCo) === picked) return token;

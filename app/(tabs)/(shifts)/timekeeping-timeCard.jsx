@@ -111,24 +111,26 @@ const grossClockHours = (log) => {
   return Math.max(0, ms / 3600000);
 };
 
-const paidBreakHours = (log) => {
+const intervalHours = (start, end) => {
+  if (!start || !end) return 0;
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return 0;
+  return ms / 3600000;
+};
+
+const coffeeBreakHours = (log) => {
+  if (!Array.isArray(log?.coffeeBreaks)) return 0;
   let h = 0;
-  if (log?.lunchBreak?.start && log?.lunchBreak?.end) {
-    h +=
-      (new Date(log.lunchBreak.end).getTime() -
-        new Date(log.lunchBreak.start).getTime()) /
-      3600000;
-  }
-  if (Array.isArray(log?.coffeeBreaks)) {
-    log.coffeeBreaks.forEach((b) => {
-      if (b?.start && b?.end) {
-        h +=
-          (new Date(b.end).getTime() - new Date(b.start).getTime()) / 3600000;
-      }
-    });
-  }
+  log.coffeeBreaks.forEach((b) => {
+    h += intervalHours(b?.start, b?.end);
+  });
   return Math.max(0, h);
 };
+
+const lunchBreakHours = (log) =>
+  Math.max(0, intervalHours(log?.lunchBreak?.start, log?.lunchBreak?.end));
+
+const paidBreakHours = (log) => coffeeBreakHours(log) + lunchBreakHours(log);
 
 const TimeLogContestedBadge = ({ style }) => (
   <View
@@ -197,7 +199,34 @@ const formatDayHeader = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+};
+
+const formatMonthHeader = (key) => {
+  const [year, month] = String(key).split("-");
+  const d = new Date(Number(year), Number(month) - 1, 1);
+  if (Number.isNaN(d.getTime())) return key;
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+};
+
+/** day → YYYY-MM-DD, month → YYYY-MM, year → YYYY. */
+const groupKeyForLog = (iso, mode) => {
+  const day = dateKeyLocal(iso);
+  if (!day) return "";
+  if (mode === "year") return day.slice(0, 4);
+  if (mode === "month") return day.slice(0, 7);
+  return day;
+};
+
+const formatGroupLabel = (key, mode, sampleIso) => {
+  if (mode === "year") return key;
+  if (mode === "month") return formatMonthHeader(key);
+  return formatDayHeader(sampleIso);
 };
 
 const formatPunchInstant = (iso) => {
@@ -253,56 +282,323 @@ const scheduledHoursForLog = (log) => {
   return null;
 };
 
-const lateMinutesForLog = (log) => {
-  const v = Number(
-    log?.minutesLate ?? log?.lateMinutes ?? log?.minutesLateAfterGrace,
-  );
-  if (Number.isFinite(v) && v > 0) return Math.round(v);
-  const sched = log?.scheduledShiftStart
-    ? new Date(log.scheduledShiftStart)
-    : null;
-  const tin = log?.timeIn ? new Date(log.timeIn) : null;
-  if (
-    sched &&
-    tin &&
-    !Number.isNaN(sched.getTime()) &&
-    !Number.isNaN(tin.getTime())
-  ) {
-    const diffMin = Math.round((tin.getTime() - sched.getTime()) / 60000);
-    if (diffMin > 0) return diffMin;
-  }
-  return null;
-};
-
 const punchTypeLabel = (log) => {
   const raw = log?.punchType ?? log?.punch_type ?? "REGULAR";
   const s = String(raw).replace(/_/g, " ").trim();
   return s.length ? s : "Punch";
 };
 
-const groupTimeLogsByDay = (logs, calcHours) => {
+const finiteHourValue = (value) => {
+  const hours = Number(value);
+  return Number.isFinite(hours) ? hours : null;
+};
+
+const segmentActualHours = (log, segmentType) => {
+  const rows = Array.isArray(log?.segmentApprovals) ? log.segmentApprovals : [];
+  const match = rows.find(
+    (row) => String(row?.segmentType ?? "") === segmentType,
+  );
+  return finiteHourValue(match?.actualHours);
+};
+
+/** Same base the web uses when a PM segment is shorter than a full punch. */
+const DRIVER_AIDE_PM_BASE_HOURS = 1.25;
+
+const punchFlags = (log) => {
+  const punchType = String(
+    log?.punchType ?? log?.punch_type ?? "REGULAR",
+  ).toUpperCase();
+  const isDA = punchType === "DRIVER_AIDE";
+  const isDA_AM = punchType === "DRIVER_AIDE_AM";
+  const isDA_PM = punchType === "DRIVER_AIDE_PM";
+  return {
+    punchType,
+    isDA,
+    isDA_AM,
+    isDA_PM,
+    isAnyDA: isDA || isDA_AM || isDA_PM,
+  };
+};
+
+const segmentFieldHours = (log, field, segmentType) =>
+  finiteHourValue(log?.[field]) ?? segmentActualHours(log, segmentType);
+
+const approvedOvertimeHours = (log) => {
+  const rows = Array.isArray(log?.overtime) ? log.overtime : [];
+  return rows
+    .filter((ot) => String(ot?.status ?? "").toLowerCase() === "approved")
+    .reduce((sum, ot) => sum + (Number(ot?.requestedHours) || 0), 0);
+};
+
+/** Lunch hours follow the web: a deduction stands in when no lunch interval was punched. */
+const displayLunchHours = (log) => {
+  if (!log?.lunchBreak?.start && Number(log?.lunchDeductionMinutes) > 0) {
+    return Number(log.lunchDeductionMinutes) / 60;
+  }
+  return lunchBreakHours(log);
+};
+
+const formatFixedHours = (hours) =>
+  hours == null || !Number.isFinite(Number(hours))
+    ? "—"
+    : `${Number(hours).toFixed(2)}h`;
+
+/** Driver/aide total is the three segments when all are present; otherwise net worked hours. */
+const webClockDuration = (log, flags, am, regular, pm) => {
+  if (flags.isAnyDA && am != null && regular != null && pm != null) {
+    return +(am + regular + pm).toFixed(2);
+  }
+  const net = finiteHourValue(log?.netWorkedHours);
+  if (net != null) return net;
+  const gross = finiteHourValue(log?.grossHours);
+  if (gross != null) return gross;
+  return grossClockHours(log);
+};
+
+const breakdownTitle = (flags) => {
+  if (flags.isDA) return "Driver/Aide Hours Breakdown";
+  if (flags.isDA_AM) return "Driver AM Hours Breakdown";
+  if (flags.isDA_PM) return "Driver PM Hours Breakdown";
+  return "Break Times";
+};
+
+/**
+ * Hour rows copied from the web punch-log expansion.
+ * Driver/aide: AM, Regular, PM, overtime, total. Everyone else: breaks, late, period, duration.
+ */
+const buildHourBreakdown = (log) => {
+  const flags = punchFlags(log);
+  const coffee = coffeeBreakHours(log);
+  const lunch = displayLunchHours(log);
+
+  if (!flags.isAnyDA) {
+    const late = finiteHourValue(log?.lateHours);
+    const cutoff = String(log?.dayCutoffStatus ?? "").toLowerCase();
+    const showLate = cutoff !== "approved" && late != null && late > 0;
+    const period = finiteHourValue(log?.scheduledHours);
+    const duration = webClockDuration(log, flags, null, null, null);
+    return {
+      title: breakdownTitle(flags),
+      isAnyDA: false,
+      rows: [
+        {
+          key: "coffee",
+          label: "Coffee Break",
+          tone: "plain",
+          breakHours: coffee,
+        },
+        {
+          key: "lunch",
+          label: "Lunch Break",
+          tone: "plain",
+          breakHours: lunch,
+        },
+        {
+          key: "late",
+          label: "Late Hours",
+          hoursText: showLate ? formatFixedHours(late) : "—",
+          tone: "plain",
+        },
+        {
+          key: "period",
+          label: "Period Hours",
+          hoursText: period != null ? formatFixedHours(period) : "0.00h",
+          tone: "plain",
+        },
+        {
+          key: "duration",
+          label: "Duration",
+          hoursText: duration != null ? formatFixedHours(duration) : "—",
+          tone: "orange",
+          emphasize: true,
+        },
+      ],
+    };
+  }
+
+  const am = segmentFieldHours(log, "driverAmSegmentHours", "driver_am");
+  const regular = segmentFieldHours(log, "regularSegmentHours", "regular");
+  const pm = segmentFieldHours(log, "driverPmSegmentHours", "driver_pm");
+  const rawOtHours = Number(log?.rawOtMinutes ?? 0) / 60;
+  const approvedOt = approvedOvertimeHours(log);
+  const rows = [];
+
+  if (flags.isDA || flags.isDA_AM) {
+    rows.push({
+      key: "am",
+      label: "Driver/Aide AM",
+      note: "(fixed)",
+      hoursText: formatFixedHours(am),
+      tone: "blue",
+    });
+  }
+  rows.push({
+    key: "regular",
+    label: "Regular Hours",
+    note: "(fixed)",
+    hoursText: formatFixedHours(regular),
+    tone: "purple",
+  });
+  if (flags.isDA || flags.isDA_PM) {
+    const notes = [];
+    if (pm != null && pm < DRIVER_AIDE_PM_BASE_HOURS + approvedOt) {
+      notes.push("(actual)");
+    }
+    if (approvedOt > 0) notes.push(`(+${approvedOt.toFixed(2)}h OT)`);
+    rows.push({
+      key: "pm",
+      label: "Driver/Aide PM",
+      note: notes.join(" "),
+      hoursText: formatFixedHours(pm),
+      tone: "blue",
+    });
+  }
+  if ((flags.isDA || flags.isDA_PM) && rawOtHours > 0) {
+    rows.push({
+      key: "ot",
+      label: "Overtime",
+      hoursText: formatFixedHours(rawOtHours),
+      tone: "orange",
+    });
+  }
+  const total = webClockDuration(log, flags, am, regular, pm);
+  rows.push({
+    key: "total",
+    label: "Total Clock Hours",
+    hoursText: total != null ? formatFixedHours(total) : "—",
+    tone: "orange",
+    emphasize: true,
+  });
+
+  return {
+    title: breakdownTitle(flags),
+    isAnyDA: true,
+    rows,
+    breaks: [
+      { key: "coffee", label: "Coffee Break", hours: coffee },
+      { key: "lunch", label: "Lunch Break", hours: lunch },
+    ],
+  };
+};
+
+const GROUP_MODES = [
+  { key: "day", label: "Day" },
+  { key: "month", label: "Month" },
+  { key: "year", label: "Year" },
+  { key: "cutoff", label: "Cutoff" },
+];
+
+const cutoffPeriodOf = (log) => {
+  const fromSegment = (Array.isArray(log?.segmentApprovals) ? log.segmentApprovals : []).find(
+    (row) => row?.cutoffPeriod?.id,
+  )?.cutoffPeriod;
+  return fromSegment ?? log?.cutoffApproval?.cutoffPeriod ?? null;
+};
+
+const formatCutoffRange = (period) => {
+  if (!period?.periodStart) return "Cutoff";
+  const start = new Date(period.periodStart);
+  const end = period.periodEnd ? new Date(period.periodEnd) : null;
+  const fmt = (d) =>
+    d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  if (!end || Number.isNaN(end.getTime())) return fmt(start);
+  if (Number.isNaN(start.getTime())) return "Cutoff";
+  return `${fmt(start)} – ${fmt(end)}`;
+};
+
+const cutoffGroupInfo = (log) => {
+  const period = cutoffPeriodOf(log);
+  if (!period?.id) {
+    return { key: "none", label: "Not in a cutoff", sort: "9999-99-99" };
+  }
+  const start = period.periodStart ? new Date(period.periodStart) : null;
+  const sort =
+    start && !Number.isNaN(start.getTime()) ? start.toISOString() : "0000-01-01";
+  return { key: String(period.id), label: formatCutoffRange(period), sort };
+};
+
+/** Hours credited once a cutoff segment is approved. Null until any segment is approved. */
+const approvedHoursForLog = (log) => {
+  const segments = Array.isArray(log?.segmentApprovals) ? log.segmentApprovals : [];
+  if (segments.length > 0) {
+    const approved = segments.filter(
+      (row) => String(row?.status ?? "").toLowerCase() === "approved",
+    );
+    if (approved.length === 0) return null;
+    return approved.reduce((sum, row) => {
+      const hours = Number(row?.actualHours);
+      return sum + (Number.isFinite(hours) ? hours : 0);
+    }, 0);
+  }
+  const approval = log?.cutoffApproval;
+  if (String(approval?.status ?? "").toLowerCase() !== "approved") return null;
+  const hours = Number(approval?.actualHours);
+  return Number.isFinite(hours) ? hours : null;
+};
+
+const cutoffDecision = (log) => {
+  const status = String(
+    log?.dayCutoffStatus ?? log?.cutoffApproval?.status ?? "",
+  ).toLowerCase();
+  if (status === "approved") return "approved";
+  if (status === "pending") return "pending";
+  if (status === "excluded" || status === "rejected") return status;
+  return "none";
+};
+
+const groupTimeLogs = (logs, calcHours, mode) => {
   const map = new Map();
   for (const log of logs) {
-    const key = dateKeyLocal(log?.timeIn);
+    const info = mode === "cutoff" ? cutoffGroupInfo(log) : null;
+    const key = info ? info.key : groupKeyForLog(log?.timeIn, mode);
     if (!key) continue;
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(log);
+    if (!map.has(key)) {
+      map.set(key, {
+        logs: [],
+        sort: info?.sort ?? key,
+        label: info?.label ?? null,
+      });
+    }
+    map.get(key).logs.push(log);
   }
-  const keys = [...map.keys()].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-  return keys.map((key) => {
-    const dayLogs = map.get(key);
-    dayLogs.sort(
-      (a, b) => new Date(a.timeIn).getTime() - new Date(b.timeIn).getTime(),
-    );
-    const sampleIso = dayLogs[0]?.timeIn;
+  const entries = [...map.entries()].sort((a, b) => {
+    const left = a[1].sort;
+    const right = b[1].sort;
+    if (left < right) return 1;
+    if (left > right) return -1;
+    return 0;
+  });
+  return entries.map(([key, bucket]) => {
+    const groupLogs = bucket.logs;
+    groupLogs.sort((a, b) => {
+      const diff = new Date(a.timeIn).getTime() - new Date(b.timeIn).getTime();
+      // A year holds every punch, so lead with the latest one, same as the
+      // day and month lists lead with the latest period.
+      return mode === "year" ? -diff : diff;
+    });
+    const sampleIso = groupLogs[0]?.timeIn;
     let total = 0;
-    for (const l of dayLogs) total += calcHours(l);
+    let approved = 0;
+    let anyApproved = false;
+    for (const l of groupLogs) {
+      total += calcHours(l);
+      const approvedHours = approvedHoursForLog(l);
+      if (approvedHours != null) {
+        anyApproved = true;
+        approved += approvedHours;
+      }
+    }
     return {
       key,
-      dateLabel: formatDayHeader(sampleIso),
+      dateLabel: bucket.label ?? formatGroupLabel(key, mode, sampleIso),
       sampleIso,
-      logs: dayLogs,
+      logs: groupLogs,
       totalHours: total,
+      approvedHours: anyApproved ? approved : null,
     };
   });
 };
@@ -333,47 +629,175 @@ const cloneJsDate = (d) =>
 
 const IOS_CONTEST_TIME_PICKER_ANCHOR = new Date(2000, 0, 1);
 
-const TimecardHoursBar = ({ color, label, detail, hours }) => (
-  <View style={{ marginBottom: 10 }}>
+const formatBreakHours = (hours) => {
+  const h = Number(hours);
+  if (!Number.isFinite(h) || h <= 0) return "0.00h";
+  return `${h.toFixed(2)}h`;
+};
+
+/** Decimal break hours. Non-zero values use the web's blue highlight pill. */
+const BreakHoursValue = ({ hours, textStyle }) => {
+  const label = formatBreakHours(hours);
+  const highlighted = Number(hours) > 0.001;
+  if (!highlighted) {
+    return (
+      <Text
+        style={[
+          { color: TC.muted, fontSize: 13, fontWeight: "600" },
+          textStyle,
+        ]}
+      >
+        {label}
+      </Text>
+    );
+  }
+  return (
     <View
       style={{
-        backgroundColor: color,
-        borderRadius: 10,
-        paddingVertical: 12,
-        paddingHorizontal: 14,
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
+        backgroundColor: "#dbeafe",
+        borderRadius: 8,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
       }}
     >
-      <View style={{ flex: 1, paddingRight: 8 }}>
-        <Text style={{ color: "#fff", fontSize: 13, fontWeight: "600" }}>
-          {label}
-        </Text>
-        {detail ? (
-          <Text
-            style={{
-              color: "rgba(255,255,255,0.85)",
-              fontSize: 11,
-              marginTop: 2,
-            }}
-            numberOfLines={2}
-          >
-            {detail}
-          </Text>
-        ) : null}
-      </View>
-      <Text style={{ color: "#fff", fontSize: 14, fontWeight: "700" }}>
-        {typeof hours === "number" && Number.isFinite(hours)
-          ? `${hours.toFixed(2)}h`
-          : hours}
+      <Text
+        style={[
+          { color: "#1d4ed8", fontSize: 13, fontWeight: "700" },
+          textStyle,
+        ]}
+      >
+        {label}
       </Text>
     </View>
+  );
+};
+
+const BreakHoursRow = ({ label, hours }) => (
+  <View
+    style={{
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginTop: 8,
+    }}
+  >
+    <Text style={{ color: TC.muted, fontSize: 13 }}>{label}</Text>
+    <BreakHoursValue hours={hours} />
   </View>
 );
 
+const SEG_TONES = {
+  blue: { bg: "#eff6ff", border: "#bfdbfe", text: "#1d4ed8" },
+  purple: { bg: "#f5f3ff", border: "#ddd6fe", text: "#6d28d9" },
+  orange: { bg: "#fff7ed", border: "#fed7aa", text: "#c2410c" },
+  plain: { bg: "transparent", border: "transparent", text: "#334155" },
+};
+
+const SegRow = ({ row, compact }) => {
+  const tone = SEG_TONES[row.tone] || SEG_TONES.plain;
+  const plain = row.tone === "plain";
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        marginBottom: compact ? 6 : 8,
+        paddingVertical: plain ? 2 : compact ? 8 : 10,
+        paddingHorizontal: plain ? 0 : 10,
+        borderRadius: 8,
+        backgroundColor: tone.bg,
+        borderWidth: plain ? 0 : 1,
+        borderColor: tone.border,
+      }}
+    >
+      <Text
+        style={{
+          flex: 1,
+          paddingRight: 8,
+          color: plain ? TC.muted : tone.text,
+          fontSize: compact ? 13 : 14,
+          fontWeight: row.emphasize ? "700" : "600",
+        }}
+      >
+        {row.label}
+        {row.note ? (
+          <Text style={{ fontWeight: "400", color: TC.muted }}>{` ${row.note}`}</Text>
+        ) : null}
+      </Text>
+      {row.breakHours != null ? (
+        <BreakHoursValue hours={row.breakHours} />
+      ) : (
+        <Text
+          style={{
+            color: plain ? TC.text : tone.text,
+            fontSize: compact ? 13 : 14,
+            fontWeight: "700",
+          }}
+        >
+          {row.hoursText}
+        </Text>
+      )}
+    </View>
+  );
+};
+
+/** Web hour segregation, used on the time card and in punch details. */
+const HourSegregation = ({ log, compact = false, showTitle = false }) => {
+  const model = buildHourBreakdown(log);
+  return (
+    <View style={{ marginTop: compact ? 12 : 0 }}>
+      {showTitle ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            marginBottom: 10,
+          }}
+        >
+          <Ionicons
+            name={model.isAnyDA ? "car-outline" : "time-outline"}
+            size={18}
+            color={TC.muted}
+          />
+          <Text
+            style={{
+              color: TC.text,
+              fontSize: 15,
+              fontWeight: "700",
+              marginLeft: 8,
+              flex: 1,
+            }}
+          >
+            {model.title}
+          </Text>
+        </View>
+      ) : null}
+      {model.rows.map((row) => (
+        <SegRow key={row.key} row={row} compact={compact} />
+      ))}
+      {model.breaks ? (
+        <View
+          style={{
+            marginTop: 4,
+            paddingTop: 6,
+            borderTopWidth: 1,
+            borderTopColor: TC.border,
+          }}
+        >
+          {model.breaks.map((row) => (
+            <BreakHoursRow key={row.key} label={row.label} hours={row.hours} />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
 const TimekeepingTimeCard = () => {
   const [timeLogs, setTimeLogs] = useState([]);
+  const [groupBy, setGroupBy] = useState("day");
+  const [expandedGroupKey, setExpandedGroupKey] = useState(undefined);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
@@ -417,39 +841,15 @@ const TimekeepingTimeCard = () => {
 
   const insets = useSafeAreaInsets();
 
-  // Function to calculate total hours worked
+  // Net hours: clock span minus coffee and lunch breaks.
   const calculateTotalHours = (log) => {
     if (!log.timeIn) return 0;
 
     const timeIn = new Date(log.timeIn);
-    const timeOut = log.timeOut ? new Date(log.timeOut) : new Date(); // Use current time if still clocked in
-
-    // Calculate total time in milliseconds
-    let totalTime = timeOut.getTime() - timeIn.getTime();
-
-    // Subtract lunch break time if exists
-    if (log.lunchBreak?.start && log.lunchBreak?.end) {
-      const lunchStart = new Date(log.lunchBreak.start);
-      const lunchEnd = new Date(log.lunchBreak.end);
-      const lunchDuration = lunchEnd.getTime() - lunchStart.getTime();
-      totalTime -= lunchDuration;
-    }
-
-    // Subtract coffee break times if they exist
-    if (log.coffeeBreaks && Array.isArray(log.coffeeBreaks)) {
-      log.coffeeBreaks.forEach((breakItem) => {
-        if (breakItem.start && breakItem.end) {
-          const breakStart = new Date(breakItem.start);
-          const breakEnd = new Date(breakItem.end);
-          const breakDuration = breakEnd.getTime() - breakStart.getTime();
-          totalTime -= breakDuration;
-        }
-      });
-    }
-
-    // Convert to hours
-    const totalHours = totalTime / (1000 * 60 * 60);
-    return Math.max(0, totalHours); // Ensure non-negative
+    const timeOut = log.timeOut ? new Date(log.timeOut) : new Date();
+    const spanHours =
+      (timeOut.getTime() - timeIn.getTime()) / (1000 * 60 * 60);
+    return Math.max(0, spanHours - paidBreakHours(log));
   };
 
   // Function to format hours display
@@ -468,10 +868,23 @@ const TimekeepingTimeCard = () => {
   /** Company zone for contest submit only; cards and modal prefill use device-local display. */
   const contestTimeZone = companyTimeZone ?? DEFAULT_SHIFT_DISPLAY_TIMEZONE;
 
-  const groupedByDay = useMemo(
-    () => groupTimeLogsByDay(timeLogs, calculateTotalHours),
-    [timeLogs],
+  const groupedLogs = useMemo(
+    () => groupTimeLogs(timeLogs, calculateTotalHours, groupBy),
+    [timeLogs, groupBy],
   );
+
+  useEffect(() => {
+    setExpandedGroupKey(undefined);
+  }, [groupBy]);
+
+  const openGroupKey =
+    expandedGroupKey === undefined
+      ? (groupedLogs[0]?.key ?? null)
+      : expandedGroupKey;
+
+  const toggleGroup = (key) => {
+    setExpandedGroupKey(openGroupKey === key ? null : key);
+  };
 
   const summaryEmployee =
     timeLogs.length > 0 ? employeeDisplayName(timeLogs[0]) : null;
@@ -841,7 +1254,7 @@ const TimekeepingTimeCard = () => {
     const scaleRef = cardScales[sk];
     const netH = calculateTotalHours(item);
     const schedH = scheduledHoursForLog(item);
-    const lateMin = lateMinutesForLog(item);
+    const approvedH = approvedHoursForLog(item);
     const punchLabel = punchTypeLabel(item);
     const isLastInDay = indexInDay === dayLogCount - 1;
     const logContested = isTimeLogContested(item, contestedTimeLogIds);
@@ -945,6 +1358,19 @@ const TimekeepingTimeCard = () => {
                     / {formatHoursDecimal(schedH)} sched.
                   </Text>
                 ) : null}
+                <Text
+                  style={{
+                    color: approvedH != null ? "#15803d" : TC.muted,
+                    fontSize: 12,
+                    marginTop: 4,
+                    fontWeight: "600",
+                    textAlign: "right",
+                  }}
+                >
+                  {approvedH != null
+                    ? `${formatHoursDecimal(approvedH)} approved`
+                    : "Not approved"}
+                </Text>
               </View>
             </View>
 
@@ -972,28 +1398,7 @@ const TimekeepingTimeCard = () => {
                 : "Still clocked in"}
             </Text>
 
-            {lateMin != null && lateMin > 0 ? (
-              <View
-                style={{
-                  alignSelf: "flex-start",
-                  marginTop: 12,
-                  backgroundColor: TC.redSoft,
-                  paddingHorizontal: 10,
-                  paddingVertical: 6,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: "#fecaca",
-                }}
-              >
-                <Text
-                  style={{ color: TC.red, fontSize: 12, fontWeight: "700" }}
-                >
-                  {lateMin >= 60
-                    ? `${(lateMin / 60).toFixed(1)}h late`
-                    : `${lateMin} min late`}
-                </Text>
-              </View>
-            ) : null}
+            <HourSegregation log={item} compact showTitle />
           </TouchableOpacity>
 
           <View
@@ -1119,6 +1524,7 @@ const TimekeepingTimeCard = () => {
       const url = `${API_BASE_URL}/api/timelogs/user`;
       const res = await axios.get(url, {
         headers: { Authorization: `Bearer ${token}` },
+        params: { limit: 10000 },
       });
       if (res.status === 200 && res.data.data) {
         const sortedLogs = res.data.data.sort(
@@ -1378,7 +1784,6 @@ const TimekeepingTimeCard = () => {
       const name = employeeDisplayName(log);
       const netH = calculateTotalHours(log);
       const grossH = grossClockHours(log);
-      const breakH = paidBreakHours(log);
       const loc = locationCoords(log);
       const punchRaw = log?.punchType ?? log?.punch_type ?? "REGULAR";
       const punchLabel = String(punchRaw).replace(/_/g, " ");
@@ -1412,10 +1817,20 @@ const TimekeepingTimeCard = () => {
           : log?.graceMinutes != null
             ? `${log.graceMinutes} min`
             : "—";
-      const cutoffLabel = log?.cutoffStatus ?? "Not in cutoff";
-      const segments = Array.isArray(log?.hourSegments)
-        ? log.hourSegments
-        : null;
+      const approvedH = approvedHoursForLog(log);
+      const cutoffPeriod = cutoffPeriodOf(log);
+      const cutoffState = cutoffDecision(log);
+      const cutoffLabel =
+        cutoffState === "approved"
+          ? "Approved"
+          : cutoffState === "pending"
+            ? "Pending"
+            : cutoffState === "excluded"
+              ? "Excluded"
+              : cutoffState === "rejected"
+                ? "Rejected"
+                : "Not in a cutoff";
+      const cutoffRange = cutoffPeriod ? formatCutoffRange(cutoffPeriod) : null;
       const logContested = isTimeLogContested(log, contestedTimeLogIds);
 
       const openMaps = () => {
@@ -1607,111 +2022,7 @@ const TimekeepingTimeCard = () => {
                   marginBottom: 14,
                 }}
               >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    marginBottom: 10,
-                  }}
-                >
-                  <Ionicons name="car-outline" size={18} color={TC.muted} />
-                  <Text
-                    style={{
-                      color: TC.text,
-                      fontSize: 15,
-                      fontWeight: "700",
-                      marginLeft: 8,
-                    }}
-                  >
-                    Hours breakdown
-                  </Text>
-                </View>
-                {segments && segments.length > 0 ? (
-                  segments.map((seg, i) => (
-                    <TimecardHoursBar
-                      key={seg.id ?? i}
-                      color={seg.color ?? TC.purple}
-                      label={seg.label ?? seg.name ?? "Segment"}
-                      detail={seg.detail ?? seg.range ?? null}
-                      hours={Number(seg.hours ?? seg.durationHours) || 0}
-                    />
-                  ))
-                ) : (
-                  <>
-                    <TimecardHoursBar
-                      color={TC.purple}
-                      label="Work time (excl. breaks)"
-                      detail="Net hours between clock-in and clock-out minus breaks"
-                      hours={netH}
-                    />
-                    {breakH > 0.001 ? (
-                      <TimecardHoursBar
-                        color={TC.slate}
-                        label="Breaks (coffee + lunch)"
-                        detail="Unpaid break window on this log"
-                        hours={breakH}
-                      />
-                    ) : null}
-                    {grossH != null ? (
-                      <TimecardHoursBar
-                        color={TC.amber}
-                        label="Total clock span"
-                        detail={`${formatShortDateTime(log.timeIn)} → ${formatShortDateTime(log.timeOut)}`}
-                        hours={grossH}
-                      />
-                    ) : null}
-                  </>
-                )}
-                <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    marginTop: 8,
-                    paddingTop: 10,
-                    borderTopWidth: 1,
-                    borderTopColor: TC.border,
-                  }}
-                >
-                  <Text style={{ color: TC.muted, fontSize: 12 }}>
-                    Coffee break
-                  </Text>
-                  <Text
-                    style={{ color: TC.text, fontSize: 12, fontWeight: "600" }}
-                  >
-                    {(() => {
-                      let m = 0;
-                      if (Array.isArray(log?.coffeeBreaks)) {
-                        log.coffeeBreaks.forEach((b) => {
-                          if (b?.start && b?.end)
-                            m += (new Date(b.end) - new Date(b.start)) / 60000;
-                        });
-                      }
-                      return `${(m / 60).toFixed(2)}h`;
-                    })()}
-                  </Text>
-                </View>
-                <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    marginTop: 6,
-                  }}
-                >
-                  <Text style={{ color: TC.muted, fontSize: 12 }}>
-                    Lunch break
-                  </Text>
-                  <Text
-                    style={{ color: TC.text, fontSize: 12, fontWeight: "600" }}
-                  >
-                    {log?.lunchBreak?.start && log?.lunchBreak?.end
-                      ? `${(
-                          (new Date(log.lunchBreak.end) -
-                            new Date(log.lunchBreak.start)) /
-                          3600000
-                        ).toFixed(2)}h`
-                      : "0.00h"}
-                  </Text>
-                </View>
+                <HourSegregation log={log} showTitle />
               </View>
 
               <View
@@ -1977,6 +2288,13 @@ const TimekeepingTimeCard = () => {
                       {cutoffLabel}
                     </Text>
                   </View>
+                  {cutoffRange ? (
+                    <Text
+                      style={{ color: TC.muted, fontSize: 12, marginTop: 6 }}
+                    >
+                      {cutoffRange}
+                    </Text>
+                  ) : null}
                 </View>
 
                 {systemNote ? (
@@ -2030,6 +2348,18 @@ const TimekeepingTimeCard = () => {
                   style={{ color: TC.text, fontSize: 22, fontWeight: "800" }}
                 >
                   {formatHours(netH)}
+                </Text>
+                <Text
+                  style={{
+                    color: approvedH != null ? "#15803d" : TC.muted,
+                    fontSize: 14,
+                    fontWeight: "700",
+                    marginTop: 6,
+                  }}
+                >
+                  {approvedH != null
+                    ? `${formatHoursDecimal(approvedH)} approved`
+                    : "Not approved"}
                 </Text>
                 <Text style={{ color: TC.muted, fontSize: 12, marginTop: 4 }}>
                   {complete
@@ -2230,20 +2560,52 @@ const TimekeepingTimeCard = () => {
                   </View>
                 </View>
 
-                <Text
+                <View
                   style={{
-                    fontSize: 13,
-                    fontWeight: "700",
-                    color: TC.grey600,
-                    marginBottom: 12,
-                    marginLeft: 2,
-                    letterSpacing: 0.3,
+                    flexDirection: "row",
+                    backgroundColor: TC.grey100,
+                    borderRadius: 12,
+                    padding: 4,
+                    marginBottom: 14,
                   }}
                 >
-                  By day
-                </Text>
+                  {GROUP_MODES.map((mode) => {
+                    const selected = groupBy === mode.key;
+                    return (
+                      <TouchableOpacity
+                        key={mode.key}
+                        onPress={() => setGroupBy(mode.key)}
+                        activeOpacity={0.85}
+                        accessibilityRole="tab"
+                        accessibilityState={{ selected }}
+                        accessibilityLabel={`Group punches by ${mode.label}`}
+                        style={{
+                          flex: 1,
+                          alignItems: "center",
+                          justifyContent: "center",
+                          paddingVertical: 8,
+                          borderRadius: 9,
+                          backgroundColor: selected ? TC.card : "transparent",
+                        }}
+                      >
+                        <Text
+                          numberOfLines={1}
+                          style={{
+                            fontSize: 13,
+                            fontWeight: selected ? "700" : "500",
+                            color: selected ? TC.accentText : TC.muted,
+                          }}
+                        >
+                          {mode.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
 
-                {groupedByDay.map((group) => (
+                {groupedLogs.map((group) => {
+                  const expanded = openGroupKey === group.key;
+                  return (
                   <View
                     key={group.key}
                     style={{
@@ -2255,7 +2617,12 @@ const TimekeepingTimeCard = () => {
                       backgroundColor: TC.shell,
                     }}
                   >
-                    <View
+                    <TouchableOpacity
+                      onPress={() => toggleGroup(group.key)}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityState={{ expanded }}
+                      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${group.dateLabel}`}
                       style={{
                         flexDirection: "row",
                         flexWrap: "wrap",
@@ -2266,7 +2633,7 @@ const TimekeepingTimeCard = () => {
                         paddingHorizontal: 16,
                         paddingVertical: 14,
                         backgroundColor: TC.card,
-                        borderBottomWidth: 1,
+                        borderBottomWidth: expanded ? 1 : 0,
                         borderBottomColor: TC.border,
                       }}
                     >
@@ -2281,6 +2648,11 @@ const TimekeepingTimeCard = () => {
                           columnGap: 10,
                         }}
                       >
+                        <Ionicons
+                          name={expanded ? "chevron-down" : "chevron-forward"}
+                          size={18}
+                          color={TC.muted}
+                        />
                         <Text
                           style={{
                             color: TC.text,
@@ -2320,18 +2692,33 @@ const TimekeepingTimeCard = () => {
                           </Text>
                         </View>
                       </View>
-                      <Text
-                        style={{
-                          color: TC.text,
-                          fontSize: 16,
-                          fontWeight: "700",
-                          flexShrink: 0,
-                        }}
-                      >
-                        {formatHoursDecimal(group.totalHours)} total
-                      </Text>
-                    </View>
+                      <View style={{ alignItems: "flex-end", flexShrink: 0 }}>
+                        <Text
+                          style={{
+                            color: TC.text,
+                            fontSize: 16,
+                            fontWeight: "700",
+                          }}
+                        >
+                          {formatHoursDecimal(group.totalHours)} total
+                        </Text>
+                        <Text
+                          style={{
+                            color:
+                              group.approvedHours != null ? "#15803d" : TC.muted,
+                            fontSize: 12,
+                            fontWeight: "600",
+                            marginTop: 2,
+                          }}
+                        >
+                          {group.approvedHours != null
+                            ? `${formatHoursDecimal(group.approvedHours)} approved`
+                            : "No approved hours"}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
 
+                    {expanded ? (
                     <View
                       style={{
                         paddingHorizontal: 12,
@@ -2343,8 +2730,10 @@ const TimekeepingTimeCard = () => {
                         renderShiftRow(log, idx, group.key, group.logs.length),
                       )}
                     </View>
+                    ) : null}
                   </View>
-                ))}
+                  );
+                })}
               </View>
             )}
           </ScrollView>

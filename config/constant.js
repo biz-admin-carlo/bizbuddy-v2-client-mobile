@@ -2,6 +2,7 @@
 const DEV_SERVER_FRANCO = "http://192.168.100.8:5000";
 const PROD_SERVER_CARLO = "https://biz-maya-namagembe.onrender.com";
 const DEV_SERVER_NGROK = "https://acc5b2049424.ngrok-free.app";
+const DEV_SERVER_MIGUEL = "http://localhost:8000";
 export const WEBSITE_URL = "https://mybizbuddy.co";
 
 /** In-app feedback form sends mail to this address via the device mail app. */
@@ -11,18 +12,24 @@ export const API_BASE_URL = PROD_SERVER_CARLO;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
 /** GET — list current user’s requested punch logs. */
-export const REQUEST_PUNCH_LOG_MY_REQUESTS_PATH = "/api/request-punch-log/my-requests";
+export const REQUEST_PUNCH_LOG_MY_REQUESTS_PATH =
+  "/api/request-punch-log/my-requests";
 
 /** POST — submit a requested punch log (requestedDate YYYY-MM-DD; clock fields naive local YYYY-MM-DDTHH:mm). */
 export const REQUEST_PUNCH_LOG_SUBMIT_PATH = "/api/request-punch-log/submit";
+
+/** DELETE — cancel/delete a requested punch log the current user owns. */
+export const requestPunchLogDeletePath = (id) =>
+  `/api/request-punch-log/delete/${encodeURIComponent(id)}`;
 
 /** POST — contest an existing time log (corrected clock-in/out as UTC ISO with Z). */
 export const CONTEST_POLICY_SUBMIT_PATH = "/api/contest-policy/submit";
 
 /** GET — list current user's time log contests (if enabled on API). */
-export const CONTEST_POLICY_MY_REQUESTS_PATH = "/api/contest-policy/my-requests";
+export const CONTEST_POLICY_MY_REQUESTS_PATH =
+  "/api/contest-policy/my-requests";
 
-export const VERSION = "1.0.29";
+export const VERSION = "1.0.32";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).

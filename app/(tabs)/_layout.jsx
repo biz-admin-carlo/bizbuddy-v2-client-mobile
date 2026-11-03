@@ -4,6 +4,7 @@
 import { useEffect, useState, useRef } from "react";
 import {
   AppState,
+  Alert,
   TouchableOpacity,
   Modal,
   View,
@@ -21,6 +22,7 @@ import * as SecureStore from "expo-secure-store";
 import UserInactivity from "react-native-user-inactivity";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE_URL, WEBSITE_URL } from "../../config/constant";
+import { getInstallationId } from "../../utils/deviceId";
 import { NotificationService } from "../../utils/notificationService";
 import useAuthStore from "../../store/useAuthStore";
 import usePresenceStore from "../../store/presenceStore";
@@ -33,6 +35,58 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import io from "socket.io-client";
 
 const { height } = Dimensions.get("window");
+
+function SupportAdminTabBar({ bottomInset, onLogout }) {
+  return (
+    <View
+      style={{
+        backgroundColor: "#ffffff",
+        borderTopWidth: 1,
+        borderTopColor: "#e2e8f0",
+        paddingTop: 14,
+        paddingBottom: Math.max(bottomInset, 12),
+        paddingHorizontal: 20,
+        ...Platform.select({
+          ios: {
+            shadowColor: "#000",
+            shadowOffset: { width: 0, height: -1 },
+            shadowOpacity: 0.05,
+            shadowRadius: 2,
+          },
+          android: { elevation: 4 },
+        }),
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center" }}>
+        <Ionicons name="headset-outline" size={20} color="#ea580c" style={{ marginRight: 10 }} />
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 15, fontWeight: "700", color: "#ea580c" }}>
+            Support Admin Mode
+          </Text>
+          <Text style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+            B. Buddy · company tools only
+          </Text>
+        </View>
+        <TouchableOpacity
+          onPress={onLogout}
+          accessibilityRole="button"
+          accessibilityLabel="Log out"
+          style={{
+            marginLeft: 12,
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: "#fecaca",
+            backgroundColor: "#fef2f2",
+          }}
+        >
+          <Text style={{ fontSize: 13, fontWeight: "700", color: "#dc2626" }}>Log out</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
 
 // Replace the TabIcon component with this enhanced version
 const TabIcon = ({ name, size, focused, isAvatar = false, initials = "U" }) => {
@@ -245,7 +299,7 @@ const NotificationIcon = ({ color, size, focused }) => {
 
 const TabsLayout = () => {
   const insets = useSafeAreaInsets();
-  const { token } = useAuthStore();
+  const { token, logout } = useAuthStore();
   useSessionGuard();
   const { setPresence } = usePresenceStore();
   const [appState, setAppState] = useState(AppState.currentState);
@@ -254,10 +308,11 @@ const TabsLayout = () => {
   const handledNotificationIdsRef = useRef(new Set());
   const maybeAutoStartTutorial = useTutorialStore((s) => s.maybeAutoStart);
 
-  // Show the tutorial once per install (after first successful entry into tabs).
+  // Show the tutorial once per install, after we know this is not a B. Buddy session.
   useEffect(() => {
+    if (!identityReady || isSystemAgent) return;
     maybeAutoStartTutorial();
-  }, [maybeAutoStartTutorial]);
+  }, [maybeAutoStartTutorial, identityReady, isSystemAgent]);
 
   // When a user taps a notification, redirect to `data.targetRoute` (deep link-like behavior).
   useEffect(() => {
@@ -318,6 +373,9 @@ const TabsLayout = () => {
   // State for subscription plan (e.g., "free", "basic", "pro")
   const [subscriptionPlan, setSubscriptionPlan] = useState(null);
   const [loadingSub, setLoadingSub] = useState(true);
+  const [isSystemAgent, setIsSystemAgent] = useState(false);
+  const [identityReady, setIdentityReady] = useState(false);
+  const systemAgentRef = useRef(false);
   // State to control the help modal for locked features.
   const [showLockedModal, setShowLockedModal] = useState(false);
 
@@ -397,16 +455,14 @@ const TabsLayout = () => {
         headers: { Authorization: `Bearer ${storedToken}` },
       });
       const data = await response.json();
-      if (
-        response.ok &&
-        data.data.subscription &&
-        data.data.subscription.plan
-      ) {
+      if (response.ok && data?.data?.subscription?.plan) {
         setSubscriptionPlan(data.data.subscription.plan.name);
       }
+      setIsSystemAgent(response.ok && data?.data?.user?.isSystemAgent === true);
     } catch (error) {
       console.error("Error fetching subscription:", error);
     } finally {
+      setIdentityReady(true);
       setLoadingSub(false);
     }
   };
@@ -433,8 +489,27 @@ const TabsLayout = () => {
     // Reconnect whenever the active account changes so the socket room/context matches.
   }, [token]);
 
-  // Update presence on app state changes.
+  useEffect(() => {
+    if (!isSystemAgent) return;
+    const employeeScreens = [
+      "profile",
+      "(requests)",
+      "(shifts)",
+      "payroll",
+      "(leaves)",
+      "(overtime)",
+      "payout-account",
+      "ai-chats",
+      "notifications",
+    ];
+    if (employeeScreens.some((name) => segments.includes(name))) {
+      router.replace("/(tabs)/(settings)");
+    }
+  }, [isSystemAgent, segments, router]);
+
+  systemAgentRef.current = isSystemAgent;
   const updateUserPresence = async (status) => {
+    if (systemAgentRef.current) return;
     const currentToken = token || (await SecureStore.getItemAsync("token"));
     if (!currentToken) return;
     try {
@@ -495,7 +570,12 @@ const TabsLayout = () => {
 
   // Add extra Android bottom-safe-area spacing so system navigation does not overlap tabs.
   const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 16) : 0;
-  const tabBarHeight = Platform.OS === "ios" ? 90 : 70 + androidBottomInset;
+  const supportBottomInset = Platform.OS === "ios" ? Math.max(insets.bottom, 16) : androidBottomInset;
+  const tabBarHeight = isSystemAgent
+    ? 68 + supportBottomInset
+    : Platform.OS === "ios"
+      ? 90
+      : 70 + androidBottomInset;
   const isSettingsTabActive = segments.includes("(settings)");
 
   // Update the tabBarActiveTintColor to be white for the labels
@@ -507,6 +587,45 @@ const TabsLayout = () => {
         style={{ flex: 1 }}
       >
         <Tabs
+          {...(isSystemAgent
+            ? {
+                tabBar: () => (
+                  <SupportAdminTabBar
+                    bottomInset={supportBottomInset}
+                    onLogout={() => {
+                      Alert.alert("Log out", "End this B. Buddy session?", [
+                        { text: "Cancel", style: "cancel" },
+                        {
+                          text: "Log out",
+                          style: "destructive",
+                          onPress: async () => {
+                            try {
+                              const currentToken =
+                                token || (await SecureStore.getItemAsync("token"));
+                              const deviceId = await getInstallationId();
+                              if (currentToken) {
+                                await fetch(`${API_BASE_URL}/api/account/sign-out`, {
+                                  method: "POST",
+                                  headers: {
+                                    "Content-Type": "application/json",
+                                    Authorization: `Bearer ${currentToken}`,
+                                  },
+                                  body: JSON.stringify({ deviceId }),
+                                });
+                              }
+                            } catch (error) {
+                              console.error("Support sign-out error:", error);
+                            }
+                            await logout();
+                            router.replace("/(auth)/signin");
+                          },
+                        },
+                      ]);
+                    }}
+                  />
+                ),
+              }
+            : {})}
           screenOptions={{
             tabBarStyle: {
               backgroundColor: "#ffffff",
@@ -542,6 +661,7 @@ const TabsLayout = () => {
             options={{
               title: "Profile",
               headerShown: false,
+              href: isSystemAgent ? null : undefined,
               tabBarIcon: ({ color, size, focused }) => (
                 <TabIcon
                   name="person-outline"
@@ -553,24 +673,26 @@ const TabsLayout = () => {
             }}
           />
           <Tabs.Screen
-            name="(leaves)"
+            name="(requests)"
             options={{
-              title: "Leaves",
+              title: "Requests",
               headerShown: false,
+              href: isSystemAgent ? null : undefined,
               tabBarIcon: ({ color, size, focused }) => (
                 <TabIcon
-                  name="calendar-outline"
+                  name="documents-outline"
                   size={size}
                   color={color}
                   focused={focused}
                 />
               ),
-              tabBarButton: (props) =>
-                isLockedForFree ? (
-                  <LockedTabButton {...props} />
-                ) : (
-                  <TouchableOpacity {...props} />
-                ),
+            }}
+          />
+          <Tabs.Screen
+            name="(leaves)"
+            options={{
+              headerShown: false,
+              href: null,
             }}
           />
           {/* Keep overtime route hidden from the tab bar and overflow */}
@@ -594,12 +716,23 @@ const TabsLayout = () => {
                   focused={focused}
                 />
               ),
-              tabBarButton: (props) =>
-                isLockedForFree ? (
-                  <LockedTabButton {...props} />
-                ) : (
-                  <TouchableOpacity {...props} />
-                ),
+              ...(isSystemAgent
+                ? { href: null }
+                : {
+                    tabBarButton: (props) =>
+                      isLockedForFree ? (
+                        <LockedTabButton {...props} />
+                      ) : (
+                        <TouchableOpacity {...props} />
+                      ),
+                  }),
+            }}
+          />
+          <Tabs.Screen
+            name="payout-account"
+            options={{
+              headerShown: false,
+              href: null,
             }}
           />
           <Tabs.Screen
@@ -607,6 +740,7 @@ const TabsLayout = () => {
             options={{
               title: "Timekeeping",
               headerShown: false,
+              href: isSystemAgent ? null : undefined,
               tabBarIcon: ({ color, size, focused }) => (
                 <TabIcon
                   name="time-outline"
@@ -636,11 +770,14 @@ const TabsLayout = () => {
           <Tabs.Screen
             name="(settings)"
             options={{
-              title: "Settings",
+              title: isSystemAgent ? "Support Admin Mode" : "Settings",
               headerShown: false,
-              tabBarIcon: ({ color, size, focused }) => (
-                <AvatarIcon color={color} size={size} focused={focused} />
-              ),
+              tabBarIcon: ({ color, size, focused }) =>
+                isSystemAgent ? (
+                  <Ionicons name="headset-outline" size={size} color={color} />
+                ) : (
+                  <AvatarIcon color={color} size={size} focused={focused} />
+                ),
             }}
           />
         </Tabs>

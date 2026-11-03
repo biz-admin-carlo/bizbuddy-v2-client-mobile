@@ -2,6 +2,7 @@ require File.join(File.dirname(`node --print "require.resolve('expo/package.json
 require File.join(File.dirname(`node --print "require.resolve('react-native/package.json')"`), "scripts/react_native_pods")
 
 require 'json'
+require 'fileutils'
 podfile_properties = JSON.parse(File.read(File.join(__dir__, 'Podfile.properties.json'))) rescue {}
 
 ENV['RCT_NEW_ARCH_ENABLED'] ||= '0' if podfile_properties['newArchEnabled'] == 'false'
@@ -49,5 +50,31 @@ target 'BizBuddy' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => podfile_properties['apple.ccacheEnabled'] == 'true',
     )
+
+    # Xcode 27 only accepts iOS deployment targets from 15.0 up. Pod resource
+    # bundles (maps, AsyncStorage, Firebase privacy manifests) still declare 9–13.4.
+    deployment_target = podfile_properties['ios.deploymentTarget'] || '15.1'
+
+    # expo-dev-launcher 6 crashes debug launches once the window moves to
+    # SceneDelegate. Copy the patched subscriber back after npm install.
+    # Release builds do not register this subscriber.
+    dev_launcher_subscriber = File.expand_path(
+      '../node_modules/expo-dev-launcher/ios/ReactDelegateHandler/ExpoDevLauncherAppDelegateSubscriber.swift',
+      __dir__
+    )
+    dev_launcher_patch = File.expand_path('patches/ExpoDevLauncherAppDelegateSubscriber.swift', __dir__)
+    if File.exist?(dev_launcher_subscriber) && File.exist?(dev_launcher_patch)
+      subscriber_source = File.read(dev_launcher_subscriber)
+      unless subscriber_source.include?('BizBuddyDevLauncherWindowReady')
+        FileUtils.cp(dev_launcher_patch, dev_launcher_subscriber)
+      end
+    end
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |build_config|
+        current = build_config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+        next if current && current.to_f >= deployment_target.to_f
+        build_config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = deployment_target
+      end
+    end
   end
 end

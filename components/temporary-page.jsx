@@ -7,6 +7,7 @@ import { SafeAreaView, ScrollView, View, Text, TouchableOpacity, Animated, Dimen
 import { Ionicons, Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { VERSION } from "../config/constant";
 
 const { width } = Dimensions.get("window");
 
@@ -150,7 +151,7 @@ export default function TemporaryPage() {
                 </View>
                 <View>
                   <Text className="text-xs text-slate-500">Version</Text>
-                  <Text className="text-sm font-medium text-slate-700">1.0.12</Text>
+                  <Text className="text-sm font-medium text-slate-700">{VERSION}</Text>
                 </View>
               </View>
             </View>

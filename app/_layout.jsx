@@ -106,6 +106,13 @@ export default function RootLayout() {
             title: "Biz University",
           }}
         />
+        <Stack.Screen
+          name="system-admin"
+          options={{
+            headerShown: false,
+            title: "System Admin",
+          }}
+        />
       </Stack>
 
       <Modal visible={showUpdateModal} transparent animationType="fade">

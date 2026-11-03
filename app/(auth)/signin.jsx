@@ -26,12 +26,15 @@ import useAuthStore, {
 import {
   findAnyValidSessionToken,
   findVerifiedSessionToken,
-  getDistinctVaultUserIds,
+  dropBiometricVaultToken,
   removeStoredSessionToken,
   resolveSessionTokenForCompanyId,
   syncLegacyTokenIntoPerCompanyStore,
 } from "../../utils/authTokenStorage";
-import { getVaultedAccountRows } from "../../utils/vaultedAccounts";
+import {
+  getVaultedAccountRows,
+  groupVaultedRowsByPerson,
+} from "../../utils/vaultedAccounts";
 import { API_BASE_URL, VERSION } from "../../config/constant";
 import { getInstallationId } from "../../utils/deviceId";
 import { cacheCompaniesForEmail } from "../../utils/emailCompanyDirectory";
@@ -53,9 +56,27 @@ import {
 const BIOMETRIC_ENABLED_KEY = "biometricEnabled";
 /** After device biometric: pick company when user has multiple companies. */
 const STEP_BIOMETRIC_COMPANY = 3;
-/** Before device biometric: pick which saved account when several different
- * users are vaulted on this device and there's no "last signed in" hint. */
+/** Before device biometric: pick which person (email) to unlock when several
+ * different people are vaulted on this device and there's no last-user hint.
+ * Multiple companies for the same email are one person, not separate accounts. */
 const STEP_BIOMETRIC_ACCOUNT_PICKER = 4;
+/** B. Buddy support sign-in: staff code + PIN after the shared password. */
+const STEP_AGENT_IDENTITY = 5;
+
+function isSystemAgentCompany(user) {
+  return user?.isSystemAgent === true;
+}
+
+function companyRoleLabel(user) {
+  return isSystemAgentCompany(user) ? "Internal" : user?.role;
+}
+
+function membershipUserIdsFromCompanies(companies) {
+  return (companies || [])
+    .map((c) => c.userId)
+    .filter((id) => id != null && id !== "")
+    .map(String);
+}
 
 async function fetchAccountEmailForToken(token) {
   if (!token) return null;
@@ -76,6 +97,9 @@ async function fetchAccountEmailForToken(token) {
 
 /** API may return companies as `data`, nested array, or a single user object. */
 function normalizeCompaniesFromEmailResponse(json) {
+  if (json?.hasActiveAccounts === false || json?.data?.hasActiveAccounts === false) {
+    return [];
+  }
   const raw = json?.data;
   if (Array.isArray(raw)) return raw;
   if (raw && typeof raw === "object" && Array.isArray(raw.data)) {
@@ -123,6 +147,25 @@ export default function SignIn() {
   // For the ambiguous multi-account biometric picker (step 4)
   const [biometricAccounts, setBiometricAccounts] = useState([]);
   const [bioAccountSwitchingKey, setBioAccountSwitchingKey] = useState(null);
+  const [agentCode, setAgentCode] = useState("");
+  const [agentPin, setAgentPin] = useState("");
+  const [lockedUntil, setLockedUntil] = useState(null);
+  const [lockClock, setLockClock] = useState(Date.now());
+  const [showSystemAdmin, setShowSystemAdmin] = useState(false);
+  const adminHoldTimer = useRef(null);
+
+  const beginAdminHold = () => {
+    if (showSystemAdmin || mode) return;
+    if (adminHoldTimer.current) clearTimeout(adminHoldTimer.current);
+    adminHoldTimer.current = setTimeout(() => setShowSystemAdmin(true), 5000);
+  };
+
+  const endAdminHold = () => {
+    if (adminHoldTimer.current) {
+      clearTimeout(adminHoldTimer.current);
+      adminHoldTimer.current = null;
+    }
+  };
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -303,23 +346,135 @@ export default function SignIn() {
     return false;
   };
 
-  const handleBiometricSignIn = async () => {
-    const vaultUserIds = await getDistinctVaultUserIds();
-    const lastUserId = await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY);
+  const resolveTokenForPickedCompany = async (companyId, companies = users) => {
+    const picked = String(companyId ?? "").trim();
+    if (!picked) return null;
+    const company = (companies || []).find(
+      (u) => String(u.companyId) === picked,
+    );
+    const preferredUserId =
+      company?.userId ||
+      getTokenUserId(savedToken) ||
+      (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
+    return resolveSessionTokenForCompanyId(picked, {
+      userId: preferredUserId,
+      allowedUserIds: membershipUserIdsFromCompanies(companies),
+    });
+  };
 
-    if (vaultUserIds.length > 1 && !lastUserId) {
-      const rows = await getVaultedAccountRows();
-      if (rows.length === 0) {
-        setError("No saved credentials. Please sign in using email first.");
+  const continueAfterBiometricUnlock = async (active, fallbackEmail = null) => {
+    setError(null);
+    setBioCompanyLoading(true);
+    try {
+      const fallback =
+        typeof fallbackEmail === "string"
+          ? fallbackEmail.trim().toLowerCase()
+          : "";
+      const emailForLookup =
+        (await fetchAccountEmailForToken(active.token)) ||
+        (fallback.includes("@") ? fallback : null);
+
+      if (!emailForLookup) {
+        await persistSignInContext(active.token, null, active.companyId);
+        await login(active.token, true, active.companyId);
+        router.replace("(tabs)/profile");
         return;
       }
+
+      const res = await fetch(
+        `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
+          emailForLookup
+        )}`
+      );
+      const data = await res.json();
+      const companies = normalizeCompaniesFromEmailResponse(data);
+      if (!res.ok || companies.length === 0) {
+        await persistSignInContext(active.token, emailForLookup, active.companyId);
+        await login(active.token, true, active.companyId);
+        router.replace("(tabs)/profile");
+        return;
+      }
+      cacheCompaniesForEmail(emailForLookup, companies);
+
+      if (companies.length === 1) {
+        const onlyCompanyId = String(companies[0].companyId);
+        if (isSystemAgentCompany(companies[0])) {
+          await dropBiometricVaultToken(active.token);
+          setUsers(companies);
+          setEmail(emailForLookup);
+          setSelectedCompanyId(onlyCompanyId);
+          setPassword("");
+          setStep(2);
+          return;
+        }
+        const companyToken = await resolveTokenForPickedCompany(
+          onlyCompanyId,
+          companies,
+        );
+        const tokenToUse = companyToken || active.token;
+        if (!(await ensureSavedSessionStillValid(tokenToUse))) {
+          return;
+        }
+        await persistSignInContext(tokenToUse, emailForLookup, onlyCompanyId);
+        await login(tokenToUse, true, onlyCompanyId);
+        router.replace("(tabs)/profile");
+        return;
+      }
+
+      setUsers(companies);
+      setEmail(emailForLookup);
+      setSelectedCompanyId(null);
+      setStep(STEP_BIOMETRIC_COMPANY);
+      setSavedToken(active.token);
+    } catch (e) {
+      console.error("Biometric company lookup error:", e);
+      const fallback = await findVerifiedSessionToken(
+        (token) => verifySessionToken(token, { strict: true }),
+        { userId: getTokenUserId(active.token) },
+      );
+      if (fallback?.token) {
+        await login(fallback.token, true, fallback.companyId);
+        router.replace("(tabs)/profile");
+      } else {
+        setError(
+          "Could not restore your session. Sign in with your password."
+        );
+      }
+    } finally {
+      setBioCompanyLoading(false);
+    }
+  };
+
+  const handleBiometricSignIn = async () => {
+    const rows = await getVaultedAccountRows();
+    if (rows.length === 0) {
+      setError("No saved credentials. Please sign in using email first.");
+      return;
+    }
+
+    const people = groupVaultedRowsByPerson(rows);
+    const lastUserId = await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY);
+
+    if (people.length > 1 && !lastUserId) {
       setError(null);
-      setBiometricAccounts(rows);
+      setBiometricAccounts(people);
       setStep(STEP_BIOMETRIC_ACCOUNT_PICKER);
       return;
     }
 
-    const session = await findAnyValidSessionToken({ userId: lastUserId });
+    const person =
+      (lastUserId &&
+        people.find(
+          (p) =>
+            p.userId === lastUserId ||
+            (p.memberUserIds || []).includes(lastUserId),
+        )) ||
+      people[0];
+
+    const session = await findAnyValidSessionToken({
+      userId: lastUserId,
+      allowedUserIds: lastUserId ? null : person?.memberUserIds,
+    });
     if (!session?.token) {
       setError("No saved credentials. Please sign in using email first.");
       return;
@@ -336,7 +491,9 @@ export default function SignIn() {
     if (result.success) {
       const active = await findVerifiedSessionToken(
         (token) => verifySessionToken(token, { strict: true }),
-        { userId: lastUserId || getTokenUserId(session.token) },
+        lastUserId
+          ? { userId: lastUserId }
+          : { allowedUserIds: person?.memberUserIds },
       );
       if (!active?.token) {
         await forceLogout();
@@ -347,73 +504,7 @@ export default function SignIn() {
         return;
       }
 
-      const activeUserId = getTokenUserId(active.token);
-
-      setError(null);
-      setBioCompanyLoading(true);
-      try {
-        const emailForLookup = await fetchAccountEmailForToken(active.token);
-
-        if (!emailForLookup) {
-          await persistSignInContext(active.token, null, active.companyId);
-          await login(active.token, true, active.companyId);
-          router.replace("(tabs)/profile");
-          return;
-        }
-
-        const res = await fetch(
-          `${API_BASE_URL}/api/account/get-user-email?email=${encodeURIComponent(
-            emailForLookup
-          )}`
-        );
-        const data = await res.json();
-        const companies = normalizeCompaniesFromEmailResponse(data);
-        if (!res.ok || companies.length === 0) {
-          await persistSignInContext(active.token, emailForLookup, active.companyId);
-          await login(active.token, true, active.companyId);
-          router.replace("(tabs)/profile");
-          return;
-        }
-        cacheCompaniesForEmail(emailForLookup, companies);
-
-        if (companies.length === 1) {
-          const onlyCompanyId = String(companies[0].companyId);
-          const companyToken = await resolveSessionTokenForCompanyId(
-            onlyCompanyId,
-            { userId: activeUserId },
-          );
-          const tokenToUse = companyToken || active.token;
-          if (!(await ensureSavedSessionStillValid(tokenToUse))) {
-            return;
-          }
-          await persistSignInContext(tokenToUse, emailForLookup, onlyCompanyId);
-          await login(tokenToUse, true, onlyCompanyId);
-          router.replace("(tabs)/profile");
-          return;
-        }
-
-        setUsers(companies);
-        setEmail(emailForLookup);
-        setSelectedCompanyId(null);
-        setStep(STEP_BIOMETRIC_COMPANY);
-        setSavedToken(active.token);
-      } catch (e) {
-        console.error("Biometric company lookup error:", e);
-        const fallback = await findVerifiedSessionToken(
-          (token) => verifySessionToken(token, { strict: true }),
-          { userId: activeUserId },
-        );
-        if (fallback?.token) {
-          await login(fallback.token, true, fallback.companyId);
-          router.replace("(tabs)/profile");
-        } else {
-          setError(
-            "Could not restore your session. Sign in with your password."
-          );
-        }
-      } finally {
-        setBioCompanyLoading(false);
-      }
+      await continueAfterBiometricUnlock(active, person?.email);
     } else {
       setError("Biometric authentication failed. Please try again.");
     }
@@ -430,12 +521,16 @@ export default function SignIn() {
     setLoading(true);
     try {
       const picked = String(selectedCompanyId);
-      const preferredUserId =
-        getTokenUserId(savedToken) ||
-        (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
-      const sessionToken = await resolveSessionTokenForCompanyId(picked, {
-        userId: preferredUserId,
-      });
+      const company = (users || []).find((user) => String(user.companyId) === picked);
+      if (isSystemAgentCompany(company)) {
+        const sessionToken = await resolveTokenForPickedCompany(picked);
+        if (sessionToken) await dropBiometricVaultToken(sessionToken);
+        setPassword("");
+        setPasswordSourceStep(STEP_BIOMETRIC_COMPANY);
+        setStep(2);
+        return;
+      }
+      const sessionToken = await resolveTokenForPickedCompany(picked);
 
       if (sessionToken) {
         if (!(await ensureSavedSessionStillValid(sessionToken))) {
@@ -460,12 +555,16 @@ export default function SignIn() {
     setSelectedCompanyId(companyId);
     setError(null);
     const picked = String(companyId);
-    const preferredUserId =
-      getTokenUserId(savedToken) ||
-      (await SecureStore.getItemAsync(LAST_SIGN_IN_USER_ID_KEY));
-    const sessionToken = await resolveSessionTokenForCompanyId(picked, {
-      userId: preferredUserId,
-    });
+    const company = (users || []).find((user) => String(user.companyId) === picked);
+    if (isSystemAgentCompany(company)) {
+      const sessionToken = await resolveTokenForPickedCompany(picked);
+      if (sessionToken) await dropBiometricVaultToken(sessionToken);
+      setPassword("");
+      setPasswordSourceStep(STEP_BIOMETRIC_COMPANY);
+      setStep(2);
+      return;
+    }
+    const sessionToken = await resolveTokenForPickedCompany(picked);
     if (!sessionToken) {
       return;
     }
@@ -486,8 +585,8 @@ export default function SignIn() {
   };
 
   /**
-   * Ambiguous-device biometric flow: user picked which saved account to unlock,
-   * so run the device biometric prompt scoped to that specific account's token.
+   * Ambiguous-device biometric flow: user picked which person to unlock,
+   * then we load every company for that email (password only if no saved session).
    */
   const handleBiometricAccountRowPress = async (account) => {
     if (bioAccountSwitchingKey) return;
@@ -505,7 +604,15 @@ export default function SignIn() {
         return;
       }
 
-      if (!(await ensureSavedSessionStillValid(account.token))) {
+      const active = await findVerifiedSessionToken(
+        (token) => verifySessionToken(token, { strict: true }),
+        {
+          userId: account.userId,
+          allowedUserIds: account.memberUserIds,
+        },
+      );
+
+      if (!active?.token) {
         setBiometricAccounts((prev) => {
           const next = prev.filter((a) => a.key !== account.key);
           if (next.length === 0) {
@@ -513,12 +620,13 @@ export default function SignIn() {
           }
           return next;
         });
+        setError(
+          "Your saved sign-in is out of date. Sign in with your password to refresh it."
+        );
         return;
       }
 
-      await persistSignInContext(account.token, account.email, account.companyId);
-      await login(account.token, true, account.companyId);
-      router.replace("(tabs)/profile");
+      await continueAfterBiometricUnlock(active, account.email);
     } catch (e) {
       console.error("Biometric account picker sign-in error:", e);
       setError("Could not complete sign-in. Please try again.");
@@ -574,7 +682,7 @@ export default function SignIn() {
     setLoading(false);
   };
 
-  const completePasswordSignIn = async (token) => {
+  const completePasswordSignIn = async (token, { systemAgent = false } = {}) => {
     if (!token) {
       setError("Sign-in succeeded but no session token was returned. Please try again.");
       return;
@@ -588,11 +696,26 @@ export default function SignIn() {
       cacheCompaniesForEmail(normalizedEmail, users);
     }
 
-    await login(token, true, String(selectedCompanyId));
+    await login(token, true, String(selectedCompanyId), {
+      skipBiometricVault: systemAgent,
+    });
+    if (systemAgent) {
+      await dropBiometricVaultToken(token);
+    }
     setPasswordSourceStep(null);
+    setAgentCode("");
+    setAgentPin("");
+    setLockedUntil(null);
     setSavedToken(token);
-    router.replace("(tabs)/profile");
+    router.replace(systemAgent ? "/(tabs)/(settings)" : "(tabs)/profile");
   };
+
+  const signingInAsSystemAgent = () =>
+    users.some(
+      (user) =>
+        String(user.companyId) === String(selectedCompanyId) &&
+        isSystemAgentCompany(user),
+    );
 
   const logSignInFailure = (label, { signInRes, signInData, replaceDevice = false, deviceId }) => {
     console.error(`[SignIn] ${label}`, {
@@ -611,7 +734,11 @@ export default function SignIn() {
     });
   };
 
-  const attemptPasswordSignIn = async ({ replaceDevice = false } = {}) => {
+  const attemptPasswordSignIn = async ({
+    replaceDevice = false,
+    agentCode: code,
+    agentPin: pin,
+  } = {}) => {
     const deviceId = await getInstallationId();
     const loginUrl = replaceDevice
       ? `${API_BASE_URL}/api/account/login?replaceDevice=true`
@@ -627,6 +754,7 @@ export default function SignIn() {
         companyId: selectedCompanyId,
         deviceId,
         ...(replaceDevice ? { replaceDevice: true } : {}),
+        ...(code ? { agentCode: String(code).trim().toUpperCase(), agentPin: pin } : {}),
       }),
     });
     let signInData = null;
@@ -642,7 +770,7 @@ export default function SignIn() {
       });
       signInData = null;
     }
-    if (!signInRes.ok) {
+    if (!signInRes.ok && signInData?.code !== "AGENT_IDENTITY_REQUIRED") {
       logSignInFailure(replaceDevice ? "Replace device login failed" : "Password login failed", {
         signInRes,
         signInData,
@@ -673,7 +801,9 @@ export default function SignIn() {
                 return;
               }
               const token = signInData?.data?.token ?? signInData?.token;
-              await completePasswordSignIn(token);
+              await completePasswordSignIn(token, {
+                systemAgent: signingInAsSystemAgent(),
+              });
             } catch (err) {
               console.error("Replace device sign-in error:", err);
               setError("Something went wrong.");
@@ -703,6 +833,15 @@ export default function SignIn() {
     try {
       const { signInRes, signInData } = await attemptPasswordSignIn();
       if (!signInRes.ok) {
+        if (signInData?.code === "AGENT_IDENTITY_REQUIRED") {
+          setAgentCode("");
+          setAgentPin("");
+          setLockedUntil(null);
+          setError(null);
+          setStep(STEP_AGENT_IDENTITY);
+          setLoading(false);
+          return;
+        }
         if (isDeviceAlreadyRegisteredError(signInData)) {
           setLoading(false);
           promptReplaceRegisteredDevice();
@@ -717,7 +856,9 @@ export default function SignIn() {
         setLoading(false);
         return;
       }
-      await completePasswordSignIn(signInData?.data?.token ?? signInData?.token);
+      await completePasswordSignIn(signInData?.data?.token ?? signInData?.token, {
+        systemAgent: signingInAsSystemAgent(),
+      });
     } catch (err) {
       console.error("Sign-in error:", err);
       setError("Something went wrong.");
@@ -753,6 +894,80 @@ export default function SignIn() {
       return;
     }
     goBackToEmail();
+  };
+
+  useEffect(() => {
+    if (!lockedUntil) return undefined;
+    const timer = setInterval(() => setLockClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [lockedUntil]);
+
+  const lockRemainingLabel = () => {
+    if (!lockedUntil) return null;
+    const ms = new Date(lockedUntil).getTime() - lockClock;
+    if (!Number.isFinite(ms) || ms <= 0) return null;
+    const total = Math.ceil(ms / 1000);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  };
+
+  const handleAgentSignIn = async () => {
+    const code = agentCode.trim().toUpperCase();
+    if (!code) {
+      setError("Enter your staff code.");
+      return;
+    }
+    if (!/^\d{6,8}$/.test(agentPin)) {
+      setError("Enter your 6–8 digit PIN.");
+      return;
+    }
+    if (lockedUntil && new Date(lockedUntil).getTime() > Date.now()) {
+      setError("Too many attempts. Please wait for the lock to end.");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const { signInRes, signInData } = await attemptPasswordSignIn({
+        agentCode: code,
+        agentPin,
+      });
+      if (!signInRes.ok) {
+        const responseCode = signInData?.code;
+        if (responseCode === "AGENT_IDENTITY_INVALID") {
+          setAgentPin("");
+          setError("Invalid staff code or PIN.");
+        } else if (responseCode === "AGENT_NOT_ASSIGNED") {
+          setError(signInData?.message || "You're not assigned to this company.");
+        } else if (responseCode === "AGENT_LOCKED") {
+          setAgentPin("");
+          setLockedUntil(signInData?.lockedUntil || null);
+          setError(signInData?.message || "Too many attempts. Try again in 15 minutes.");
+        } else if (responseCode === "AGENT_IDENTITY_REQUIRED") {
+          setError("Enter your staff code and PIN to continue as B. Buddy.");
+        } else {
+          setError(getLoginErrorMessage(signInData));
+        }
+        setLoading(false);
+        return;
+      }
+      await completePasswordSignIn(signInData?.data?.token ?? signInData?.token, {
+        systemAgent: true,
+      });
+    } catch (err) {
+      console.error("B. Buddy sign-in error:", err);
+      setError("Something went wrong.");
+    }
+    setLoading(false);
+  };
+
+  const goBackFromAgentStep = () => {
+    setStep(2);
+    setAgentPin("");
+    setLockedUntil(null);
+    setError(null);
   };
 
   const goBackFromPasswordStep = () => {
@@ -823,12 +1038,19 @@ export default function SignIn() {
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <TouchableWithoutFeedback
+          onPress={Keyboard.dismiss}
+          delayLongPress={5000}
+          onLongPress={() => setShowSystemAdmin(true)}
+        >
           <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
             <ScrollView
               style={{ flex: 1 }}
               contentContainerStyle={styles.scrollContent}
               keyboardShouldPersistTaps="handled"
+              onTouchStart={beginAdminHold}
+              onTouchEnd={endAdminHold}
+              onTouchCancel={endAdminHold}
             >
               <View style={styles.screenContent} className="justify-center px-5 py-20">
                 {/* Logo/Header - Always visible */}
@@ -1002,6 +1224,19 @@ export default function SignIn() {
                           )}
                         </Animated.View>
                       )}
+
+                      {!mode && showSystemAdmin && (
+                        <TouchableOpacity
+                          onPress={() => router.push("/system-admin/login")}
+                          className="mt-8 py-2 items-center"
+                          accessibilityRole="link"
+                          accessibilityLabel="System administrator"
+                        >
+                          <Text className="text-xs text-slate-400">
+                            System administrator
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   )}
 
@@ -1059,7 +1294,7 @@ export default function SignIn() {
                                 } items-center justify-center mr-4`}
                               >
                                 <FontAwesome5
-                                  name="building"
+                                  name={isSystemAgentCompany(user) ? "headset" : "building"}
                                   size={18}
                                   color={
                                     isSelected
@@ -1072,6 +1307,9 @@ export default function SignIn() {
                                 <Text className="font-semibold text-base text-slate-700">
                                   {user.companyName}
                                 </Text>
+                                {isSystemAgentCompany(user) ? (
+                                  <Text className="text-xs text-slate-500 mt-1">B. Buddy</Text>
+                                ) : null}
                                 <View className="flex-row items-center mt-2">
                                   <View
                                     className={`px-3 py-1 rounded-full ${
@@ -1087,7 +1325,7 @@ export default function SignIn() {
                                           : "text-slate-600"
                                       } font-medium`}
                                     >
-                                      {user.role}
+                                      {companyRoleLabel(user)}
                                     </Text>
                                   </View>
                                 </View>
@@ -1198,16 +1436,18 @@ export default function SignIn() {
                                     {account.email}
                                   </Text>
                                 )}
-                                <View className="flex-row items-center mt-1">
-                                  <FontAwesome5 name="building" size={10} color="#94a3b8" />
-                                  <Text
-                                    className="text-slate-500 text-xs ml-1"
-                                    numberOfLines={1}
-                                  >
-                                    {account.companyName || "Company"}
-                                    {account.role ? ` • ${account.role}` : ""}
-                                  </Text>
-                                </View>
+                                {!!account.companyName && (
+                                  <View className="flex-row items-center mt-1">
+                                    <FontAwesome5 name="building" size={10} color="#94a3b8" />
+                                    <Text
+                                      className="text-slate-500 text-xs ml-1"
+                                      numberOfLines={1}
+                                    >
+                                      {account.companyName}
+                                      {account.role ? ` • ${account.role}` : ""}
+                                    </Text>
+                                  </View>
+                                )}
                               </View>
                               {isSwitching ? (
                                 <ActivityIndicator color="#f97316" size="small" />
@@ -1267,6 +1507,15 @@ export default function SignIn() {
                         </Text>
                       )}
 
+                      {users.length === 1 && isSystemAgentCompany(users[0]) && (
+                        <View className="mb-5 p-4 rounded-lg border border-orange-200 bg-orange-50">
+                          <Text className="text-base font-semibold text-slate-800">
+                            {users[0].companyName}
+                          </Text>
+                          <Text className="text-xs text-orange-800 mt-1">Internal · B. Buddy</Text>
+                        </View>
+                      )}
+
                       {users.length > 1 && (
                       <View className="mb-7">
                         {users.map((user) => (
@@ -1294,7 +1543,7 @@ export default function SignIn() {
                                 } items-center justify-center mr-4`}
                               >
                                 <FontAwesome5
-                                  name="building"
+                                  name={isSystemAgentCompany(user) ? "headset" : "building"}
                                   size={18}
                                   color={
                                     selectedCompanyId === user.companyId
@@ -1307,6 +1556,9 @@ export default function SignIn() {
                                 <Text className="font-semibold text-base text-slate-700">
                                   {user.companyName}
                                 </Text>
+                                {isSystemAgentCompany(user) ? (
+                                  <Text className="text-xs text-slate-500 mt-1">B. Buddy</Text>
+                                ) : null}
                                 <View className="flex-row items-center mt-2">
                                   <View
                                     className={`px-3 py-1 rounded-full ${
@@ -1322,7 +1574,7 @@ export default function SignIn() {
                                           : "text-slate-600"
                                       } font-medium`}
                                     >
-                                      {user.role}
+                                      {companyRoleLabel(user)}
                                     </Text>
                                   </View>
                                 </View>
@@ -1418,6 +1670,86 @@ export default function SignIn() {
                           )}
                         </TouchableOpacity>
                       </Animated.View>
+                    </View>
+                  )}
+
+                  {step === STEP_AGENT_IDENTITY && (
+                    <View>
+                      <View className="flex-row items-center mb-7">
+                        <TouchableOpacity onPress={goBackFromAgentStep} className="mr-4">
+                          <View className="w-10 h-10 rounded-full items-center justify-center">
+                            <Ionicons name="arrow-back" size={18} color="#f97316" />
+                          </View>
+                        </TouchableOpacity>
+                        <Text className="text-xl font-bold text-slate-700 flex-1">
+                          B. Buddy
+                        </Text>
+                      </View>
+                      <Text className="text-sm text-slate-600 mb-6 -mt-3">
+                        Enter your staff code and PIN to continue as support.
+                      </Text>
+
+                      <View className="mb-5">
+                        <Text className="mb-3 font-medium text-slate-600">Staff code</Text>
+                        <TextInput
+                          autoCapitalize="characters"
+                          autoCorrect={false}
+                          placeholder="BIZ-002"
+                          className="border border-slate-200 bg-white rounded-lg px-4 py-4 text-slate-700"
+                          value={agentCode}
+                          onChangeText={(value) => setAgentCode(value.toUpperCase())}
+                          placeholderTextColor="#9ca3af"
+                        />
+                      </View>
+                      <View className="mb-7">
+                        <Text className="mb-3 font-medium text-slate-600">PIN</Text>
+                        <TextInput
+                          secureTextEntry
+                          keyboardType="number-pad"
+                          maxLength={8}
+                          placeholder="6–8 digits"
+                          className="border border-slate-200 bg-white rounded-lg px-4 py-4 text-slate-700"
+                          value={agentPin}
+                          onChangeText={setAgentPin}
+                          placeholderTextColor="#9ca3af"
+                        />
+                      </View>
+
+                      {lockRemainingLabel() ? (
+                        <Text className="text-sm text-slate-600 mb-4">
+                          Try again in {lockRemainingLabel()}
+                        </Text>
+                      ) : null}
+
+                      <Animated.View
+                        style={{
+                          opacity: errorAnim,
+                          transform: [{ translateX: errorShake }],
+                          marginBottom: error ? 20 : 0,
+                        }}
+                      >
+                        {error && (
+                          <View className="p-4 bg-red-50 border border-red-200 rounded-lg">
+                            <Text className="text-red-600">{error}</Text>
+                          </View>
+                        )}
+                      </Animated.View>
+
+                      <TouchableOpacity
+                        onPress={handleAgentSignIn}
+                        disabled={loading}
+                        className="bg-orange-400 py-4 rounded-lg mt-2"
+                        style={styles.buttonShadow}
+                        activeOpacity={0.8}
+                      >
+                        {loading ? (
+                          <ActivityIndicator color="#fff" size="small" />
+                        ) : (
+                          <Text className="text-white text-center font-semibold text-base">
+                            Continue
+                          </Text>
+                        )}
+                      </TouchableOpacity>
                     </View>
                   )}
                 </Animated.View>

@@ -76,8 +76,9 @@ const useAuthStore = create((set) => ({
    * @param {string} token
    * @param {boolean} [remember]
    * @param {string|number|null} [companyId] — when set, also stores a per-company session for biometric.
+   * @param {{ skipBiometricVault?: boolean }} [options] — B. Buddy must not be offered as a biometric shortcut.
    */
-  login: async (token, remember = false, companyId = null) => {
+  login: async (token, remember = false, companyId = null, options = {}) => {
     logJwtSessionDebug(
       "setSession (local vault — does not bump server tokenVersion)",
       token,
@@ -93,7 +94,7 @@ const useAuthStore = create((set) => ({
       companyId != null && companyId !== ""
         ? String(companyId)
         : getTokenCompanyId(token);
-    if (cid) {
+    if (cid && options?.skipBiometricVault !== true) {
       await persistCompanySessionToken(cid, token);
     }
   },
