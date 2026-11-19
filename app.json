@@ -17,7 +17,8 @@
         "LSApplicationQueriesSchemes": ["mailto"],
         "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
         "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active.",
-        "NSUserNotificationsUsageDescription": "BizBuddy sends notifications to remind you about work schedules, break times, and important updates."
+        "NSUserNotificationsUsageDescription": "BizBuddy sends notifications to remind you about work schedules, break times, and important updates.",
+        "NSCameraUsageDescription": "BizBuddy uses the camera so you can take a face photo when you clock out. The photo is stamped with the time and place of the capture."
       }
     },
     "android": {
@@ -34,7 +35,8 @@
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
         "WAKE_LOCK",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "CAMERA"
       ]
     },
     "web": {
@@ -53,7 +55,13 @@
           "defaultChannel": "default"
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "BizBuddy uses the camera so you can take a face photo when you clock out."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -33,10 +33,17 @@ import axios from "axios";
 import * as SecureStore from "expo-secure-store";
 import {
   API_BASE_URL,
-  CONTEST_POLICY_MY_REQUESTS_PATH,
   CONTEST_POLICY_SUBMIT_PATH,
   DEFAULT_SHIFT_DISPLAY_TIMEZONE,
 } from "../../../config/constant";
+import TaskReportFormSheet, {
+  LATE_NOTICE,
+} from "../../../components/task-report/TaskReportFormSheet";
+import {
+  fetchPendingTaskReports,
+  fetchTaskReportForPunch,
+  submitClosedTaskReport,
+} from "../../../utils/taskReportApi";
 import {
   TIME_LOG_CONTESTED_LABEL,
   addPersistedContestedTimeLogId,
@@ -803,6 +810,9 @@ const TimekeepingTimeCard = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [modalMode, setModalMode] = useState("details"); // "actions", "delete", "details"
   const [selectedLog, setSelectedLog] = useState(null);
+  const [pendingReports, setPendingReports] = useState({});
+  const [addReport, setAddReport] = useState(null);
+  const [addReportSubmitting, setAddReportSubmitting] = useState(false);
   // const [deleting, setDeleting] = useState(false);
 
   const [companyTimeZone, setCompanyTimeZone] = useState(null);
@@ -972,22 +982,6 @@ const TimekeepingTimeCard = () => {
     setCtClockOutTime(cloneJsDate(state.clockOutTime));
     setCtClockOutCrossesNextDay(state.clockOutCrossesNextDay);
   };
-
-  const fetchContestedTimeLogIdsFromApi = useCallback(async (token) => {
-    if (!token) return [];
-    try {
-      const res = await axios.get(
-        `${API_BASE_URL}${CONTEST_POLICY_MY_REQUESTS_PATH}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
-      const rows = extractContestListFromResponse(res.data);
-      return extractTimeLogIdsFromContestRows(rows);
-    } catch {
-      return [];
-    }
-  }, []);
 
   const openContestModal = (log) => {
     if (!getTimeLogId(log)) {
@@ -1512,15 +1506,54 @@ const TimekeepingTimeCard = () => {
     }),
   ).current;
 
+  async function openAddReport(log) {
+    const id = getTimeLogId(log);
+    if (!id) return;
+    try {
+      const data = await fetchTaskReportForPunch(id);
+      setAddReport({
+        required: true,
+        timeLogId: id,
+        form: data?.form,
+        shift: data?.shiftName ? { name: data.shiftName } : null,
+      });
+    } catch (error) {
+      Alert.alert(
+        "Error",
+        error?.response?.data?.message || "Could not open the report.",
+      );
+    }
+  }
+
+  async function submitAddReport({ answers, facePhoto }) {
+    if (!addReport?.timeLogId) return;
+    setAddReportSubmitting(true);
+    try {
+      await submitClosedTaskReport(addReport.timeLogId, { answers, facePhoto });
+      const savedId = addReport.timeLogId;
+      setPendingReports((prev) => {
+        const next = { ...prev };
+        delete next[savedId];
+        return next;
+      });
+      setAddReport(null);
+      Alert.alert("Success", "Report submitted.");
+    } catch (error) {
+      Alert.alert(
+        "Error",
+        error?.response?.data?.message || "Could not submit the report.",
+      );
+    } finally {
+      setAddReportSubmitting(false);
+    }
+  }
+
   const fetchTimeLogs = async () => {
     setLoading(true);
     try {
       const token = await SecureStore.getItemAsync("token");
       if (token) await fetchCompanyTimeZone(token);
       const persisted = await loadPersistedContestedTimeLogIds();
-      const fromContests = token
-        ? await fetchContestedTimeLogIdsFromApi(token)
-        : [];
       const url = `${API_BASE_URL}/api/timelogs/user`;
       const res = await axios.get(url, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1535,10 +1568,26 @@ const TimekeepingTimeCard = () => {
           const id = getTimeLogId(l);
           if (id && isTimeLogContested(l, persisted)) fromLogs.push(id);
         }
-        const merged = mergeContestedIds(persisted, fromContests, fromLogs);
+        const merged = mergeContestedIds(persisted, fromLogs);
         await persistContestedTimeLogIds(merged);
         setContestedTimeLogIds(merged);
         setTimeLogs(tagTimeLogsWithContestedState(sortedLogs, merged));
+        try {
+          const pending = await fetchPendingTaskReports();
+          if (!pending?.enabled) {
+            setPendingReports({});
+          } else {
+            const map = {};
+            for (const item of pending.items || []) {
+              if (item?.timeLogId && item.response?.status !== "submitted") {
+                map[item.timeLogId] = item;
+              }
+            }
+            setPendingReports(map);
+          }
+        } catch {
+          setPendingReports({});
+        }
       } else {
         Alert.alert("Error", "Failed to fetch time logs.");
       }
@@ -1577,17 +1626,14 @@ const TimekeepingTimeCard = () => {
         if (!token || cancelled) return;
         await fetchCompanyTimeZone(token);
         const persisted = await loadPersistedContestedTimeLogIds();
-        const fromApi = await fetchContestedTimeLogIdsFromApi(token);
-        const merged = mergeContestedIds(persisted, fromApi);
         if (cancelled) return;
-        await persistContestedTimeLogIds(merged);
-        setContestedTimeLogIds(merged);
-        setTimeLogs((prev) => tagTimeLogsWithContestedState(prev, merged));
+        setContestedTimeLogIds(persisted);
+        setTimeLogs((prev) => tagTimeLogsWithContestedState(prev, persisted));
       })();
       return () => {
         cancelled = true;
       };
-    }, [fetchContestedTimeLogIdsFromApi]),
+    }, []),
   );
 
   useEffect(() => {
@@ -2011,6 +2057,34 @@ const TimekeepingTimeCard = () => {
               <Text style={{ color: TC.muted, fontSize: 11, marginBottom: 6 }}>
                 Log ID {log.id}
               </Text>
+              {complete && pendingReports[getTimeLogId(log)] ? (
+                <View style={{ marginBottom: 14 }}>
+                  <Text
+                    style={{
+                      color: TC.muted,
+                      fontSize: 12,
+                      marginBottom: 8,
+                      lineHeight: 18,
+                    }}
+                  >
+                    This shift was already closed. The photo is stamped with the
+                    time you take it.
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => openAddReport(log)}
+                    style={{
+                      backgroundColor: "#0f172a",
+                      borderRadius: 16,
+                      paddingVertical: 14,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Text style={{ color: "#ffffff", fontWeight: "700" }}>
+                      Add report
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
               <View
                 style={{
@@ -3394,6 +3468,55 @@ const TimekeepingTimeCard = () => {
       )}
 
       {renderCtAndroidPicker()}
+
+      <Modal
+        visible={Boolean(addReport)}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (!addReportSubmitting) setAddReport(null);
+        }}
+      >
+        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+          <TouchableOpacity
+            style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)" }}
+            activeOpacity={1}
+            onPress={() => {
+              if (!addReportSubmitting) setAddReport(null);
+            }}
+          />
+          <View
+            style={{
+              backgroundColor: "#ffffff",
+              borderTopLeftRadius: 10,
+              borderTopRightRadius: 10,
+              maxHeight: height * 0.92,
+              paddingTop: 12,
+            }}
+          >
+            <View style={{ alignItems: "center", paddingBottom: 8 }}>
+              <View
+                style={{
+                  width: 40,
+                  height: 4,
+                  borderRadius: 2,
+                  backgroundColor: "#e2e8f0",
+                }}
+              />
+            </View>
+            {addReport ? (
+              <TaskReportFormSheet
+                report={addReport}
+                timeZone={companyTimeZone}
+                notice={LATE_NOTICE}
+                submitting={addReportSubmitting}
+                onCancel={() => setAddReport(null)}
+                onSubmit={submitAddReport}
+              />
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };

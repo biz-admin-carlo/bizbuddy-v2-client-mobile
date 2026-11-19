@@ -66,6 +66,12 @@ import {
   inferClockOutCrossesNextDayFromPickers,
   logCompanySettingsTimeZoneResult,
 } from "../../../utils/companyTimeZoneUtils";
+import TaskReportFormSheet from "../../../components/task-report/TaskReportFormSheet";
+import {
+  fetchOpenTaskReport,
+  postClockOutJson,
+  postClockOutWithReport,
+} from "../../../utils/taskReportApi";
 
 const PENDING_ACTIONS_KEY = "pendingPunchActions";
 const CLOCK_OUT_DEVIATION_RESPONSES_KEY = "clockOutDeviationResponses";
@@ -203,14 +209,37 @@ const getPunchData = async () => {
   };
 
   let locationData = null;
-  const { status } = await Location.requestForegroundPermissionsAsync();
-  const servicesEnabled = await Location.hasServicesEnabledAsync();
+  let status = "undetermined";
+  let servicesEnabled = false;
+  try {
+    const permission = await Location.requestForegroundPermissionsAsync();
+    status = permission?.status;
+    servicesEnabled = await Location.hasServicesEnabledAsync();
+    devLog("punch location permission", { status, servicesEnabled });
+  } catch (locationErr) {
+    console.error(
+      "[BizBuddy Punch] location permission failed",
+      locationErr?.message || locationErr,
+    );
+  }
 
-  // If user denies or location is off, locationData stays null
+  // If user denies, location is off, or the device has no fix, locationData stays null.
+  // Location-restricted punches are blocked later. A missing fix must not fail Time In.
   if (status === "granted" && servicesEnabled) {
-    locationData = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.Highest,
-    });
+    try {
+      locationData = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Highest,
+      });
+      devLog("punch location fix", {
+        latitude: locationData?.coords?.latitude,
+        longitude: locationData?.coords?.longitude,
+      });
+    } catch (locationErr) {
+      console.error(
+        "[BizBuddy Punch] getCurrentPosition failed",
+        locationErr?.message || locationErr,
+      );
+    }
   }
 
   const location = locationData
@@ -370,6 +399,9 @@ export default function TimekeepingPunch() {
     useState(false);
   const [clockOutConfirmModalVisible, setClockOutConfirmModalVisible] =
     useState(false);
+  const [taskReportVisible, setTaskReportVisible] = useState(false);
+  const [taskReport, setTaskReport] = useState(null);
+  const [taskReportSubmitting, setTaskReportSubmitting] = useState(false);
   const [clockOutConfirmSchedule, setClockOutConfirmSchedule] = useState(null);
   const [pendingClockOutConfirmPayload, setPendingClockOutConfirmPayload] =
     useState(null);
@@ -492,6 +524,7 @@ export default function TimekeepingPunch() {
   const companySettingsDriverAideThresholdMinutesRef = useRef(null);
   /** IANA zone from GET /api/company-settings → data.timezone */
   const companySettingsTimeZoneRef = useRef(null);
+  const companySettingsTaskReportFormsRef = useRef(false);
   /** From GET /api/employment-details/me — used for time-in / time-out (driver vs non-driver). */
   const employmentDetailsIsDriverRef = useRef(null);
   /** Time In/Out stays disabled until company-settings and employment-details (first load) finish. */
@@ -675,6 +708,8 @@ export default function TimekeepingPunch() {
       companySettingsDriverAideThresholdMinutesRef.current =
         driverAideThresholdMinutes;
       companySettingsTimeZoneRef.current = timeZone;
+      companySettingsTaskReportFormsRef.current =
+        raw.taskReportEnabled === true && raw.taskReportMode === "forms";
 
       devLog("company-settings stored (refs)", {
         shiftAssignmentWindowMinutes:
@@ -688,6 +723,7 @@ export default function TimekeepingPunch() {
       companySettingsShiftAssignmentWindowMinutesRef.current = null;
       companySettingsDriverAideThresholdMinutesRef.current = null;
       companySettingsTimeZoneRef.current = null;
+      companySettingsTaskReportFormsRef.current = false;
     }
   }, []);
 
@@ -1349,6 +1385,11 @@ export default function TimekeepingPunch() {
         }
       }
     } catch (err) {
+      console.error(
+        "[BizBuddy Punch] punch failed",
+        err?.message || err,
+        err?.code || "",
+      );
       Alert.alert("Error", "Punch failed. Please try again.");
     } finally {
       setLoading(false);
@@ -1511,6 +1552,7 @@ export default function TimekeepingPunch() {
     else if (type === "clockOutDeviation")
       setClockOutDeviationModalVisible(true);
     else if (type === "clockOutConfirm") setClockOutConfirmModalVisible(true);
+    else if (type === "taskReport") setTaskReportVisible(true);
     else if (type === "clockInEarly") setClockInEarlyModalVisible(true);
     else if (type === "noScheduledShiftClockIn") {
       setNoScheduledShiftPunchTypeOpen(false);
@@ -1562,6 +1604,8 @@ export default function TimekeepingPunch() {
       setClockOutConfirmModalVisible(false);
       setClockOutConfirmSchedule(null);
       setPendingClockOutConfirmPayload(null);
+      setTaskReportVisible(false);
+      setTaskReport(null);
 
       const proceed = pendingClockOutAfterConfirmRef.current;
       pendingClockOutAfterConfirmRef.current = null;
@@ -2311,6 +2355,89 @@ export default function TimekeepingPunch() {
     }
   };
 
+  async function finishClockOutSuccess(payload, res) {
+    if (payload?.afterSuccess) {
+      try {
+        await payload.afterSuccess();
+      } catch (e) {
+        devLog("Clock-out afterSuccess error:", e?.message);
+      }
+    }
+    Alert.alert("Success", res?.data?.message || "Time out recorded successfully.");
+    resetAllStates();
+    pendingClockOutAfterConfirmRef.current = null;
+    setTaskReportVisible(false);
+    setTaskReport(null);
+    closeModal();
+  }
+
+  async function beginClockOut(payload) {
+    setLoading(true);
+    try {
+      // Only an assigned form blocks clock-out. A failed lookup (no route, no
+      // assignment, or the company flag is on for someone else) falls through
+      // to the normal time-out. The server rejects that request only when a
+      // form actually applies.
+      let report = null;
+      if (companySettingsTaskReportFormsRef.current) {
+        try {
+          report = await fetchOpenTaskReport();
+        } catch (lookupErr) {
+          devLog(
+            "open task report lookup failed; clocking out without a form",
+            lookupErr?.response?.status,
+            lookupErr?.response?.data?.message || lookupErr?.message,
+          );
+        }
+      }
+      if (report?.required) {
+        setPendingClockOutPayload(payload);
+        setTaskReport(report);
+        setClockOutDeviationModalVisible(false);
+        openModal("taskReport");
+        return;
+      }
+      const res = await postClockOutJson(payload);
+      if (res.status === 200 || res.status === 201) {
+        await finishClockOutSuccess(payload, res);
+      }
+    } catch (err) {
+      if (err?.response?.data?.code === "TASK_REPORT_FORMS_REQUIRED") {
+        Alert.alert(
+          "End-of-shift form",
+          err?.response?.data?.message ||
+            "Finish the end-of-shift form, including the face photo, before clocking out.",
+        );
+        return;
+      }
+      Alert.alert(
+        "Error",
+        err?.response?.data?.message || "Punch failed. Please try again.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitTaskReportClockOut({ answers, facePhoto }) {
+    const payload = pendingClockOutPayload;
+    if (!payload) return;
+    setTaskReportSubmitting(true);
+    try {
+      const res = await postClockOutWithReport(payload, { answers, facePhoto });
+      if (res.status === 200 || res.status === 201) {
+        await finishClockOutSuccess(payload, res);
+      }
+    } catch (err) {
+      Alert.alert(
+        "Error",
+        err?.response?.data?.message || "Punch failed. Please try again.",
+      );
+    } finally {
+      setTaskReportSubmitting(false);
+    }
+  }
+
   executeOnlineClockOutRef.current = async ({
     token,
     deviceInfo,
@@ -2406,28 +2533,11 @@ export default function TimekeepingPunch() {
         devLog("Time-out profile/deviation check error:", e?.message);
       }
 
-      const url = `${API_BASE_URL}/api/timelogs/time-out`;
-      const body = timeOutPayload;
       devLog("Punch request:", "/time-out", {
-        punchType: body.punchType,
-        localTimestamp: body.localTimestamp,
+        punchType: timeOutPayload.punchType,
+        localTimestamp: timeOutPayload.localTimestamp,
       });
-      try {
-        const res = await axios.post(url, body, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.status === 200 || res.status === 201) {
-          devLog("Punch success:", "/time-out", res.data?.message);
-          Alert.alert("Success", res.data.message);
-          resetAllStates();
-        }
-      } catch (err) {
-        if (err?.response?.data?.message) {
-          Alert.alert("Error", err.response.data.message);
-        } else {
-          Alert.alert("Error", "Punch failed. Please try again.");
-        }
-      }
+      await beginClockOut({ token, ...timeOutPayload });
     } finally {
       setLoading(false);
     }
@@ -2435,6 +2545,28 @@ export default function TimekeepingPunch() {
 
   // Modal content
   const renderModalContent = () => {
+    if (taskReportVisible) {
+      return (
+        <View style={{ maxHeight: height * 0.92 }}>
+          {taskReport ? (
+            <TaskReportFormSheet
+              report={taskReport}
+              timeZone={companySettingsTimeZoneRef.current}
+              submitting={taskReportSubmitting}
+              onCancel={() => {
+                pendingClockOutAfterConfirmRef.current = null;
+                closeModal();
+              }}
+              onSubmit={submitTaskReportClockOut}
+            />
+          ) : (
+            <View className="px-6 py-8 items-center">
+              <ActivityIndicator color="#0f172a" />
+            </View>
+          )}
+        </View>
+      );
+    }
     if (clockOutConfirmModalVisible) {
       const s = clockOutConfirmSchedule;
       return (
@@ -3060,44 +3192,28 @@ export default function TimekeepingPunch() {
                 const pending = pendingClockOutPayload;
                 if (pending) {
                   devLog("Modal: Regular punch clock-out (REGULAR)");
-                  try {
-                    const reqBody = {
-                      deviceInfo: pending.deviceInfo,
-                      location: pending.location,
-                      localTimestamp: pending.localTimestamp,
-                      punchType: "REGULAR",
-                    };
-                    const res = await axios.post(
-                      `${API_BASE_URL}/api/timelogs/time-out`,
-                      reqBody,
-                      { headers: { Authorization: `Bearer ${pending.token}` } },
-                    );
-                    if (res.status === 200 || res.status === 201) {
-                      if (d?.clockOutAt) {
-                        await storeClockOutDeviationResponse({
-                          ...d,
-                          clockOutAt: new Date(d.clockOutAt).toISOString(),
-                          lastShiftEnd: d?.lastShiftEnd
-                            ? new Date(d.lastShiftEnd).toISOString()
-                            : null,
-                          nextShiftStart: d?.nextShiftStart
-                            ? new Date(d.nextShiftStart).toISOString()
-                            : null,
-                          workedAsAide: false,
-                          recordedAt: new Date().toISOString(),
-                        });
-                      }
-                      Alert.alert("Success", res.data.message);
-                      resetAllStates();
-                      closeModal();
-                    }
-                  } catch (err) {
-                    Alert.alert(
-                      "Error",
-                      err?.response?.data?.message ||
-                        "Punch failed. Please try again.",
-                    );
-                  }
+                  await beginClockOut({
+                    token: pending.token,
+                    deviceInfo: pending.deviceInfo,
+                    location: pending.location,
+                    localTimestamp: pending.localTimestamp,
+                    punchType: "REGULAR",
+                    afterSuccess: async () => {
+                      if (!d?.clockOutAt) return;
+                      await storeClockOutDeviationResponse({
+                        ...d,
+                        clockOutAt: new Date(d.clockOutAt).toISOString(),
+                        lastShiftEnd: d?.lastShiftEnd
+                          ? new Date(d.lastShiftEnd).toISOString()
+                          : null,
+                        nextShiftStart: d?.nextShiftStart
+                          ? new Date(d.nextShiftStart).toISOString()
+                          : null,
+                        workedAsAide: false,
+                        recordedAt: new Date().toISOString(),
+                      });
+                    },
+                  });
                   return;
                 }
                 if (d?.clockOutAt) {
@@ -3132,44 +3248,28 @@ export default function TimekeepingPunch() {
                 const pending = pendingClockOutPayload;
                 if (pending) {
                   devLog("Modal: Driver/Aide clock-out (DRIVER_AIDE_PM)");
-                  try {
-                    const reqBody = {
-                      deviceInfo: pending.deviceInfo,
-                      location: pending.location,
-                      localTimestamp: pending.localTimestamp,
-                      punchType: "DRIVER_AIDE_PM",
-                    };
-                    const res = await axios.post(
-                      `${API_BASE_URL}/api/timelogs/time-out`,
-                      reqBody,
-                      { headers: { Authorization: `Bearer ${pending.token}` } },
-                    );
-                    if (res.status === 200 || res.status === 201) {
-                      if (d?.clockOutAt) {
-                        await storeClockOutDeviationResponse({
-                          ...d,
-                          clockOutAt: new Date(d.clockOutAt).toISOString(),
-                          lastShiftEnd: d?.lastShiftEnd
-                            ? new Date(d.lastShiftEnd).toISOString()
-                            : null,
-                          nextShiftStart: d?.nextShiftStart
-                            ? new Date(d.nextShiftStart).toISOString()
-                            : null,
-                          workedAsAide: true,
-                          recordedAt: new Date().toISOString(),
-                        });
-                      }
-                      Alert.alert("Success", res.data.message);
-                      resetAllStates();
-                      closeModal();
-                    }
-                  } catch (err) {
-                    Alert.alert(
-                      "Error",
-                      err?.response?.data?.message ||
-                        "Punch failed. Please try again.",
-                    );
-                  }
+                  await beginClockOut({
+                    token: pending.token,
+                    deviceInfo: pending.deviceInfo,
+                    location: pending.location,
+                    localTimestamp: pending.localTimestamp,
+                    punchType: "DRIVER_AIDE_PM",
+                    afterSuccess: async () => {
+                      if (!d?.clockOutAt) return;
+                      await storeClockOutDeviationResponse({
+                        ...d,
+                        clockOutAt: new Date(d.clockOutAt).toISOString(),
+                        lastShiftEnd: d?.lastShiftEnd
+                          ? new Date(d.lastShiftEnd).toISOString()
+                          : null,
+                        nextShiftStart: d?.nextShiftStart
+                          ? new Date(d.nextShiftStart).toISOString()
+                          : null,
+                        workedAsAide: true,
+                        recordedAt: new Date().toISOString(),
+                      });
+                    },
+                  });
                   return;
                 }
                 if (d?.clockOutAt) {
@@ -4213,6 +4313,7 @@ export default function TimekeepingPunch() {
         subscriptionModalVisible ||
         clockOutDeviationModalVisible ||
         clockOutConfirmModalVisible ||
+        taskReportVisible ||
         clockInEarlyModalVisible ||
         noScheduledShiftClockInModalVisible) && (
         <Modal
@@ -4244,8 +4345,8 @@ export default function TimekeepingPunch() {
                 backgroundColor: "white",
                 borderTopLeftRadius: 10,
                 borderTopRightRadius: 10,
-                minHeight: height * 0.65,
-                maxHeight: height * 0.8,
+                minHeight: taskReportVisible ? height * 0.7 : height * 0.65,
+                maxHeight: taskReportVisible ? height * 0.92 : height * 0.8,
                 paddingBottom: modalSheetBottomPadding,
               }}
             >

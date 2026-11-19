@@ -3,12 +3,13 @@ const DEV_SERVER_FRANCO = "http://192.168.100.8:5000";
 const PROD_SERVER_CARLO = "https://biz-maya-namagembe.onrender.com";
 const DEV_SERVER_NGROK = "https://acc5b2049424.ngrok-free.app";
 const DEV_SERVER_MIGUEL = "http://localhost:8000";
+const DEV_SERVER_MIGUEL_PHONE = "http://192.168.31.39:8000";
 export const WEBSITE_URL = "https://mybizbuddy.co";
 
 /** In-app feedback form sends mail to this address via the device mail app. */
 export const FEEDBACK_EMAIL = "bizmobiledevelopment@gmail.com";
 
-export const API_BASE_URL = PROD_SERVER_CARLO;
+export const API_BASE_URL = DEV_SERVER_MIGUEL_PHONE;
 // export const API_BASE_URL = DEV_SERVER_NGROK;
 
 /** GET — list current user’s requested punch logs. */
@@ -24,10 +25,6 @@ export const requestPunchLogDeletePath = (id) =>
 
 /** POST — contest an existing time log (corrected clock-in/out as UTC ISO with Z). */
 export const CONTEST_POLICY_SUBMIT_PATH = "/api/contest-policy/submit";
-
-/** GET — list current user's time log contests (if enabled on API). */
-export const CONTEST_POLICY_MY_REQUESTS_PATH =
-  "/api/contest-policy/my-requests";
 
 export const VERSION = "1.0.32";
 
