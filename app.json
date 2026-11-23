@@ -15,10 +15,11 @@
       "buildNumber": "36",
       "infoPlist": {
         "LSApplicationQueriesSchemes": ["mailto"],
-        "NSLocationWhenInUseUsageDescription": "BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.",
-        "NSLocationAlwaysUsageDescription": "We require your location to verify work shift activities even when the app is not active.",
+        "NSLocationWhenInUseUsageDescription": "BizBuddy records your location during an open shift, at the interval your company set, including while you are using the app. Recording stops when you clock out.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.",
+        "NSLocationAlwaysUsageDescription": "BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.",
         "NSUserNotificationsUsageDescription": "BizBuddy sends notifications to remind you about work schedules, break times, and important updates.",
-        "NSCameraUsageDescription": "BizBuddy uses the camera so you can take a face photo when you clock out. The photo is stamped with the time and place of the capture."
+        "NSCameraUsageDescription": "BizBuddy uses the camera so you can take a face photo when you clock in or clock out. The photo is stamped with the time and place of the capture."
       }
     },
     "android": {
@@ -32,6 +33,7 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
         "WAKE_LOCK",
@@ -57,9 +59,20 @@
       ],
       "expo-font",
       [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "BizBuddy records your location during an open shift, at the interval your company set, including while you are using the app. Recording stops when you clock out.",
+          "locationAlwaysAndWhenInUsePermission": "BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.",
+          "locationAlwaysPermission": "BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      [
         "expo-camera",
         {
-          "cameraPermission": "BizBuddy uses the camera so you can take a face photo when you clock out."
+          "cameraPermission": "BizBuddy uses the camera so you can take a face photo when you clock in or clock out."
         }
       ]
     ],

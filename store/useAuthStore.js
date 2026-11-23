@@ -1,6 +1,7 @@
 // store/useAuthStore.js
 
 import { create } from "zustand";
+import { pauseBreadcrumbTracking } from "../utils/locationBreadcrumbTracking";
 import * as SecureStore from "expo-secure-store";
 import {
   getTokenCompanyId,
@@ -102,6 +103,7 @@ const useAuthStore = create((set) => ({
     // Always clear the active session so cold-start restore does not undo sign-out.
     // Keep per-company vault entries so biometric can restore after signing out.
     // forceLogout still clears everything.
+    await pauseBreadcrumbTracking();
     set({ token: null, remember: false });
     try {
       await SecureStore.deleteItemAsync("token");
@@ -111,6 +113,7 @@ const useAuthStore = create((set) => ({
     await clearSignInContextKeys();
   },
   forceLogout: async () => {
+    await pauseBreadcrumbTracking();
     set({ token: null, remember: false });
     await SecureStore.deleteItemAsync("token");
     await clearSignInContextKeys();
@@ -120,6 +123,7 @@ const useAuthStore = create((set) => ({
   loadToken: async () => {
     const token = await SecureStore.getItemAsync("token");
     if (!token || isTokenExpired(token)) {
+      await pauseBreadcrumbTracking();
       if (token) {
         await SecureStore.deleteItemAsync("token");
         await clearSignInContextKeys();

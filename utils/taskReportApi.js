@@ -30,46 +30,11 @@ export async function fetchTaskReportForPunch(timeLogId) {
   return res.data.data;
 }
 
-export async function postClockOutJson(payload) {
+export async function submitClosedTaskReport(timeLogId, { answers }) {
   const headers = await authHeaders();
-  const body = {
-    deviceInfo: payload.deviceInfo,
-    location: payload.location,
-    localTimestamp: payload.localTimestamp,
-  };
-  if (payload.punchType) body.punchType = payload.punchType;
-  return axios.post(`${API_BASE_URL}/api/timelogs/time-out`, body, { headers });
-}
-
-export async function postClockOutWithReport(payload, { answers, facePhoto }) {
-  const headers = await authHeaders();
-  const body = new FormData();
-  body.append("deviceInfo", JSON.stringify(payload.deviceInfo ?? null));
-  body.append("location", JSON.stringify(payload.location ?? null));
-  body.append("localTimestamp", payload.localTimestamp);
-  if (payload.punchType) body.append("punchType", payload.punchType);
-  body.append("answers", JSON.stringify(answers));
-  body.append("facePhoto", {
-    uri: facePhoto.uri,
-    name: "face.jpg",
-    type: "image/jpeg",
-  });
-  return axios.post(`${API_BASE_URL}/api/timelogs/time-out`, body, { headers });
-}
-
-export async function submitClosedTaskReport(timeLogId, { answers, facePhoto }) {
-  const headers = await authHeaders();
-  const body = new FormData();
-  body.append("answers", JSON.stringify(answers));
-  body.append("submit", "true");
-  body.append("facePhoto", {
-    uri: facePhoto.uri,
-    name: "face.jpg",
-    type: "image/jpeg",
-  });
   return axios.put(
     `${API_BASE_URL}/api/task-report-forms/me/punch/${timeLogId}`,
-    body,
+    { answers, submit: true },
     { headers },
   );
 }

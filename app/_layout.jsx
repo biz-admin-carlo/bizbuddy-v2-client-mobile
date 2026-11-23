@@ -1,5 +1,6 @@
 // app/_layout.jsx
 import "../utils/limitFontScaling";
+import "../utils/locationBreadcrumbTask";
 import React, { useEffect, useRef, useState } from "react";
 import { Stack } from "expo-router";
 import {

@@ -1,8 +1,13 @@
-import { useRef, useState } from "react";
-import { Image, Text, TouchableOpacity, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Image, Linking, Text, TouchableOpacity, View } from "react-native";
 import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
 import { buildInscription } from "../../utils/taskReportWatermark";
+import {
+  deletePunchPhoto,
+  MAX_FACE_PHOTO_BYTES,
+  photoSize,
+} from "../../utils/punchPhotoStore";
 
 let CameraView = null;
 let useCameraPermissions = null;
@@ -39,13 +44,17 @@ export default function FaceCaptureSegment(props) {
   return <FaceCaptureReady {...props} />;
 }
 
-function FaceCaptureReady({ timeZone, onChange }) {
+function FaceCaptureReady({ timeZone, onChange, action = "out" }) {
   const shotRef = useRef(null);
   const cameraRef = useRef(null);
+  const rawUriRef = useRef(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [shot, setShot] = useState(null);
   const [blockReason, setBlockReason] = useState(null);
   const [busy, setBusy] = useState(false);
+  const verb = action === "in" ? "clock in" : "clock out";
+
+  useEffect(() => () => deletePunchPhoto(rawUriRef.current), []);
 
   async function takePhoto() {
     setBlockReason(null);
@@ -59,10 +68,11 @@ function FaceCaptureReady({ timeZone, onChange }) {
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Highest,
       });
+      const capturedAt = new Date();
       const inscription = buildInscription({
         latitude: loc.coords.latitude,
         longitude: loc.coords.longitude,
-        capturedAt: new Date(),
+        capturedAt,
         timeZone,
       });
       const photo = await cameraRef.current?.takePictureAsync({
@@ -73,7 +83,17 @@ function FaceCaptureReady({ timeZone, onChange }) {
         setBlockReason("The camera did not return a photo. Try again.");
         return;
       }
-      setShot({ uri: photo.uri, inscription });
+      deletePunchPhoto(rawUriRef.current);
+      rawUriRef.current = photo.uri;
+      setShot({
+        uri: photo.uri,
+        inscription,
+        capturedAt: capturedAt.toISOString(),
+        location: {
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+        },
+      });
       onChange(null);
     } catch {
       setBlockReason("Location is required to stamp the photo.");
@@ -96,7 +116,18 @@ function FaceCaptureReady({ timeZone, onChange }) {
         quality: 0.8,
         result: "tmpfile",
       });
-      onChange({ uri, inscription: shot.inscription });
+      const size = photoSize(uri);
+      if (!size || size > MAX_FACE_PHOTO_BYTES) {
+        deletePunchPhoto(uri);
+        setBlockReason("The photo is too large or unreadable. Retake it.");
+        return;
+      }
+      onChange({
+        uri,
+        inscription: shot.inscription,
+        capturedAt: shot.capturedAt,
+        location: shot.location,
+      });
     } catch {
       setBlockReason("Could not stamp the photo. Try again.");
     } finally {
@@ -105,6 +136,8 @@ function FaceCaptureReady({ timeZone, onChange }) {
   }
 
   function retake() {
+    deletePunchPhoto(rawUriRef.current);
+    rawUriRef.current = null;
     setShot(null);
     setBlockReason(null);
     onChange(null);
@@ -114,13 +147,19 @@ function FaceCaptureReady({ timeZone, onChange }) {
     return (
       <View className="bg-amber-50 rounded-2xl p-5 mb-6 border border-amber-200">
         <Text className="text-base text-amber-950 mb-3">
-          Camera access is required to clock out.
+          Camera access is required to {verb}.
         </Text>
         <TouchableOpacity
-          onPress={requestPermission}
+          onPress={
+            permission?.canAskAgain === false
+              ? () => Linking.openSettings()
+              : requestPermission
+          }
           className="py-3.5 rounded-2xl items-center bg-slate-900"
         >
-          <Text className="text-white font-semibold">Allow camera</Text>
+          <Text className="text-white font-semibold">
+            {permission?.canAskAgain === false ? "Open Settings" : "Allow camera"}
+          </Text>
         </TouchableOpacity>
       </View>
     );

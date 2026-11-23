@@ -56,7 +56,7 @@
       <true/>
     </dict>
     <key>NSCameraUsageDescription</key>
-    <string>BizBuddy uses the camera so you can take a face photo when you clock out. The photo is stamped with the time and place of the capture.</string>
+    <string>BizBuddy uses the camera so you can take a face photo when you clock in or clock out. The photo is stamped with the time and place of the capture.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to use Face ID</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
@@ -73,6 +73,10 @@
     <string>BizBuddy sends notifications to remind you about work schedules, break times, and important updates.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>location</string>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
       <key>UIApplicationSupportsMultipleScenes</key>

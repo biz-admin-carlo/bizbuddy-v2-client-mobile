@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { useRouter } from "expo-router";
+import * as LocalAuthentication from "expo-local-authentication";
 import useAuthStore, { persistSignInContext } from "../store/useAuthStore";
 import {
   getTokenCompanyId,
@@ -19,10 +20,76 @@ import { API_BASE_URL } from "../config/constant";
 import usePresenceStore from "../store/presenceStore";
 import useNotificationStore from "../store/notificationStore";
 
+const BIOMETRIC_UNAVAILABLE_ERRORS = new Set([
+  "not_available",
+  "not_enrolled",
+  "passcode_not_set",
+]);
+
+/**
+ * Device biometric (with passcode fallback) before opening another saved account.
+ * `unavailable` means this device cannot run the prompt, so the caller must
+ * require a password instead of switching with no check.
+ */
+export async function confirmAccountSwitchBiometric() {
+  let hasHardware = false;
+  let isEnrolled = false;
+  try {
+    hasHardware = await LocalAuthentication.hasHardwareAsync();
+    isEnrolled = await LocalAuthentication.isEnrolledAsync();
+  } catch (error) {
+    console.error("Error checking biometrics for account switch:", error);
+    return { ok: false, reason: "unavailable" };
+  }
+
+  if (!hasHardware || !isEnrolled) {
+    return { ok: false, reason: "unavailable" };
+  }
+
+  try {
+    const result = await LocalAuthentication.authenticateAsync({
+      promptMessage: "Verify it's you to switch accounts",
+      cancelLabel: "Cancel",
+      fallbackLabel: "Use Passcode",
+      disableDeviceFallback: false,
+    });
+
+    if (result.success) return { ok: true };
+
+    if (result.error && BIOMETRIC_UNAVAILABLE_ERRORS.has(result.error)) {
+      return { ok: false, reason: "unavailable" };
+    }
+
+    return {
+      ok: false,
+      reason: "biometric_failed",
+      message: biometricFailureMessage(result.error),
+    };
+  } catch (error) {
+    console.error("Account switch biometric error:", error);
+    return { ok: false, reason: "unavailable" };
+  }
+}
+
+function biometricFailureMessage(error) {
+  if (error === "lockout") {
+    return "Too many failed attempts. Unlock your device, then try switching again.";
+  }
+  if (
+    error === "user_cancel" ||
+    error === "system_cancel" ||
+    error === "app_cancel"
+  ) {
+    return "Verify with biometrics to switch to this account.";
+  }
+  return "Biometric verification failed. Try again to switch accounts.";
+}
+
 /**
  * Lists every locally saved (userId + companyId) session and provides actions to
- * switch to one instantly, remove one from the device, or add a brand new account —
+ * switch to one, remove one from the device, or add a brand new account —
  * without signing the currently active account out.
+ * A saved session is not opened until biometric verification succeeds.
  */
 export function useAccountSwitcher() {
   const router = useRouter();
@@ -136,33 +203,61 @@ export function useAccountSwitcher() {
     async (account) => {
       if (!account || account.isActive) return { ok: true };
       setSwitchingKey(account.key);
+
+      const openPasswordSignIn = () => {
+        router.push({
+          pathname: "(auth)/signin",
+          params: {
+            mode: "switch",
+            email: account.email || "",
+            companyId: account.companyId,
+          },
+        });
+      };
+
+      const pauseTracking = async () => {
+        try {
+          const { pauseBreadcrumbTracking } = await import(
+            "../utils/locationBreadcrumbTracking"
+          );
+          await pauseBreadcrumbTracking();
+        } catch {
+          /* sampling pause is best-effort before leaving this account */
+        }
+      };
+
       try {
         if (!account.token) {
           // Known sibling company with no saved session yet — skip straight to the
           // password step for that email/company (no need to retype the email).
-          router.push({
-            pathname: "(auth)/signin",
-            params: {
-              mode: "switch",
-              email: account.email || "",
-              companyId: account.companyId,
-            },
-          });
+          await pauseTracking();
+          openPasswordSignIn();
           return { ok: false, reason: "needs_password" };
         }
+
+        // Prove it's the device owner before opening the other account.
+        // Cancelled or failed prompts leave the current account in place.
+        const biometric = await confirmAccountSwitchBiometric();
+        if (!biometric.ok) {
+          if (biometric.reason === "unavailable") {
+            await pauseTracking();
+            openPasswordSignIn();
+            return { ok: false, reason: "needs_password" };
+          }
+          return {
+            ok: false,
+            reason: "biometric_failed",
+            message: biometric.message,
+          };
+        }
+
+        await pauseTracking();
 
         const check = await verifySessionToken(account.token, { strict: true });
         if (!check.valid) {
           await removeStoredSessionToken(account.token);
           await refresh();
-          router.push({
-            pathname: "(auth)/signin",
-            params: {
-              mode: "switch",
-              email: account.email || "",
-              companyId: account.companyId,
-            },
-          });
+          openPasswordSignIn();
           return { ok: false, reason: "needs_password" };
         }
 

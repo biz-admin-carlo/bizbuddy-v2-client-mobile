@@ -1,24 +1,22 @@
 import { useState } from "react";
 import { ActivityIndicator, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import QuestionField from "./QuestionField";
-import FaceCaptureSegment from "./FaceCaptureSegment";
 import { validateAnswers } from "../../utils/taskReportAnswers";
 
 const LATE_NOTICE =
-  "This shift was already closed. The photo is stamped with the time you take it.";
+  "This shift was already closed. Your answers are saved to that punch.";
 
 export default function TaskReportFormSheet({
   report,
   timeZone,
   notice,
   submitting = false,
+  maxHeight,
   onCancel,
   onSubmit,
 }) {
   const [answers, setAnswers] = useState({});
   const [errors, setErrors] = useState({});
-  const [facePhoto, setFacePhoto] = useState(null);
-  const [faceError, setFaceError] = useState("");
   const form = report?.form;
 
   if (!report?.required && !form) {
@@ -45,18 +43,19 @@ export default function TaskReportFormSheet({
       setErrors(result.errors);
       return;
     }
-    if (!facePhoto?.uri) {
-      setErrors({});
-      setFaceError("Take a face photo to clock out.");
-      return;
-    }
     setErrors({});
-    setFaceError("");
-    onSubmit({ answers: result.cleaned, facePhoto });
+    onSubmit({ answers: result.cleaned });
   }
 
   return (
-    <ScrollView className="px-6" keyboardShouldPersistTaps="handled">
+    <ScrollView
+      className="px-6"
+      style={maxHeight ? { maxHeight } : undefined}
+      keyboardShouldPersistTaps="handled"
+      bounces={false}
+      alwaysBounceVertical={false}
+      overScrollMode="never"
+    >
       <Text className="text-2xl font-bold text-slate-900 mb-2 text-center">
         {form?.name || "End of shift"}
       </Text>
@@ -84,10 +83,6 @@ export default function TaskReportFormSheet({
           }
         />
       ))}
-      <FaceCaptureSegment timeZone={timeZone} onChange={setFacePhoto} />
-      {faceError ? (
-        <Text className="text-sm text-red-600 mb-3">{faceError}</Text>
-      ) : null}
       <TouchableOpacity
         onPress={submit}
         disabled={submitting}

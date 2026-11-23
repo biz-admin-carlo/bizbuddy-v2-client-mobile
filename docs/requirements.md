@@ -1,243 +1,231 @@
-# Task report form before clock-out
+# Location logging during a shift
 
 ## 1. Summary
 
-An employee who is clocked in must finish the questionnaire assigned to that punch, including a certified face photo, before the app sends a clock-out. The photo has the capture location, date, and time drawn onto the image. If the company has no form for that punch, clock-out continues as it does today.
+While an employee is clocked in, the phone records their location on the interval the company configured and sends those samples to the server. Sampling continues through breaks and while the app is in the background, and it stops at clock-out. Companies with this feature turned off are unchanged.
 
-This is a client and server change. The questionnaire endpoints already deployed for BB-129 open only after a punch is closed, and they accept JSON answers only. They cannot gate clock-out or store a face photo.
+The phone already reads location at punch time. The server already has the company switch, the interval, and the `LocationBreadcrumb` table. Nothing writes that table, and `GET /api/company-settings` does not return the switch or the interval. This spec adds the mobile collector and the ingest endpoint.
 
 ## 2. Problem
 
-Employees can end a shift without recording what they did. The company already builds end-of-shift questionnaires and assigns them by shift, employee, department, or the whole company. Those answers are collected after clock-out, inside a later answer window, and nothing in the form certifies that the employee was present.
-
-Clock-out needs to wait until two things are done:
-
-- The employee answers the questionnaire that applies to the open punch.
-- The employee takes a live photo of their face with location, date, and time inscribed on the image.
+A clock-in and a clock-out record where the employee was at the start and end of a punch. They do not show where the employee was during the shift. Companies that need that trail already have a switch and an interval on the company record, and a table ready to store the samples. The mobile app never reads those settings and never sends a sample.
 
 ## 3. Users
 
-Anyone who can clock in and clock out on the timekeeping punch screen. That is the same audience as a normal time punch.
+Employees who can clock in and clock out on the timekeeping punch screen, at a company where location logging is turned on.
 
-The system agent (B. Buddy) stays excluded. The deployed questionnaire routes already block that actor, and this flow keeps that rule.
-
-Supervisors and admins who only review answers, and admins who build or assign forms, are out of scope here.
+Supervisors and admins who view the Employee Map are out of scope. This spec stores the samples. It does not draw them.
 
 ## 4. Goals
 
-- Resolve the questionnaire for the employee’s still-open punch before clock-out is sent.
-- Render every question type the form builder already stores, and block continue while a required answer is missing or invalid.
-- Add a required face-capture segment after the questions.
-- Draw latitude, longitude, date, and time onto the photo pixels at the moment the shutter fires.
-- Send the answers and the watermarked photo together with the clock-out, and save both only if the whole request succeeds.
-- Leave clock-out unchanged when task-report forms are off or when no form matches the punch.
+- Read `breadcrumbsEnabled` and `breadcrumbIntervalMinutes` from company settings.
+- When the switch is on, refuse clock-in until location services are on and the employee has granted background location permission.
+- After a successful clock-in, take one location sample every `breadcrumbIntervalMinutes` until clock-out.
+- Keep sampling during coffee and lunch breaks, and while the app is backgrounded or the phone is locked.
+- Send each sample to a new endpoint that inserts a `LocationBreadcrumb` for that punch.
+- When the network is down, keep samples on the device and send them when the network returns, without creating duplicate rows.
+- Pause sampling when the employee signs out or switches to another account, and resume it when that same employee is signed in again and the punch is still open.
 
 ## 5. Non-goals
 
-- Timecard corrections and requested punch edits.
-- The admin form builder, assignment screens, supervisor review, and PDF export.
-- Drafts on the live clock-out path. The employee either submits a complete form with the clock-out, or the punch stays open.
-- Replacing the post-clock-out answer window. Punches that close without a questionnaire, including an automatic clock-out, stay answerable from the time card until that window ends. New clock-outs from the punch screen still use the gate and do not create drafts.
-- Choosing a storage vendor for the image file. The server must persist the watermarked file the employee previewed and point the submitted response at it.
+- Drawing breadcrumbs on the Employee Map. `GET /api/employee-map` keeps `layers.breadcrumbs` as `null`.
+- A settings screen to turn the switch on or edit the interval. The company columns are the source of truth.
+- Clocking the employee out, or blocking clock-out, because a sample was missed.
+- Rejecting a sample because the device reported a mocked location. The mocked flag is stored.
+- Web. Collection runs on the iOS and Android app.
+- Changing the existing assigned-location rule. An employee who must punch inside a work site still must be inside that site. Location logging is an additional rule when the company switch is on.
 
 ## 6. Current behavior
 
 ### 6.1 App
 
-Clock-out is sent from `app/(tabs)/(shifts)/timekeeping-punch.jsx` to `POST /api/timelogs/time-out` in three places:
+Clock-in and clock-out are sent from `app/(tabs)/(shifts)/timekeeping-punch.jsx`. `getPunchData` asks for foreground location permission and, when services are on, reads one fix with `expo-location`. A missing fix does not fail Time In. Employees restricted to assigned sites are blocked separately when they are outside those sites or location is off.
 
-- The normal clock-out confirm path.
-- The deviation modal’s Regular choice.
-- The deviation modal’s Driver/Aide choice.
+The app checks foreground permission only. It does not read `breadcrumbsEnabled` or `breadcrumbIntervalMinutes`. It does not sample on a timer, and it has no background-location task. `expo-task-manager` is not installed.
 
-Before that request, the punch screen already checks active breaks, assigned-location rules, and whether an offline punch is allowed. Location for a punch comes from `expo-location`. The app has no camera library. A Pro plan can queue a clock-out locally when the device is offline.
+Offline clock-in and clock-out are queued in AsyncStorage for Pro plans, and location-restricted employees cannot punch offline. That queue is posted to `/api/timelogs` and then cleared, including actions whose request failed.
+
+iOS already has an Always-location usage string. The When-In-Use string says location is used only at punch time. Android requests fine and coarse location. It does not request background location.
 
 ### 6.2 Server
 
-BB-129 already stores forms and assignments.
+`Company` has:
 
-- A form applies only when `Company.taskReportEnabled` is on and `Company.taskReportMode` is `forms`. In `freeform` mode, questionnaires cannot be answered.
-- The form for a punch is the most specific active assignment: shift, then employee, then department, then company-wide (`all`). A department form is used only when no shift form and no employee form match. Archived forms are ignored.
-- Question shape is `{ id, type, label, helpText, required, options }`. Types are `short_text`, `paragraph`, `single_choice`, `checkboxes`, `dropdown`, `yes_no`, `number`, `date`, and `time`.
-- `GET` and `PUT /api/task-report-forms/me/punch/:timeLogId` refuse to open until the punch has a clock-out (`STILL_CLOCKED_IN`: “Clock out first. The questionnaire opens after clock-out.”).
-- Answers are a JSON object `{ questionId: value }`. There is no photo field.
-- `POST /api/timelogs/time-out` closes the punch first, then may add a `taskReportForm` prompt (`timeLogId`, form id and name, shift name, `closesAt`) so an older app can ask afterward. The answer window is `Company.taskReportFormWindowHours` after clock-out (default 336 hours). The first save freezes a snapshot of the form.
+- `breadcrumbsEnabled` — boolean, default `false`
+- `breadcrumbIntervalMinutes` — integer, default `5`
 
-That order is the opposite of this requirement. A submitted questionnaire cannot be attached to a punch that is still open, and a clock-out cannot be held back by answers the server will not accept yet.
+`GET /api/company-settings` (`getSettings`) does not select either field, so the punch screen cannot see them.
+
+`LocationBreadcrumb` stores one sample per punch per `recordedAt`. Columns are `companyId`, `userId`, `timeLogId`, `recordedAt`, `receivedAt`, `latitude`, `longitude`, `accuracy`, `altitude`, `speed`, `heading`, `batteryLevel`, `isMocked`, and `source`. `id` has no default, so the writer supplies it. `receivedAt` defaults to the insert time. `(timeLogId, recordedAt)` is unique.
+
+`POST /api/timelogs/time-in` and `time-out` save the punch fix on `TimeLog.location.start` and `TimeLog.location.end`. No route inserts `LocationBreadcrumb`. The Employee Map reads punch fixes only.
 
 ## 7. Product requirements
 
-### 7.1 When the form appears
+### 7.1 When logging is required
 
-The employee taps Time Out and passes the checks that already exist (end an active break, satisfy location restriction, and so on).
+Logging runs only when `breadcrumbsEnabled` is true for the signed-in employee’s company.
 
-The existing clock-out confirm stays. When the company requires a punch-type choice, the deviation modal stays too, and the employee picks Regular or Driver/Aide before the questionnaire.
+The interval is `breadcrumbIntervalMinutes`. A missing value, or any integer below 1, is treated as 5. The app waits at least that many minutes between samples. The operating system may deliver a fix late. The app sends the fix it actually got, with that fix’s time. It does not invent samples for the gap.
 
-After that commitment, the app asks the server which form applies to the open punch:
+A change to the switch or the interval applies the next time the punch screen loads company settings, and on the next launch. When the switch turns off, sampling stops.
 
-- Task reports are off, the mode is not `forms`, or nothing matches: the app sends clock-out exactly as it does today, with no questionnaire and no photo.
-- A form matches: the app shows that form. Clock-out is not sent until the employee submits it and the server accepts the combined request.
+### 7.2 Clock-in
 
-Canceling the form, leaving the screen, or failing validation does not clock the employee out.
+When the switch is on, Time In stays disabled until both of these are true:
 
-All three current time-out call sites go through this gate. A deviation choice selects `punchType` only. It does not skip the form.
+- Location services are on.
+- Background location permission is granted. On iOS that is Always. On Android that is Allow all the time, which requires foreground permission first.
 
-### 7.2 Resolving the form
+The punch screen explains, before the system prompt, that the company records location during the open shift at the company’s interval, including while the app is in the background, and that recording stops at clock-out. If the employee denies the permission or leaves services off, Time In does not proceed, and the screen tells them how to turn it on.
 
-Resolution uses the open time log (the punch that has a clock-in and no clock-out) and the assignment order already implemented: shift, employee, department, company-wide.
+When the switch is off, Time In uses today’s location rules.
 
-The shift match uses the punch’s clock-in instant and the company timezone (`Company.timeZone`, falling back to `America/Los_Angeles`), the same way the server matches a shift today.
+The assigned-site check still runs for location-restricted employees. Both gates must pass when they both apply.
 
-The response tells the app whether it must show a form. When it must, the payload includes the form snapshot the employee will answer: id, name, description, and questions. The server also returns which assignment won (`assignedVia`) and the shift name when a shift matched. The app shows the form name and description. It does not let the employee pick a different form.
+Permission and services are checked on the device. A missing GPS fix at the moment of the tap does not, by itself, block Time In. The next interval tries again.
 
-The snapshot is the form that will be stored with the clock-out. Later edits or re-assignments do not change this submission.
+### 7.3 During the shift
 
-### 7.3 Answering questions
+Sampling starts after clock-in succeeds and the app has the server time log id.
 
-The app renders questions in stored order. Each question shows its label, and its help text when one is set. Required questions are marked.
+It continues:
 
-Answer shapes match the server rules already used on submit:
+- while the employee is on a coffee or lunch break
+- while the app is in the background
+- while the phone is locked
 
-| Type | What the employee enters | Valid value |
-| --- | --- | --- |
-| `short_text` | One line of text | Trimmed string, at most 500 characters |
-| `paragraph` | Multi-line text | Trimmed string, at most 5000 characters |
-| `single_choice` | One of the listed options | The option string |
-| `dropdown` | One of the listed options | The option string |
-| `checkboxes` | Any of the listed options | Array of option strings, de-duplicated, in form order |
-| `yes_no` | Yes or no | Boolean |
-| `number` | A number | Finite number |
-| `date` | A calendar date | `YYYY-MM-DD` |
-| `time` | A time of day | `HH:mm`, 24-hour |
+It stops when clock-out succeeds. On the next launch, if that employee still has an open punch, the switch is on, and permission still stands, sampling resumes.
 
-Optional questions may be left blank. On submit, a required question that is empty or invalid blocks the request. The employee stays on the form and sees which question failed. Unknown question ids are ignored, matching the current answer cleaner.
+Signing out and switching accounts pause sampling for the employee who is leaving. The phone stops location updates and the Android notification. That employee’s session and any unsent samples stay on the device, tagged with their user id. They are not uploaded with the next account’s token. When that same employee is the signed-in user again, the punch is still open, the switch is still on, and permission still stands, sampling resumes and the unsent samples are sent. Clock-out still ends the session. Pause does not. A cold start with a missing or expired token pauses the same way before that token is deleted. If no user id can be read, location updates still stop.
 
-### 7.4 Face capture
+A Pro offline Time Out still queues the punch as it does today, and location updates stop at the moment it is queued. Samples already taken stay on the device and upload when the network returns. Sampling does not resume while that clock-out is still in the punch queue, even if the server punch is still open. After the server accepts the clock-out, the session is cleared the same way as an online clock-out.
 
-The face segment is last, after the questions. It is always required for this flow. It is not an admin-configured question type, and it is not satisfied by a gallery photo.
+`collectUntil` is the punch’s `LiveUser.closeAt`: scheduled end plus the company’s auto clock-out grace, or clock-in plus the default shift length plus that grace when there is no shift. Clock-in and the open log from `GET /api/timelogs/user` include it when the row exists. A failure to write `LiveUser` does not fail the punch, and then `collectUntil` is absent. The background task stops location updates when the clock passes `collectUntil`, including while the app is locked. A manual clock-out stops sooner. Early clock-in and overtime before `collectUntil` still produce samples. While the punch screen’s socket is connected, `timeLogUpdated` with `type: "autoClockOut"` stops tracking as well.
 
-- The capture uses the front camera only.
-- The employee may retake the photo before submitting.
-- At shutter time the app reads the device location and the current instant.
-- The app draws onto the image pixels, before upload: latitude, longitude, the calendar date, and the clock time. Date and time use the company timezone. The preview shows that inscription, and the uploaded file is that same watermarked image.
-- Metadata alone (EXIF or a side field) does not meet this requirement. The text must be visible on the picture.
-- If camera permission is missing, or a location fix cannot be read, the employee cannot submit. The app explains what to enable. The punch stays open.
+Android shows the ongoing notification the operating system requires for background location. The notification says the company is recording location for the open shift. If the employee denies notification permission, clock-in still proceeds. Background updates stay off, the punch screen says background recording needs notifications, and sampling continues while BizBuddy is open.
 
-The segment does not accept an existing picture from the photo library.
+A failed fix is skipped. The punch stays open. The next interval tries again. If the employee revokes permission during the shift, sampling pauses and the punch stays open. Sampling resumes if they grant it again before clock-out. The following clock-in is blocked until they grant it.
 
-### 7.5 Submission and clock-out
+A reboot leaves a gap until the employee next opens the app. There is no boot-time restart. `collectUntil` is what bounds a phone that stays off.
 
-Submit sends one request that carries:
+### 7.4 What is sent
 
-- The clock-out payload the punch screen already sends (device info, location, local timestamp, and `punchType` when the deviation flow set one).
-- The questionnaire answers.
-- The watermarked face photo.
+Each sample includes:
 
-The server treats that request as a single transaction:
+- `timeLogId`
+- `recordedAt` — the time of the fix, as an ISO timestamp
+- `latitude` and `longitude`
+- `accuracy`, `altitude`, `speed`, and `heading` when the operating system provides them
+- `isMocked` when the operating system reports it
+- `source` — `foreground` or `background`
 
-- When a form applies, missing answers, invalid answers, or a missing or unreadable photo reject the whole request. The time log stays open. No questionnaire response is created.
-- When the request is valid, the server closes the punch and creates the questionnaire response as `submitted`, with `submittedAt` set, the form snapshot frozen, and a reference to the stored watermarked image.
-- When no form applies, the request is a normal clock-out and does not require answers or a photo.
+`batteryLevel` stays empty. The app does not add a battery library for this.
 
-A failed upload, a validation error, or a network error after the employee taps submit leaves them clocked in. The app shows the server message when one is returned, and keeps the answers and the preview so they can try again without retaking the photo unless they choose to.
+The signed-in user and company come from the token. The client does not send `companyId` or `userId`.
 
-Success is the same clock-out success the punch screen already shows. The employee is clocked out, and the questionnaire is submitted and locked.
+### 7.5 Offline
 
-### 7.6 Offline
+Samples are stored on the device in their own queue, separate from the Pro punch queue. Each sample is tagged with the employee’s user id. Each user keeps at most 500 queued samples. A new sample past that cap drops the oldest for that user.
 
-When the company is in forms mode, clock-out requires a network connection. The app cannot resolve the assignment or upload the photo offline, so it must not queue that clock-out.
+When the network returns, the app sends that user’s samples in chunks of up to 50 until theirs are gone or a request fails. It removes a sample from the queue only after the server accepts it, marks it as a duplicate, or rejects it as invalid. A network failure leaves that sample queued. Turning the company switch off deletes only the signed-in user’s unsent rows.
 
-When forms mode is off, the existing offline rules stay: a Pro plan may store the punch locally; a location-restricted employee still cannot punch offline; other plans still need a connection.
+If clock-in itself is still queued, samples wait on the device until that clock-in sync returns a time log id. They are then sent with that id. After `collectUntil`, samples that still have no time log id are dropped.
 
-If company settings have not loaded yet, the punch screen keeps its current behavior and does not send a clock-out.
+## 8. Server
 
-### 7.7 Permissions and failures
+### 8.1 Company settings
 
-| Situation | Result |
-| --- | --- |
-| Active break | Clock-out does not start. Existing message. |
-| Outside an assigned punch location, when restricted | Clock-out does not start. Existing message. |
-| Forms mode and the device is offline | Clock-out does not start. The employee is told they must be online to complete the end-of-shift form. |
-| No form for this punch | Clock-out proceeds with no form and no photo. |
-| Required answer missing or invalid | Stay on the form. Stay clocked in. |
-| Camera or location unavailable for the photo | Stay on the form. Stay clocked in. |
-| Server rejects the combined request | Stay clocked in. No response row. Show the error. |
-| Employee cancels the form | Stay clocked in. Nothing is saved. |
-| Employee cancels Add report on a closed punch | The punch stays closed. No response is saved. `timeOut` is unchanged. |
+`GET /api/company-settings` includes:
 
-### 7.8 Report after the punch is already closed
+- `breadcrumbsEnabled` (boolean)
+- `breadcrumbIntervalMinutes` (integer)
 
-An automatic clock-out never opens this form. The server sets `timeOut` on its own, marks the punch `autoClockOut`, and does not ask for a questionnaire. The same gap exists when the phone dies or the device is offline in forms mode: manual clock-out is blocked, the shift stays open, and the cron closes it later with no report.
+Employees who can already load the punch screen can read both. This spec does not add a way to edit them.
 
-The time card offers **Add report** on a closed punch that is still inside `taskReportFormWindowHours` and has no submitted questionnaire. The server already lists those punches from `GET /api/task-report-forms/me/pending`. Automatic clock-outs are in that list. The button is not limited to the `autoClockOut` flag.
+### 8.2 Ingest
 
-Add report opens the same questionnaire and requires the same face photo. The inscription is the time and place of that later photo, not the stored `timeOut`. The card says the shift was already closed. Submit stores the response on that punch and does not change `timeOut`. Cancel leaves the punch without a report. When the window has passed, or a response is already submitted, the button is hidden.
+`POST /api/timelogs/location-breadcrumbs`
 
-## 8. Server contract
+Authentication matches the other time-log routes. The body is:
 
-The live punch-screen path needs three behaviors the deployed API does not have.
+```json
+{
+  "samples": [
+    {
+      "timeLogId": "…",
+      "recordedAt": "2026-11-20T00:15:00.000Z",
+      "latitude": 14.55,
+      "longitude": 121.02,
+      "accuracy": 12,
+      "altitude": 18,
+      "speed": 0,
+      "heading": 90,
+      "isMocked": false,
+      "source": "background"
+    }
+  ]
+}
+```
 
-### 8.1 Resolve the open punch
+`samples` is required, must be an array, and must contain 1 to 50 items. Optional coordinate fields may be omitted.
 
-Provide a way for the signed-in employee to resolve the questionnaire for their current open time log, before clock-out.
+For each sample the server:
 
-- Authentication matches the other employee questionnaire routes. The system agent remains blocked.
-- The punch must belong to that employee and must still be open. This path must not return `STILL_CLOCKED_IN`.
-- If forms are off, or no active assignment matches, the response says no form is required.
-- If a form matches, the response includes the snapshot (`id`, `name`, `description`, `questions`), `assignedVia`, the shift id and name when a shift matched, and the open `timeLogId`.
-- Resolution order stays shift, then employee, then department, then company-wide. Only active forms are eligible.
+- Loads the time log and checks that it belongs to the signed-in user and their company. Otherwise that sample is `rejected`.
+- Checks that the company has `breadcrumbsEnabled`. When it is off, the whole request is `403` with code `BREADCRUMBS_DISABLED`.
+- Checks `recordedAt` is a timestamp, not more than 2 minutes ahead of the server clock, on or after `timeIn`, and on or before `timeOut` when the punch is already closed. Otherwise that sample is `rejected`.
+- Checks latitude and longitude are finite, latitude is between -90 and 90, longitude is between -180 and 180, and the point is not 0,0. Otherwise that sample is `rejected`.
+- Inserts a `LocationBreadcrumb`. The server sets `id`, `companyId`, `userId`, and `receivedAt`. A row that already exists for the same `timeLogId` and `recordedAt` is `duplicate` and is not inserted again.
 
-`GET /api/task-report-forms/me/punch/:timeLogId` can remain the reader for a punch that is already closed. It is not the call the punch screen uses to decide whether to block clock-out.
+A batch with a mix of outcomes returns `200` and a result per sample, in order: `saved`, `duplicate`, or `rejected`, with a short reason on `rejected`. One invalid sample does not roll back the others.
 
-### 8.2 Accept answers and the photo on clock-out
+`401` when the token is missing or invalid. `400` when `samples` is missing, empty, or longer than 50, with code `TOO_MANY_SAMPLES` in that last case.
 
-`POST /api/timelogs/time-out` accepts the existing clock-out body plus, when a form applies:
+The ingest route is for the employee who owns the punch. It does not use the Employee Map role check. Supervisors are not given a new read API here.
 
-- `answers`: `{ questionId: value }`, validated with the rules in section 7.3. Required questions are enforced because this submit locks the response.
-- The watermarked face image as a file upload on that same request.
+These checks decide whether a sample may be stored. They do not prove the employee was at that place. A modified app can still send timestamps spaced at the company interval. `isMocked` is stored with the row. The trail is what the phone reported.
 
-When a form applies and either part is missing or invalid, the handler rejects the clock-out. Suggested codes, in the same `{ message, code }` shape the questionnaire services already use:
-
-- `TASK_REPORT_FORMS_REQUIRED` when a form applies and the answers or the photo were not sent.
-- `REQUIRED_ANSWER` and `INVALID_ANSWER` for question failures, as today.
-- `FACE_PHOTO_REQUIRED` when the image is missing, empty, or not an image file.
-
-When no form applies, extra answer or photo fields are ignored and clock-out behaves as it does now.
-
-### 8.3 Store both together
-
-On success when a form applies, one transaction:
-
-- Updates the open time log with the clock-out, including the existing derived-field work that clock-out already runs.
-- Stores the watermarked image bytes the client uploaded.
-- Creates one `TaskReportFormResponse` for that time log with status `submitted`, the frozen form snapshot, the cleaned answers, `assignedVia`, shift id and name, `submittedAt`, and a reference to the stored image.
-
-The response on the time log stays unique (one answer set per punch). A second clock-out attempt cannot create a second response.
-
-The clock-out JSON may still include a `taskReportForm` field for older apps. For a clock-out that already submitted the questionnaire, that prompt is null, so the employee is not asked to answer again.
-
-The post-clock-out draft and answer-window endpoints stay in place for punches that closed before this gate existed and still have no response. They are not used by this live flow, and this flow does not create drafts.
+`POST /api/timelogs/time-in` still succeeds when the `LiveUser` upsert throws. When that row exists, the response includes `collectUntil`, the ISO time of `LiveUser.closeAt`. `GET /api/timelogs/user` includes `collectUntil` on the open log.
 
 ## 9. Client notes
 
-The app stays on the current stack: Expo, React Native, `expo-router`, Axios, and `expo-location`. Face capture needs a camera and a way to draw the inscription onto the bitmap before upload. Those are new client dependencies; the punch screen does not have them today.
+The app stays on Expo, React Native, `expo-router`, Axios, and `expo-location`. Background sampling needs `expo-task-manager` and the Expo location background task. Those are new client pieces. The punch screen does not have them today.
 
-The form is part of the clock-out path in `app/(tabs)/(shifts)/timekeeping-punch.jsx`, after confirm and after any deviation choice, and before every `POST /api/timelogs/time-out`.
+Work lands in the punch flow in `app/(tabs)/(shifts)/timekeeping-punch.jsx`, plus a small background task the operating system can run after the employee leaves that screen. The task reads the saved interval, the open time log id, and the queue. It does not depend on the punch screen staying mounted.
 
-The client also enforces required questions and the photo before it calls the server, so a preventable error does not depend on a round trip. The server remains the authority. A client-side pass never clocks the employee out by itself.
+Permission copy changes with the behavior:
+
+- The iOS When-In-Use and Always strings say location is recorded during an open shift at the company interval, including while the app is in the background, and stops at clock-out.
+- Android declares background location permission.
+- The in-app explanation in section 7.2 is shown before the system prompt.
+
+The When-In-Use string that says location is used only at punch time is replaced. It would be false once sampling runs during the shift.
+
+The breadcrumb queue uses its own AsyncStorage key. It is not appended to the Pro punch queue, and a punch-queue flush does not delete it.
 
 ## 10. Acceptance criteria
 
-- With forms mode on and a department assignment, an employee in that department who has no shift or employee assignment must complete that form and a watermarked face photo before clock-out is sent.
-- A shift assignment wins over an employee assignment, which wins over a department assignment, which wins over a company-wide assignment.
-- With forms mode off, or with no matching form, Time Out does not show a questionnaire or ask for a photo, and clock-out succeeds as it does today.
-- Regular and Driver/Aide deviation choices both reach the form when one applies, and the chosen `punchType` is still sent with the clock-out.
-- Leaving a required question blank, or leaving the face segment empty, does not send clock-out. The employee remains clocked in.
-- The submitted image shows latitude, longitude, date, and company-local time on the picture itself. The preview and the stored file match.
-- A rejected upload or a failed clock-out leaves no closed punch and no questionnaire response.
-- A successful submit closes the punch and stores one submitted response linked to that time log and to the watermarked image.
-- In forms mode, an offline device cannot queue a clock-out. With forms mode off, a Pro offline clock-out still queues as it does today.
-- Canceling the form does not clock the employee out.
-- The system agent cannot complete this flow.
-- A punch that already closed under the old “answer later” rules can still be answered through the existing post-clock-out endpoints. A punch closed through this gate is not prompted again.
-- After an automatic clock-out, or any other close that left no questionnaire, the time card shows Add report while the answer window is open. Submitting it stores the form and a face photo stamped at that later moment, and does not change `timeOut`. The button is hidden once the window has passed or the response is submitted.
+- With `breadcrumbsEnabled` off, Time In and Time Out behave as they do today, and the app sends no location samples.
+- With the switch on, Time In does not proceed while location services are off, or while background location permission is missing. The screen explains why and how to allow it.
+- With the switch on and permission granted, a successful clock-in starts sampling. A sample is taken about every `breadcrumbIntervalMinutes`, and not more often.
+- A missing or sub-1 interval is treated as 5 minutes.
+- Samples continue during coffee and lunch breaks.
+- Samples continue after the employee leaves the punch screen and after the phone is locked, until clock-out.
+- Clock-out stops sampling. Relaunching the app while the punch is still open resumes it.
+- A Pro offline Time Out queues the punch and stops location updates immediately. Sampling stays off while that clock-out is still in the punch queue. Samples already taken upload when the network returns. After the server accepts the clock-out, the session is cleared.
+- Sampling stops when the clock passes `collectUntil`, including while the phone is locked. Early clock-in and overtime before that time still produce samples. An `autoClockOut` socket event stops tracking while the punch screen is connected.
+- Signing out, switching accounts, and a cold start with an expired token pause sampling. No further samples are taken for the employee who left, and their unsent samples are not sent under the other account. Signing back in as that employee, while the punch is still open, resumes sampling and sends what was waiting.
+- Denied Android notification permission still allows clock-in. Background updates stay off, the punch screen says so, and sampling continues while the app is open.
+- A reboot leaves a gap until the next time the app is opened.
+- Each user keeps at most 500 queued samples. A longer offline stretch drops the oldest. Samples that still have no time log id after `collectUntil` are dropped.
+- With the switch off at ingest time, the server refuses the batch, the app stops sampling, and only the signed-in user’s unsent samples are deleted.
+- A failed fix leaves the punch open. The next interval tries again.
+- Each accepted sample is one `LocationBreadcrumb` tied to that user, company, and time log, with the fix’s `recordedAt`.
+- Sending the same sample again does not create a second row.
+- With no network, samples stay on the device. When the network returns they are stored, and they remain queued if the request fails.
+- A sample whose coordinates are unusable, or whose time falls outside the punch, is rejected and dropped from the queue. Other samples in the same batch are still saved.
+- A stored sample can carry `isMocked: true`. The server still accepts it. The trail is device-reported.
+- `GET /api/company-settings` returns `breadcrumbsEnabled` and `breadcrumbIntervalMinutes`.
+- `GET /api/employee-map` still returns `layers.breadcrumbs: null`.
+- An employee restricted to assigned sites must still be inside a site to punch, and must also grant background location when the switch is on.

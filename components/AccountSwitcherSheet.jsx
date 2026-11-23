@@ -10,12 +10,19 @@ import {
   Alert,
 } from "react-native";
 import { Ionicons, Feather, FontAwesome5 } from "@expo/vector-icons";
+import * as LocalAuthentication from "expo-local-authentication";
 import { useAccountSwitcher } from "../hooks/useAccountSwitcher";
+
+/** Let the sheet finish dismissing before the system biometric prompt. */
+function waitForModalDismiss() {
+  return new Promise((resolve) => setTimeout(resolve, 400));
+}
 
 /**
  * Facebook-style account switcher: lists every account (email + company combo)
- * saved on this device, lets the user tap to switch instantly, add a new
- * account, or remove a saved (inactive) one from the device.
+ * saved on this device. Opening another saved account requires biometric
+ * verification first. The user can also add a new account, or remove a saved
+ * (inactive) one from the device.
  */
 export default function AccountSwitcherSheet({ visible, onClose }) {
   const {
@@ -28,18 +35,59 @@ export default function AccountSwitcherSheet({ visible, onClose }) {
     addAccount,
   } = useAccountSwitcher();
   const [removingKey, setRemovingKey] = useState(null);
+  const [switchError, setSwitchError] = useState(null);
+  const [promptingBiometric, setPromptingBiometric] = useState(false);
+  const [biometricReady, setBiometricReady] = useState(false);
 
   useEffect(() => {
-    if (visible) refresh();
+    if (!visible) return;
+    setSwitchError(null);
+    setPromptingBiometric(false);
+    refresh();
   }, [visible, refresh]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+        if (!cancelled) setBiometricReady(hasHardware && isEnrolled);
+      } catch {
+        if (!cancelled) setBiometricReady(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleRowPress = async (account) => {
-    if (account.isActive || switchingKey) return;
+    if (account.isActive || switchingKey || promptingBiometric) return;
+    setSwitchError(null);
+
+    // A React Native modal can sit above the system biometric prompt, so hide
+    // the sheet first when this account will actually be unlocked that way.
+    const willPromptBiometric = !account.needsPassword && !!account.token;
+    if (willPromptBiometric) {
+      setPromptingBiometric(true);
+      await waitForModalDismiss();
+    }
+
     const result = await switchToAccount(account);
-    if (result.ok) {
+
+    if (result.ok || result.reason === "needs_password") {
+      setPromptingBiometric(false);
       onClose();
-    } else if (result.reason === "needs_password") {
-      onClose();
+      return;
+    }
+
+    setPromptingBiometric(false);
+    if (result.reason === "biometric_failed") {
+      setSwitchError(
+        result.message ||
+          "Biometric verification is required to switch accounts.",
+      );
     }
   };
 
@@ -72,7 +120,7 @@ export default function AccountSwitcherSheet({ visible, onClose }) {
 
   return (
     <Modal
-      visible={visible}
+      visible={visible && !promptingBiometric}
       transparent
       animationType="slide"
       onRequestClose={onClose}
@@ -103,6 +151,16 @@ export default function AccountSwitcherSheet({ visible, onClose }) {
               <Ionicons name="close" size={22} color="#64748b" />
             </TouchableOpacity>
           </View>
+
+          {biometricReady ? (
+            <Text className="px-5 pb-3 text-xs text-slate-500">
+              Verify with Face ID, Touch ID, or fingerprint before opening another account.
+            </Text>
+          ) : null}
+
+          {switchError ? (
+            <Text className="px-5 pb-3 text-sm text-red-600">{switchError}</Text>
+          ) : null}
 
           {loading && accounts.length === 0 ? (
             <View className="py-10 items-center">

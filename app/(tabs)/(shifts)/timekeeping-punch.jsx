@@ -56,6 +56,25 @@ import {
   hasRelevantScheduledShiftForClockIn,
 } from "../../../utils/timekeepingShiftUtils";
 import { parseApproversPayload } from "../../../utils/approversPayload";
+import { getTokenCompanyId, getTokenUserId } from "../../../utils/jwtTokenUtils";
+import {
+  readBreadcrumbPermission,
+  requestBreadcrumbPermission,
+} from "../../../utils/breadcrumbPermission";
+import {
+  readBreadcrumbSession,
+  saveBreadcrumbSession,
+} from "../../../utils/locationBreadcrumbSession";
+import {
+  assignBreadcrumbTimeLogId,
+  dropSamplesForUser,
+} from "../../../utils/locationBreadcrumbQueue";
+import { flushBreadcrumbQueue } from "../../../utils/locationBreadcrumbUpload";
+import {
+  startBreadcrumbTracking,
+  stopBreadcrumbTracking,
+  queueBreadcrumbClockOut,
+} from "../../../utils/locationBreadcrumbTracking";
 import {
   parseCompanyTimeZone,
   formatCompanyCalendarDateString,
@@ -67,11 +86,17 @@ import {
   logCompanySettingsTimeZoneResult,
 } from "../../../utils/companyTimeZoneUtils";
 import TaskReportFormSheet from "../../../components/task-report/TaskReportFormSheet";
+import FacePunchSheet from "../../../components/punch/FacePunchSheet";
+import { fetchOpenTaskReport } from "../../../utils/taskReportApi";
+import { pickPunchBody, withShot } from "../../../utils/punchBody";
+import { postPunch, readPunchDeviceId } from "../../../utils/punchRequest";
 import {
-  fetchOpenTaskReport,
-  postClockOutJson,
-  postClockOutWithReport,
-} from "../../../utils/taskReportApi";
+  facePhotoRequiredFor,
+  pickFaceCaptureSettings,
+  settingsOwner,
+} from "../../../utils/facePhotoRule";
+import { deletePunchPhoto, keepPunchPhoto } from "../../../utils/punchPhotoStore";
+import { settlePunchAction } from "../../../utils/punchQueue";
 
 const PENDING_ACTIONS_KEY = "pendingPunchActions";
 const CLOCK_OUT_DEVIATION_RESPONSES_KEY = "clockOutDeviationResponses";
@@ -93,6 +118,10 @@ const isDayCareCompanyId = (companyId) => {
     : [];
   return allowed.includes(String(companyId).trim());
 };
+
+/** Company is in questionnaire mode. Both fields must be exactly the API values. */
+const taskReportFormsEnabled = (raw) =>
+  raw?.taskReportEnabled === true && raw?.taskReportMode === "forms";
 
 /**
  * getSettings / GET company-settings fields used by punch:
@@ -173,10 +202,30 @@ const getPendingActions = async () => {
   }
 };
 
-const clearPendingActions = async () => {
+const savePendingActions = async (actions) => {
   try {
-    await AsyncStorage.removeItem(PENDING_ACTIONS_KEY);
+    await AsyncStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(actions));
   } catch {}
+};
+
+const newPendingActionId = () =>
+  `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+/** Breadcrumb follow-up after a queued punch reaches the server. */
+const afterQueuedPunch = async (action, res, token) => {
+  if (action.endpoint === "/time-in" && res.data?.data?.id) {
+    const userId = getTokenUserId(token);
+    await assignBreadcrumbTimeLogId(res.data.data.id, userId);
+    const session = userId ? await readBreadcrumbSession(userId) : null;
+    if (session && !session.timeLogId) {
+      await saveBreadcrumbSession({
+        ...session,
+        timeLogId: res.data.data.id,
+        collectUntil: res.data.data.collectUntil || session.collectUntil,
+      });
+    }
+  }
+  if (action.endpoint === "/time-out") await stopBreadcrumbTracking();
 };
 
 const storeClockOutDeviationResponse = async (entry) => {
@@ -192,6 +241,12 @@ const storeClockOutDeviationResponse = async (entry) => {
       JSON.stringify(next),
     );
   } catch {}
+};
+
+const resolveBreadcrumbInterval = (value) => {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return 5;
+  return n;
 };
 
 const { width, height } = Dimensions.get("window");
@@ -402,6 +457,15 @@ export default function TimekeepingPunch() {
   const [taskReportVisible, setTaskReportVisible] = useState(false);
   const [taskReport, setTaskReport] = useState(null);
   const [taskReportSubmitting, setTaskReportSubmitting] = useState(false);
+  const [facePhotoAction, setFacePhotoAction] = useState(null);
+  const [facePhotoAttempt, setFacePhotoAttempt] = useState(0);
+  const [facePhotoBusy, setFacePhotoBusy] = useState(false);
+  const facePhotoResolveRef = useRef(null);
+  /** Stamped photo kept across a retry within one punch flow. */
+  const heldShotRef = useRef(null);
+  /** True while the bottom sheet is on screen (state is stale inside animation callbacks). */
+  const sheetShownRef = useRef(false);
+  const flushingPunchesRef = useRef(false);
   const [clockOutConfirmSchedule, setClockOutConfirmSchedule] = useState(null);
   const [pendingClockOutConfirmPayload, setPendingClockOutConfirmPayload] =
     useState(null);
@@ -525,6 +589,11 @@ export default function TimekeepingPunch() {
   /** IANA zone from GET /api/company-settings → data.timezone */
   const companySettingsTimeZoneRef = useRef(null);
   const companySettingsTaskReportFormsRef = useRef(false);
+  const faceCaptureSettingsRef = useRef(pickFaceCaptureSettings(null));
+  /** "userId:companyId" the loaded settings belong to, or null when none loaded. */
+  const companySettingsOwnerRef = useRef(null);
+  const breadcrumbsEnabledRef = useRef(false);
+  const breadcrumbIntervalMinutesRef = useRef(5);
   /** From GET /api/employment-details/me — used for time-in / time-out (driver vs non-driver). */
   const employmentDetailsIsDriverRef = useRef(null);
   /** Time In/Out stays disabled until company-settings and employment-details (first load) finish. */
@@ -535,6 +604,9 @@ export default function TimekeepingPunch() {
 
   // Socket
   const socketRef = useRef(null);
+  /** Blocks a second Time In while the first request or its follow-up is still running. */
+  const punchInFlightRef = useRef(false);
+  const submitOnlineTimeInRef = useRef(async () => {});
 
   const resetAllStates = useCallback(() => {
     setIsTimeIn(false);
@@ -603,8 +675,33 @@ export default function TimekeepingPunch() {
             setLunchBreakStartTime(null);
             setTotalLunchTime(0);
           }
+          if (Platform.OS !== "web" && breadcrumbsEnabledRef.current) {
+            const sessionToken = await SecureStore.getItemAsync("token");
+            const userId = getTokenUserId(sessionToken);
+            const existing = userId ? await readBreadcrumbSession(userId) : null;
+            if (!existing?.clockOutQueued && userId) {
+              await saveBreadcrumbSession({
+                userId,
+                timeLogId: activeLog.id,
+                intervalMinutes: breadcrumbIntervalMinutesRef.current,
+                lastRecordedAt:
+                  existing && existing.timeLogId === activeLog.id
+                    ? existing.lastRecordedAt
+                    : null,
+                paused: false,
+                collectUntil:
+                  activeLog.collectUntil || existing?.collectUntil || null,
+                clockOutQueued: false,
+              });
+              await startBreadcrumbTracking();
+              await flushBreadcrumbQueue();
+            }
+          }
         } else {
           resetAllStates();
+          if (Platform.OS !== "web") {
+            await stopBreadcrumbTracking();
+          }
         }
       }
     } catch {}
@@ -673,11 +770,12 @@ export default function TimekeepingPunch() {
   ]);
 
   const fetchCompanySettingsForPunch = useCallback(async () => {
+    let token = null;
     try {
-      const token = await SecureStore.getItemAsync("token");
+      token = await SecureStore.getItemAsync("token");
       if (!token) {
         devLog("company-settings: skip fetch (no token)");
-        return;
+        return false;
       }
       const settingsRes = await axios.get(
         `${API_BASE_URL}/api/company-settings`,
@@ -708,8 +806,21 @@ export default function TimekeepingPunch() {
       companySettingsDriverAideThresholdMinutesRef.current =
         driverAideThresholdMinutes;
       companySettingsTimeZoneRef.current = timeZone;
-      companySettingsTaskReportFormsRef.current =
-        raw.taskReportEnabled === true && raw.taskReportMode === "forms";
+      companySettingsTaskReportFormsRef.current = taskReportFormsEnabled(raw);
+      faceCaptureSettingsRef.current = pickFaceCaptureSettings(raw);
+      companySettingsOwnerRef.current = settingsOwner(
+        getTokenUserId(token),
+        getTokenCompanyId(token),
+      );
+      breadcrumbsEnabledRef.current = raw.breadcrumbsEnabled === true;
+      breadcrumbIntervalMinutesRef.current = resolveBreadcrumbInterval(
+        raw.breadcrumbIntervalMinutes,
+      );
+      if (!breadcrumbsEnabledRef.current && Platform.OS !== "web") {
+        const userId = getTokenUserId(token);
+        await stopBreadcrumbTracking();
+        if (userId) await dropSamplesForUser(userId);
+      }
 
       devLog("company-settings stored (refs)", {
         shiftAssignmentWindowMinutes:
@@ -718,14 +829,28 @@ export default function TimekeepingPunch() {
           companySettingsDriverAideThresholdMinutesRef.current,
         timeZone: companySettingsTimeZoneRef.current,
       });
+      return true;
     } catch (e) {
       devLog("company-settings fetch failed", e?.message ?? String(e));
+      const owner = settingsOwner(getTokenUserId(token), getTokenCompanyId(token));
+      if (owner && owner === companySettingsOwnerRef.current) return false;
+      companySettingsOwnerRef.current = null;
+      faceCaptureSettingsRef.current = pickFaceCaptureSettings(null);
       companySettingsShiftAssignmentWindowMinutesRef.current = null;
       companySettingsDriverAideThresholdMinutesRef.current = null;
       companySettingsTimeZoneRef.current = null;
       companySettingsTaskReportFormsRef.current = false;
+      breadcrumbsEnabledRef.current = false;
+      breadcrumbIntervalMinutesRef.current = 5;
+      return false;
     }
   }, []);
+
+  const settingsLoadedForCurrentAccount = async () => {
+    const token = await SecureStore.getItemAsync("token");
+    const owner = settingsOwner(getTokenUserId(token), getTokenCompanyId(token));
+    return Boolean(owner) && owner === companySettingsOwnerRef.current;
+  };
 
   const fetchEmploymentDetailsForPunch = useCallback(async () => {
     try {
@@ -976,7 +1101,8 @@ export default function TimekeepingPunch() {
             setSessionElapsed(
               Math.floor((Date.now() - actualIn.getTime()) / 1000),
             );
-          } else if (data.type === "timeOut") {
+          } else if (data.type === "timeOut" || data.type === "autoClockOut") {
+            stopBreadcrumbTracking();
             resetAllStates();
           } else if (data.type === "coffeeBreakStart") {
             setIsCoffeeBreakActive(true);
@@ -1034,32 +1160,74 @@ export default function TimekeepingPunch() {
     refreshPendingOfflinePunches();
   }, [refreshPendingOfflinePunches]);
 
+  /**
+   * Sends queued punches in order. An action leaves the queue only when the
+   * server accepts or refuses it; another account's punches are never sent
+   * with this token.
+   */
+  const flushPendingPunches = useCallback(async () => {
+    if (flushingPunchesRef.current) return;
+    flushingPunchesRef.current = true;
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const userId = getTokenUserId(token);
+      if (!token || !userId) return;
+      const queue = await getPendingActions();
+      if (queue.length === 0) return;
+      const remaining = [];
+      let blocked = false;
+      for (const action of queue) {
+        const mine = !action.userId || action.userId === userId;
+        if (!mine || blocked || action.needsPhoto) {
+          if (mine && action.needsPhoto) blocked = true;
+          remaining.push(action);
+          continue;
+        }
+        let outcome = "done";
+        try {
+          const res = await postPunch(action.endpoint, {
+            token,
+            body: action.payload,
+            deviceId: action.deviceId,
+            answers: action.answers,
+            facePhoto: action.facePhotoUri ? { uri: action.facePhotoUri } : null,
+          });
+          await afterQueuedPunch(action, res, token);
+        } catch (err) {
+          outcome = settlePunchAction(
+            err?.response?.status,
+            err?.response?.data?.code,
+          );
+        }
+        if (outcome === "keep") {
+          blocked = true;
+          remaining.push(action);
+        } else if (outcome === "needsPhoto") {
+          blocked = true;
+          deletePunchPhoto(action.facePhotoUri);
+          remaining.push({ ...action, facePhotoUri: null, needsPhoto: true });
+        } else {
+          deletePunchPhoto(action.facePhotoUri);
+        }
+      }
+      await savePendingActions(remaining);
+      setPendingOfflinePunches(remaining);
+    } finally {
+      flushingPunchesRef.current = false;
+    }
+  }, []);
+
   // Offline sync
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener(async (state) => {
       setWifiConnected(state.isConnected && state.isInternetReachable);
       if (state.isConnected && state.isInternetReachable) {
-        const pending = await getPendingActions();
-        if (pending.length > 0) {
-          for (const action of pending) {
-            try {
-              const token = await SecureStore.getItemAsync("token");
-              const url = `${API_BASE_URL}/api/timelogs${action.endpoint}`;
-              await axios.post(url, action.payload, {
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${token}`,
-                },
-              });
-            } catch {}
-          }
-          await clearPendingActions();
-          setPendingOfflinePunches([]);
-        }
+        await flushPendingPunches();
+        await flushBreadcrumbQueue();
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [flushPendingPunches]);
 
   // Animate button press
   const animateButtonPress = (scaleRef) => {
@@ -1122,8 +1290,57 @@ export default function TimekeepingPunch() {
     });
   };
 
+  const applyBreadcrumbMode = async () => {
+    if (Platform.OS === "web" || !breadcrumbsEnabledRef.current) return;
+    await startBreadcrumbTracking();
+  };
+
+  const beginBreadcrumbSession = async ({ timeLogId, collectUntil }) => {
+    if (Platform.OS === "web" || !breadcrumbsEnabledRef.current) return;
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      const userId = getTokenUserId(token);
+      if (!userId) return;
+      const existing = await readBreadcrumbSession(userId);
+      await saveBreadcrumbSession({
+        userId,
+        timeLogId: timeLogId || null,
+        intervalMinutes: breadcrumbIntervalMinutesRef.current,
+        lastRecordedAt:
+          existing && existing.timeLogId === timeLogId
+            ? existing.lastRecordedAt
+            : null,
+        paused: false,
+        collectUntil: collectUntil || existing?.collectUntil || null,
+        clockOutQueued: false,
+      });
+      await applyBreadcrumbMode();
+    } catch (e) {
+      // The punch already landed. A tracking failure must not surface as "Punch failed".
+      devLog("Breadcrumb session failed:", e?.message || e);
+    }
+  };
+
+  const ensureBreadcrumbClockInAllowed = async () => {
+    if (Platform.OS === "web" || !breadcrumbsEnabledRef.current) return true;
+    let gate = await readBreadcrumbPermission();
+    if (!gate.ok) gate = await requestBreadcrumbPermission();
+    if (!gate.ok) {
+      Alert.alert(
+        "Location required",
+        gate.reason === "services"
+          ? "Turn on location services to clock in."
+          : "Allow location all the time. On iPhone, choose Always. On Android, choose Allow all the time.",
+      );
+      return false;
+    }
+    return true;
+  };
+
   // Time In/Out (with localTimestamp)
   const handlePunch = async () => {
+    if (punchInFlightRef.current) return;
+    punchInFlightRef.current = true;
     try {
       if (!companySettingsFetched) return;
       if (isLocationRestricted && !isWithinPunchLocation) {
@@ -1139,6 +1356,21 @@ export default function TimekeepingPunch() {
       }
       animateButtonPress(buttonScale);
       setLoading(true);
+
+      if (wifiConnected) await fetchCompanySettingsForPunch();
+      if (!(await settingsLoadedForCurrentAccount())) {
+        setLoading(false);
+        Alert.alert(
+          "Couldn't load company settings",
+          "Check your connection and try again.",
+        );
+        return;
+      }
+
+      if (!isTimeIn && !(await ensureBreadcrumbClockInAllowed())) {
+        setLoading(false);
+        return;
+      }
 
       // If user is location restricted, we DO NOT allow offline punching.
       if (isLocationRestricted && !wifiConnected) {
@@ -1199,10 +1431,42 @@ export default function TimekeepingPunch() {
 
       // If user is offline and plan=pro => store offline
       if (!wifiConnected) {
+        if (endpoint === "/time-out" && companySettingsTaskReportFormsRef.current) {
+          setLoading(false);
+          Alert.alert(
+            "End-of-shift form",
+            "You must be online to complete the end-of-shift form before clocking out.",
+          );
+          return;
+        }
         const offlinePayload =
           endpoint === "/time-in" ? baseTimeInPayload : payload;
-        await storePendingAction({ endpoint, payload: offlinePayload });
+        let queuedPayload = pickPunchBody(offlinePayload);
+        let facePhotoUri = null;
+        if (facePhotoRequiredFor(faceCaptureSettingsRef.current, endpoint)) {
+          const shot = await requestFacePhoto(endpoint === "/time-in" ? "in" : "out");
+          if (!shot) {
+            setLoading(false);
+            return;
+          }
+          facePhotoUri = keepPunchPhoto(shot.uri);
+          queuedPayload = withShot(queuedPayload, shot);
+          closeModal();
+        }
+        await storePendingAction({
+          id: newPendingActionId(),
+          userId: getTokenUserId(token),
+          endpoint,
+          deviceId: await readPunchDeviceId(),
+          payload: queuedPayload,
+          facePhotoUri,
+        });
         await refreshPendingOfflinePunches();
+        if (endpoint === "/time-in") {
+          await beginBreadcrumbSession({ timeLogId: null, collectUntil: null });
+        } else {
+          await queueBreadcrumbClockOut();
+        }
         Alert.alert("Offline Mode", "Your punch action is saved locally.");
 
         // Update local UI
@@ -1347,42 +1611,15 @@ export default function TimekeepingPunch() {
           }
         }
 
-        const url = `${API_BASE_URL}/api/timelogs/time-in`;
-        const body = timeInPayload;
         devLog("Punch request:", "/time-in", {
-          punchType: body.punchType,
-          localTimestamp: body.localTimestamp,
+          punchType: timeInPayload.punchType,
+          localTimestamp: timeInPayload.localTimestamp,
         });
-        try {
-          const res = await axios.post(url, body, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (res.status === 200 || res.status === 201) {
-            devLog("Punch success:", endpoint, res.data?.message);
-            Alert.alert("Success", res.data.message);
-            if (!isTimeIn) {
-              const now = new Date();
-              setIsTimeIn(true);
-              setPunchTime(now);
-              setSessionElapsed(0);
-              setIsCoffeeBreakActive(false);
-              setCoffeeBreakCount(0);
-              setCoffeeBreakStartTime(null);
-              setTotalCoffeeTime(0);
-              setIsLunchBreakActive(false);
-              setLunchBreakStartTime(null);
-              setTotalLunchTime(0);
-            } else {
-              resetAllStates();
-            }
-          }
-        } catch (err) {
-          if (err?.response?.data?.message) {
-            Alert.alert("Error", err.response.data.message);
-          } else {
-            Alert.alert("Error", "Punch failed. Please try again.");
-          }
-        }
+        await submitOnlineTimeInRef.current({
+          token,
+          body: timeInPayload,
+          holdsLock: true,
+        });
       }
     } catch (err) {
       console.error(
@@ -1390,8 +1627,12 @@ export default function TimekeepingPunch() {
         err?.message || err,
         err?.code || "",
       );
-      Alert.alert("Error", "Punch failed. Please try again.");
+      Alert.alert(
+        isTimeIn ? "Couldn't time out" : "Couldn't time in",
+        "Something went wrong. Please try again.",
+      );
     } finally {
+      punchInFlightRef.current = false;
       setLoading(false);
     }
   };
@@ -1546,6 +1787,7 @@ export default function TimekeepingPunch() {
 
   // Open modals
   const openModal = (type) => {
+    sheetShownRef.current = true;
     if (type === "network") setNetworkModalVisible(true);
     else if (type === "location") setLocationModalVisible(true);
     else if (type === "subscription") setSubscriptionModalVisible(true);
@@ -1577,6 +1819,10 @@ export default function TimekeepingPunch() {
 
   // Close modals
   const closeModal = () => {
+    sheetShownRef.current = false;
+    deletePunchPhoto(heldShotRef.current?.uri);
+    heldShotRef.current = null;
+    settleFacePhoto(null);
     Animated.parallel([
       Animated.timing(modalBgAnim, {
         toValue: 0,
@@ -1606,6 +1852,8 @@ export default function TimekeepingPunch() {
       setPendingClockOutConfirmPayload(null);
       setTaskReportVisible(false);
       setTaskReport(null);
+      setFacePhotoAction(null);
+      setFacePhotoBusy(false);
 
       const proceed = pendingClockOutAfterConfirmRef.current;
       pendingClockOutAfterConfirmRef.current = null;
@@ -1613,6 +1861,171 @@ export default function TimekeepingPunch() {
         executeOnlineClockOutRef.current(proceed);
       }
     });
+  };
+
+  /** Opens the punch camera and resolves with the stamped shot, or null on cancel. */
+  const requestFacePhoto = (action) =>
+    new Promise((resolve) => {
+      facePhotoResolveRef.current?.(null);
+      facePhotoResolveRef.current = resolve;
+      setFacePhotoAttempt((n) => n + 1);
+      setFacePhotoAction(action);
+      if (!sheetShownRef.current) openModal("facePhoto");
+    });
+
+  function settleFacePhoto(shot) {
+    const resolve = facePhotoResolveRef.current;
+    facePhotoResolveRef.current = null;
+    resolve?.(shot);
+  }
+
+  const askRetry = (message) =>
+    new Promise((resolve) => {
+      Alert.alert("Photo not saved", message || "Please try again.", [
+        { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+        { text: "Retry", onPress: () => resolve(true) },
+      ]);
+    });
+
+  /**
+   * Takes (or reuses) the face photo and sends the punch with it. A rejected
+   * image reopens the camera; a storage failure offers a retry with the same
+   * photo. Other errors are returned with the photo still held.
+   */
+  const runFacePunch = async (action, send) => {
+    let shot = heldShotRef.current ?? (await requestFacePhoto(action));
+    while (shot) {
+      heldShotRef.current = shot;
+      setFacePhotoBusy(true);
+      try {
+        const res = await send(shot);
+        deletePunchPhoto(shot.uri);
+        heldShotRef.current = null;
+        return { res };
+      } catch (err) {
+        const code = err?.response?.data?.code;
+        const message = err?.response?.data?.message;
+        if (code === "FACE_PHOTO_REQUIRED") {
+          deletePunchPhoto(shot.uri);
+          heldShotRef.current = null;
+          Alert.alert(
+            "Take the photo again",
+            message || "The photo couldn't be read.",
+          );
+          setFacePhotoBusy(false);
+          shot = await requestFacePhoto(action);
+          continue;
+        }
+        if (
+          code === "FACE_PHOTO_UPLOAD_FAILED" ||
+          code === "FACE_PHOTO_UNAVAILABLE"
+        ) {
+          setFacePhotoBusy(false);
+          if (await askRetry(message)) continue;
+          closeModal();
+          return { cancelled: true };
+        }
+        return { err };
+      } finally {
+        setFacePhotoBusy(false);
+      }
+    }
+    return { cancelled: true };
+  };
+
+  const markTimedIn = (timeInDate) => {
+    const when = timeInDate instanceof Date ? timeInDate : new Date();
+    setIsTimeIn(true);
+    setPunchTime(when);
+    setSessionElapsed(
+      Math.max(0, Math.floor((Date.now() - when.getTime()) / 1000)),
+    );
+    setIsCoffeeBreakActive(false);
+    setCoffeeBreakCount(0);
+    setCoffeeBreakStartTime(null);
+    setTotalCoffeeTime(0);
+    setIsLunchBreakActive(false);
+    setLunchBreakStartTime(null);
+    setTotalLunchTime(0);
+  };
+
+  const adoptActiveTimelog = async () => {
+    try {
+      const token = await SecureStore.getItemAsync("token");
+      if (!token) return null;
+      const res = await axios.get(`${API_BASE_URL}/api/timelogs/user`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+      const activeLog = rows.find((log) => log.status === true);
+      if (!activeLog) return null;
+      await fetchAndSyncActiveTimelog();
+      return activeLog;
+    } catch (e) {
+      devLog("Active timelog check failed:", e?.message || e);
+      return null;
+    }
+  };
+
+  /**
+   * One online Time In. The screen switches to clocked-in when the server
+   * accepts the punch. Tracking setup never adds a second dialog.
+   */
+  submitOnlineTimeInRef.current = async ({ token, body, holdsLock = false }) => {
+    if (!holdsLock) {
+      if (punchInFlightRef.current) return;
+      punchInFlightRef.current = true;
+      setLoading(true);
+    }
+    try {
+      const deviceId = await readPunchDeviceId();
+      let res;
+      if (facePhotoRequiredFor(faceCaptureSettingsRef.current, "/time-in")) {
+        const out = await runFacePunch("in", (shot) =>
+          postPunch("/time-in", {
+            token,
+            body: withShot(body, shot),
+            deviceId,
+            facePhoto: shot,
+          }),
+        );
+        if (out.cancelled) return;
+        if (out.err) throw out.err;
+        res = out.res;
+      } else {
+        res = await postPunch("/time-in", { token, body, deviceId });
+      }
+      if (res.status !== 200 && res.status !== 201) return;
+      devLog("Punch success:", "/time-in", res.data?.message);
+      markTimedIn(new Date());
+      await beginBreadcrumbSession({
+        timeLogId: res.data?.data?.id,
+        collectUntil: res.data?.data?.collectUntil,
+      });
+      if (sheetShownRef.current) closeModal();
+    } catch (err) {
+      const message = err?.response?.data?.message;
+      const activeLog = await adoptActiveTimelog();
+      if (activeLog) {
+        devLog("Time-in already recorded:", message || err?.message);
+        await beginBreadcrumbSession({
+          timeLogId: activeLog.id,
+          collectUntil: null,
+        });
+        if (sheetShownRef.current) closeModal();
+        return;
+      }
+      if (sheetShownRef.current) closeModal();
+      Alert.alert(
+        "Couldn't time in",
+        message || "Something went wrong. Please try again.",
+      );
+    } finally {
+      if (!holdsLock) {
+        punchInFlightRef.current = false;
+        setLoading(false);
+      }
+    }
   };
 
   const onPlReqDateModalChange = (event, selectedDate) => {
@@ -1994,6 +2407,7 @@ export default function TimekeepingPunch() {
           if (parsed.timeZone) {
             companySettingsTimeZoneRef.current = parsed.timeZone;
           }
+          companySettingsTaskReportFormsRef.current = taskReportFormsEnabled(raw);
         } catch (e) {
           devLog(
             "checkClockOutDeviation: company-settings fetch failed, using fallback threshold",
@@ -2193,6 +2607,7 @@ export default function TimekeepingPunch() {
           if (parsed.timeZone) {
             companySettingsTimeZoneRef.current = parsed.timeZone;
           }
+          companySettingsTaskReportFormsRef.current = taskReportFormsEnabled(raw);
         } catch (e) {
           devLog(
             "checkClockInEarly: company-settings fetch failed, using fallback threshold",
@@ -2364,6 +2779,11 @@ export default function TimekeepingPunch() {
       }
     }
     Alert.alert("Success", res?.data?.message || "Time out recorded successfully.");
+    try {
+      await stopBreadcrumbTracking();
+    } catch (e) {
+      devLog("stop breadcrumbs after clock-out failed", e?.message || e);
+    }
     resetAllStates();
     pendingClockOutAfterConfirmRef.current = null;
     setTaskReportVisible(false);
@@ -2371,68 +2791,157 @@ export default function TimekeepingPunch() {
     closeModal();
   }
 
+  async function showRequiredTaskReport(payload) {
+    const report = await fetchOpenTaskReport();
+    if (!report?.required) return false;
+    setPendingClockOutPayload(payload);
+    setTaskReport(report);
+    setClockOutDeviationModalVisible(false);
+    openModal("taskReport");
+    return true;
+  }
+
+  async function retakeQueuedPhoto(actionId) {
+    const queue = await getPendingActions();
+    const action = queue.find((a) => a.id === actionId);
+    if (!action) return;
+    const shot = await requestFacePhoto(action.endpoint === "/time-in" ? "in" : "out");
+    if (!shot) return;
+    const facePhotoUri = keepPunchPhoto(shot.uri);
+    closeModal();
+    const fresh = await getPendingActions();
+    await savePendingActions(
+      fresh.map((a) =>
+        a.id === actionId ? { ...a, facePhotoUri, needsPhoto: false } : a,
+      ),
+    );
+    await refreshPendingOfflinePunches();
+    if (wifiConnected) await flushPendingPunches();
+  }
+
+  /** Network dropped after the form was answered: queue answers and photo together. */
+  async function queueClockOutFromOnline(payload, answers) {
+    const token = payload.token ?? (await SecureStore.getItemAsync("token"));
+    const shot = heldShotRef.current;
+    const facePhotoUri = shot ? keepPunchPhoto(shot.uri) : null;
+    heldShotRef.current = null;
+    await storePendingAction({
+      id: newPendingActionId(),
+      userId: getTokenUserId(token),
+      endpoint: "/time-out",
+      deviceId: await readPunchDeviceId(),
+      payload: shot ? withShot(pickPunchBody(payload), shot) : pickPunchBody(payload),
+      answers,
+      facePhotoUri,
+    });
+    await refreshPendingOfflinePunches();
+    await queueBreadcrumbClockOut();
+    pendingClockOutAfterConfirmRef.current = null;
+    closeModal();
+    resetAllStates();
+    Alert.alert(
+      "Offline Mode",
+      "Your clock-out is saved and will send when you're back online.",
+    );
+  }
+
+  async function sendClockOut(payload, { answers = null } = {}) {
+    const token = payload.token ?? (await SecureStore.getItemAsync("token"));
+    const deviceId = await readPunchDeviceId();
+    if (!facePhotoRequiredFor(faceCaptureSettingsRef.current, "/time-out")) {
+      const res = await postPunch("/time-out", {
+        token,
+        body: payload,
+        deviceId,
+        answers,
+      });
+      await finishClockOutSuccess(payload, res);
+      return;
+    }
+    const out = await runFacePunch("out", (shot) =>
+      postPunch("/time-out", {
+        token,
+        body: withShot(payload, shot),
+        deviceId,
+        answers,
+        facePhoto: shot,
+      }),
+    );
+    if (out.cancelled) return;
+    if (out.err) {
+      const canQueue =
+        !out.err.response &&
+        (subscriptionPlan || "").toLowerCase() === "pro" &&
+        !isLocationRestricted;
+      if (canQueue) {
+        await queueClockOutFromOnline(payload, answers);
+        return;
+      }
+      throw out.err;
+    }
+    await finishClockOutSuccess(payload, out.res);
+  }
+
+  async function handleClockOutError(err, payload) {
+    const code = err?.response?.data?.code;
+    const message = err?.response?.data?.message;
+    if (code === "TASK_REPORT_FORMS_REQUIRED") {
+      companySettingsTaskReportFormsRef.current = true;
+      setFacePhotoAction(null);
+      try {
+        if (await showRequiredTaskReport(payload)) return;
+      } catch (lookupErr) {
+        devLog(
+          "open task report after clock-out rejection failed",
+          lookupErr?.response?.data?.message || lookupErr?.message,
+        );
+      }
+      Alert.alert(
+        "End-of-shift form",
+        message || "Finish the end-of-shift form before clocking out.",
+      );
+      return;
+    }
+    if (code === "INVALID_ANSWER" || code === "REQUIRED_ANSWER") {
+      setFacePhotoAction(null);
+      Alert.alert("End-of-shift form", message || "Check your answers.");
+      return;
+    }
+    if (sheetShownRef.current) closeModal();
+    Alert.alert("Error", message || "Punch failed. Please try again.");
+  }
+
   async function beginClockOut(payload) {
     setLoading(true);
     try {
-      // Only an assigned form blocks clock-out. A failed lookup (no route, no
-      // assignment, or the company flag is on for someone else) falls through
-      // to the normal time-out. The server rejects that request only when a
-      // form actually applies.
-      let report = null;
       if (companySettingsTaskReportFormsRef.current) {
         try {
-          report = await fetchOpenTaskReport();
+          if (await showRequiredTaskReport(payload)) return;
         } catch (lookupErr) {
-          devLog(
-            "open task report lookup failed; clocking out without a form",
-            lookupErr?.response?.status,
-            lookupErr?.response?.data?.message || lookupErr?.message,
+          Alert.alert(
+            "End-of-shift form",
+            lookupErr?.response?.data?.message ||
+              "You must be online to complete the end-of-shift form before clocking out.",
           );
+          return;
         }
       }
-      if (report?.required) {
-        setPendingClockOutPayload(payload);
-        setTaskReport(report);
-        setClockOutDeviationModalVisible(false);
-        openModal("taskReport");
-        return;
-      }
-      const res = await postClockOutJson(payload);
-      if (res.status === 200 || res.status === 201) {
-        await finishClockOutSuccess(payload, res);
-      }
+      await sendClockOut(payload);
     } catch (err) {
-      if (err?.response?.data?.code === "TASK_REPORT_FORMS_REQUIRED") {
-        Alert.alert(
-          "End-of-shift form",
-          err?.response?.data?.message ||
-            "Finish the end-of-shift form, including the face photo, before clocking out.",
-        );
-        return;
-      }
-      Alert.alert(
-        "Error",
-        err?.response?.data?.message || "Punch failed. Please try again.",
-      );
+      await handleClockOutError(err, payload);
     } finally {
       setLoading(false);
     }
   }
 
-  async function submitTaskReportClockOut({ answers, facePhoto }) {
+  async function submitTaskReportClockOut({ answers }) {
     const payload = pendingClockOutPayload;
     if (!payload) return;
     setTaskReportSubmitting(true);
     try {
-      const res = await postClockOutWithReport(payload, { answers, facePhoto });
-      if (res.status === 200 || res.status === 201) {
-        await finishClockOutSuccess(payload, res);
-      }
+      await sendClockOut(payload, { answers });
     } catch (err) {
-      Alert.alert(
-        "Error",
-        err?.response?.data?.message || "Punch failed. Please try again.",
-      );
+      await handleClockOutError(err, payload);
     } finally {
       setTaskReportSubmitting(false);
     }
@@ -2543,43 +3052,76 @@ export default function TimekeepingPunch() {
     }
   };
 
+  const clockSheetFitsContent =
+    facePhotoAction !== null ||
+    taskReportVisible ||
+    clockOutConfirmModalVisible ||
+    clockInEarlyModalVisible ||
+    noScheduledShiftClockInModalVisible ||
+    clockOutDeviationModalVisible;
+  const sheetBottomPadding =
+    Platform.OS === "android" ? Math.max(insets.bottom, 28) + 8 : 0;
+  // Handle row is 12pt above and below a 4pt bar. Cap the body there so the
+  // sheet grows with its content and scrolls only past the screen.
+  const sheetContentMaxHeight = Math.max(
+    240,
+    height - insets.top - 28 - sheetBottomPadding,
+  );
+
   // Modal content
   const renderModalContent = () => {
+    const facePunchSheet = facePhotoAction ? (
+      <FacePunchSheet
+        key={facePhotoAttempt}
+        action={facePhotoAction}
+        timeZone={companySettingsTimeZoneRef.current}
+        busy={facePhotoBusy}
+        onConfirm={settleFacePhoto}
+        onCancel={closeModal}
+      />
+    ) : null;
     if (taskReportVisible) {
       return (
-        <View style={{ maxHeight: height * 0.92 }}>
-          {taskReport ? (
-            <TaskReportFormSheet
-              report={taskReport}
-              timeZone={companySettingsTimeZoneRef.current}
-              submitting={taskReportSubmitting}
-              onCancel={() => {
-                pendingClockOutAfterConfirmRef.current = null;
-                closeModal();
-              }}
-              onSubmit={submitTaskReportClockOut}
-            />
-          ) : (
-            <View className="px-6 py-8 items-center">
-              <ActivityIndicator color="#0f172a" />
-            </View>
-          )}
+        <View>
+          {facePunchSheet}
+          <View style={facePhotoAction ? { display: "none" } : undefined}>
+            {taskReport ? (
+              <TaskReportFormSheet
+                report={taskReport}
+                timeZone={companySettingsTimeZoneRef.current}
+                maxHeight={sheetContentMaxHeight}
+                submitting={taskReportSubmitting}
+                onCancel={() => {
+                  pendingClockOutAfterConfirmRef.current = null;
+                  closeModal();
+                }}
+                onSubmit={submitTaskReportClockOut}
+              />
+            ) : (
+              <View className="px-6 py-8 items-center">
+                <ActivityIndicator color="#0f172a" />
+              </View>
+            )}
+          </View>
         </View>
       );
     }
+    if (facePunchSheet) return facePunchSheet;
     if (clockOutConfirmModalVisible) {
       const s = clockOutConfirmSchedule;
       return (
         <ScrollView
-          style={{ maxHeight: height * 0.72 }}
+          style={{ maxHeight: sheetContentMaxHeight }}
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
             paddingBottom: modalContentBottomPadding,
           }}
+          bounces={false}
+          alwaysBounceVertical={false}
+          overScrollMode="never"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
-          bounces
         >
           <View className="items-center mb-6">
             <View className="w-16 h-16 rounded-full bg-slate-100 items-center justify-center mb-4">
@@ -2699,15 +3241,17 @@ export default function TimekeepingPunch() {
       const d = clockInEarlyDetails;
       return (
         <ScrollView
-          style={{ maxHeight: height * 0.72 }}
+          style={{ maxHeight: sheetContentMaxHeight }}
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
             paddingBottom: modalContentBottomPadding,
           }}
+          bounces={false}
+          alwaysBounceVertical={false}
+          overScrollMode="never"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
-          bounces
         >
           <View className="items-center mb-6">
             <View className="w-16 h-16 rounded-full bg-amber-100 items-center justify-center mb-4">
@@ -2781,39 +3325,16 @@ export default function TimekeepingPunch() {
                 const pending = pendingClockInPayload;
                 if (pending) {
                   devLog("Modal: Regular punch clock-in (REGULAR)");
-                  try {
-                    const res = await axios.post(
-                      `${API_BASE_URL}/api/timelogs/time-in`,
-                      {
-                        deviceInfo: pending.deviceInfo,
-                        location: pending.location,
-                        localTimestamp: pending.localTimestamp,
-                        punchType: "REGULAR",
-                      },
-                      { headers: { Authorization: `Bearer ${pending.token}` } },
-                    );
-                    if (res.status === 200 || res.status === 201) {
-                      Alert.alert("Success", res.data.message);
-                      const now = new Date();
-                      setIsTimeIn(true);
-                      setPunchTime(now);
-                      setSessionElapsed(0);
-                      setIsCoffeeBreakActive(false);
-                      setCoffeeBreakCount(0);
-                      setCoffeeBreakStartTime(null);
-                      setTotalCoffeeTime(0);
-                      setIsLunchBreakActive(false);
-                      setLunchBreakStartTime(null);
-                      setTotalLunchTime(0);
-                      closeModal();
-                    }
-                  } catch (err) {
-                    Alert.alert(
-                      "Error",
-                      err?.response?.data?.message ||
-                        "Punch failed. Please try again.",
-                    );
-                  }
+                  if (!(await ensureBreadcrumbClockInAllowed())) return;
+                  await submitOnlineTimeInRef.current({
+                    token: pending.token,
+                    body: {
+                      deviceInfo: pending.deviceInfo,
+                      location: pending.location,
+                      localTimestamp: pending.localTimestamp,
+                      punchType: "REGULAR",
+                    },
+                  });
                   return;
                 }
                 closeModal();
@@ -2834,39 +3355,16 @@ export default function TimekeepingPunch() {
                 const pending = pendingClockInPayload;
                 if (pending) {
                   devLog("Modal: Driver/Aide clock-in (DRIVER_AIDE_AM)");
-                  try {
-                    const res = await axios.post(
-                      `${API_BASE_URL}/api/timelogs/time-in`,
-                      {
-                        deviceInfo: pending.deviceInfo,
-                        location: pending.location,
-                        localTimestamp: pending.localTimestamp,
-                        punchType: "DRIVER_AIDE_AM",
-                      },
-                      { headers: { Authorization: `Bearer ${pending.token}` } },
-                    );
-                    if (res.status === 200 || res.status === 201) {
-                      Alert.alert("Success", res.data.message);
-                      const now = new Date();
-                      setIsTimeIn(true);
-                      setPunchTime(now);
-                      setSessionElapsed(0);
-                      setIsCoffeeBreakActive(false);
-                      setCoffeeBreakCount(0);
-                      setCoffeeBreakStartTime(null);
-                      setTotalCoffeeTime(0);
-                      setIsLunchBreakActive(false);
-                      setLunchBreakStartTime(null);
-                      setTotalLunchTime(0);
-                      closeModal();
-                    }
-                  } catch (err) {
-                    Alert.alert(
-                      "Error",
-                      err?.response?.data?.message ||
-                        "Punch failed. Please try again.",
-                    );
-                  }
+                  if (!(await ensureBreadcrumbClockInAllowed())) return;
+                  await submitOnlineTimeInRef.current({
+                    token: pending.token,
+                    body: {
+                      deviceInfo: pending.deviceInfo,
+                      location: pending.location,
+                      localTimestamp: pending.localTimestamp,
+                      punchType: "DRIVER_AIDE_AM",
+                    },
+                  });
                   return;
                 }
                 closeModal();
@@ -2907,52 +3405,31 @@ export default function TimekeepingPunch() {
           );
           return;
         }
-        try {
-          const reqBody = {
+        if (!(await ensureBreadcrumbClockInAllowed())) return;
+        await submitOnlineTimeInRef.current({
+          token: pending.token,
+          body: {
             deviceInfo: pending.deviceInfo,
             location: pending.location,
             localTimestamp: pending.localTimestamp,
             punchType: noScheduledShiftClockInPunchType,
-          };
-          const res = await axios.post(
-            `${API_BASE_URL}/api/timelogs/time-in`,
-            reqBody,
-            { headers: { Authorization: `Bearer ${pending.token}` } },
-          );
-          if (res.status === 200 || res.status === 201) {
-            Alert.alert("Success", res.data.message);
-            const now = new Date();
-            setIsTimeIn(true);
-            setPunchTime(now);
-            setSessionElapsed(0);
-            setIsCoffeeBreakActive(false);
-            setCoffeeBreakCount(0);
-            setCoffeeBreakStartTime(null);
-            setTotalCoffeeTime(0);
-            setIsLunchBreakActive(false);
-            setLunchBreakStartTime(null);
-            setTotalLunchTime(0);
-            closeModal();
-          }
-        } catch (err) {
-          Alert.alert(
-            "Error",
-            err?.response?.data?.message || "Punch failed. Please try again.",
-          );
-        }
+          },
+        });
       };
 
       return (
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ width: "100%", flex: 1 }}
+          style={{ width: "100%" }}
         >
           <ScrollView
-            style={{ flex: 1 }}
+            style={{ maxHeight: sheetContentMaxHeight }}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
             showsVerticalScrollIndicator={false}
             bounces={false}
+            alwaysBounceVertical={false}
+            overScrollMode="never"
             contentContainerStyle={{
               paddingHorizontal: 24,
               paddingTop: 4,
@@ -3060,15 +3537,17 @@ export default function TimekeepingPunch() {
       const d = clockOutDeviationDetails;
       return (
         <ScrollView
-          style={{ maxHeight: height * 0.72 }}
+          style={{ maxHeight: sheetContentMaxHeight }}
           contentContainerStyle={{
             paddingHorizontal: 24,
             paddingTop: 8,
             paddingBottom: modalContentBottomPadding,
           }}
+          bounces={false}
+          alwaysBounceVertical={false}
+          overScrollMode="never"
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator
-          bounces
         >
           {/* Header Section */}
           <View className="items-center mb-6">
@@ -3567,6 +4046,16 @@ export default function TimekeepingPunch() {
                           .join(" · ")}
                       </Text>
                     )}
+                    {action?.needsPhoto ? (
+                      <TouchableOpacity
+                        onPress={() => retakeQueuedPhoto(action.id)}
+                        className="mt-2 py-2 rounded-lg items-center bg-amber-500"
+                      >
+                        <Text className="text-white font-semibold text-sm">
+                          Photo needed: retake
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
                 );
               })}
@@ -4314,6 +4803,7 @@ export default function TimekeepingPunch() {
         clockOutDeviationModalVisible ||
         clockOutConfirmModalVisible ||
         taskReportVisible ||
+        facePhotoAction !== null ||
         clockInEarlyModalVisible ||
         noScheduledShiftClockInModalVisible) && (
         <Modal
@@ -4345,8 +4835,8 @@ export default function TimekeepingPunch() {
                 backgroundColor: "white",
                 borderTopLeftRadius: 10,
                 borderTopRightRadius: 10,
-                minHeight: taskReportVisible ? height * 0.7 : height * 0.65,
-                maxHeight: taskReportVisible ? height * 0.92 : height * 0.8,
+                minHeight: clockSheetFitsContent ? undefined : height * 0.65,
+                maxHeight: clockSheetFitsContent ? height - insets.top : height * 0.8,
                 paddingBottom: modalSheetBottomPadding,
               }}
             >

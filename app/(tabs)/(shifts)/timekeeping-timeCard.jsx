@@ -170,6 +170,39 @@ const TimeLogContestedBadge = ({ style }) => (
   </View>
 );
 
+const ReportDueBadge = ({ style }) => (
+  <View
+    style={[
+      {
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: "flex-start",
+        backgroundColor: "#fffbeb",
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: "#fcd34d",
+      },
+      style,
+    ]}
+    accessibilityRole="text"
+    accessibilityLabel="Report not submitted"
+  >
+    <Ionicons name="document-text-outline" size={14} color="#b45309" />
+    <Text
+      style={{
+        color: "#b45309",
+        fontSize: 12,
+        fontWeight: "700",
+        marginLeft: 6,
+      }}
+    >
+      Report due
+    </Text>
+  </View>
+);
+
 const deviceLine = (node) => {
   if (!node || typeof node !== "object") return "—";
   const brand = node.brand ?? node.manufacturer ?? "";
@@ -1252,6 +1285,7 @@ const TimekeepingTimeCard = () => {
     const punchLabel = punchTypeLabel(item);
     const isLastInDay = indexInDay === dayLogCount - 1;
     const logContested = isTimeLogContested(item, contestedTimeLogIds);
+    const reportDue = Boolean(pendingReports[getTimeLogId(item)]);
 
     return (
       <Animated.View
@@ -1277,7 +1311,7 @@ const TimekeepingTimeCard = () => {
             }}
             activeOpacity={0.92}
             accessibilityRole="button"
-            accessibilityLabel={`Shift ${punchLabel}, ${formatHoursDecimal(netH)}`}
+            accessibilityLabel={`Shift ${punchLabel}, ${formatHoursDecimal(netH)}${reportDue ? ", report not submitted" : ""}`}
             style={{
               paddingVertical: 16,
               paddingHorizontal: 14,
@@ -1332,6 +1366,7 @@ const TimekeepingTimeCard = () => {
                     </Text>
                   </View>
                   {logContested ? <TimeLogContestedBadge /> : null}
+                  {reportDue ? <ReportDueBadge /> : null}
                 </View>
               </View>
               <View style={{ alignItems: "flex-end", flexShrink: 0 }}>
@@ -1525,11 +1560,11 @@ const TimekeepingTimeCard = () => {
     }
   }
 
-  async function submitAddReport({ answers, facePhoto }) {
+  async function submitAddReport({ answers }) {
     if (!addReport?.timeLogId) return;
     setAddReportSubmitting(true);
     try {
-      await submitClosedTaskReport(addReport.timeLogId, { answers, facePhoto });
+      await submitClosedTaskReport(addReport.timeLogId, { answers });
       const savedId = addReport.timeLogId;
       setPendingReports((prev) => {
         const next = { ...prev };
@@ -1572,6 +1607,7 @@ const TimekeepingTimeCard = () => {
         await persistContestedTimeLogIds(merged);
         setContestedTimeLogIds(merged);
         setTimeLogs(tagTimeLogsWithContestedState(sortedLogs, merged));
+        setLoading(false);
         try {
           const pending = await fetchPendingTaskReports();
           if (!pending?.enabled) {
@@ -1684,6 +1720,7 @@ const TimekeepingTimeCard = () => {
       setModalVisible(false);
       setSelectedLog(null);
       setModalMode("details");
+      setAddReport(null);
     });
   };
 
@@ -2033,6 +2070,11 @@ const TimekeepingTimeCard = () => {
                     ) : null}
                     {logContested ? (
                       <TimeLogContestedBadge
+                        style={{ marginRight: 8, marginBottom: 6 }}
+                      />
+                    ) : null}
+                    {complete && pendingReports[getTimeLogId(log)] ? (
+                      <ReportDueBadge
                         style={{ marginRight: 8, marginBottom: 6 }}
                       />
                     ) : null}
@@ -2679,6 +2721,9 @@ const TimekeepingTimeCard = () => {
 
                 {groupedLogs.map((group) => {
                   const expanded = openGroupKey === group.key;
+                  const reportDue =
+                    !expanded &&
+                    group.logs.some((log) => pendingReports[getTimeLogId(log)]);
                   return (
                   <View
                     key={group.key}
@@ -2696,7 +2741,7 @@ const TimekeepingTimeCard = () => {
                       activeOpacity={0.85}
                       accessibilityRole="button"
                       accessibilityState={{ expanded }}
-                      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${group.dateLabel}`}
+                      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${group.dateLabel}${reportDue ? ", report due" : ""}`}
                       style={{
                         flexDirection: "row",
                         flexWrap: "wrap",
@@ -2736,6 +2781,14 @@ const TimekeepingTimeCard = () => {
                         >
                           {group.dateLabel}
                         </Text>
+                        {reportDue ? (
+                          <Ionicons
+                            name="document-text-outline"
+                            size={16}
+                            color="#b45309"
+                            accessibilityLabel="Report due"
+                          />
+                        ) : null}
                         <View
                           style={{
                             flexDirection: "row",
@@ -3438,7 +3491,7 @@ const TimekeepingTimeCard = () => {
                 backgroundColor: "white",
                 borderTopLeftRadius: 10,
                 borderTopRightRadius: 10,
-                ...(modalMode === "details"
+                ...(modalMode === "details" || addReport
                   ? {
                       height: Math.min(height * 0.9, height - insets.top - 32),
                       maxHeight: height * 0.92,
@@ -3460,7 +3513,20 @@ const TimekeepingTimeCard = () => {
               </View>
 
               <View style={{ flex: 1, minHeight: 0 }}>
-                {renderModalContent()}
+                {addReport ? (
+                  <TaskReportFormSheet
+                    report={addReport}
+                    timeZone={companyTimeZone}
+                    notice={LATE_NOTICE}
+                    submitting={addReportSubmitting}
+                    onCancel={() => {
+                      if (!addReportSubmitting) setAddReport(null);
+                    }}
+                    onSubmit={submitAddReport}
+                  />
+                ) : (
+                  renderModalContent()
+                )}
               </View>
             </Animated.View>
           </View>
@@ -3468,55 +3534,6 @@ const TimekeepingTimeCard = () => {
       )}
 
       {renderCtAndroidPicker()}
-
-      <Modal
-        visible={Boolean(addReport)}
-        transparent
-        animationType="slide"
-        onRequestClose={() => {
-          if (!addReportSubmitting) setAddReport(null);
-        }}
-      >
-        <View style={{ flex: 1, justifyContent: "flex-end" }}>
-          <TouchableOpacity
-            style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)" }}
-            activeOpacity={1}
-            onPress={() => {
-              if (!addReportSubmitting) setAddReport(null);
-            }}
-          />
-          <View
-            style={{
-              backgroundColor: "#ffffff",
-              borderTopLeftRadius: 10,
-              borderTopRightRadius: 10,
-              maxHeight: height * 0.92,
-              paddingTop: 12,
-            }}
-          >
-            <View style={{ alignItems: "center", paddingBottom: 8 }}>
-              <View
-                style={{
-                  width: 40,
-                  height: 4,
-                  borderRadius: 2,
-                  backgroundColor: "#e2e8f0",
-                }}
-              />
-            </View>
-            {addReport ? (
-              <TaskReportFormSheet
-                report={addReport}
-                timeZone={companyTimeZone}
-                notice={LATE_NOTICE}
-                submitting={addReportSubmitting}
-                onCancel={() => setAddReport(null)}
-                onSubmit={submitAddReport}
-              />
-            ) : null}
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 };
