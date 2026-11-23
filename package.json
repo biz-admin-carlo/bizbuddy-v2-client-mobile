@@ -1,7 +1,7 @@
 {
   "name": "client",
   "main": "expo-router/entry",
-  "version": "1.0.32",
+  "version": "1.0.33",
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
@@ -49,6 +49,7 @@
     "react-native-reanimated": "^4.1.0",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
+    "react-native-svg": "15.12.1",
     "react-native-user-inactivity": "^1.2.0",
     "react-native-view-shot": "^4.0.3",
     "react-native-web": "^0.21.0",

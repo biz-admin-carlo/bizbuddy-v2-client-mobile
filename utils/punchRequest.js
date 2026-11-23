@@ -29,5 +29,9 @@ export async function postPunch(endpoint, { token, body, deviceId, answers, face
     form.append(name, value);
   }
   form.append("facePhoto", { uri: facePhoto.uri, name: "face.jpg", type: "image/jpeg" });
-  return axios.post(url, form, options);
+  // Android rejects a multipart body unless the request says multipart; the native layer adds the boundary.
+  return axios.post(url, form, {
+    ...options,
+    headers: { ...headers, "Content-Type": "multipart/form-data" },
+  });
 }

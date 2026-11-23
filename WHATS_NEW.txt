@@ -1,7 +1,9 @@
-BizBuddy 1.0.32
-Android version code: 43
-iOS build: 36
+BizBuddy 1.0.33
+Android version code: 44
+iOS build: 37
 
-Employees, admins, and superadmins can add the US bank account used for their pay.
+When your company turns on face photos, you take a quick selfie to clock out, and to clock in if your company asks for it. An outline on the camera helps you line up your face, and the info button explains what the photo is for.
 
-The Payroll tab checks whether a payout account is already set up before showing the form.
+When your company assigns an end-of-shift form, you answer it when you clock out.
+
+When your company turns on location logging, the app records your location during your shift, including breaks, and stops at clock-out.

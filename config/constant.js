@@ -26,7 +26,7 @@ export const requestPunchLogDeletePath = (id) =>
 /** POST — contest an existing time log (corrected clock-in/out as UTC ISO with Z). */
 export const CONTEST_POLICY_SUBMIT_PATH = "/api/contest-policy/submit";
 
-export const VERSION = "1.0.32";
+export const VERSION = "1.0.33";
 
 // ---- Timekeeping: deviation thresholds ----
 // Clock-out: minutes after shift end AND before next start (companies in CLOCK_OUT_DEVIATION_COMPANY_IDS).

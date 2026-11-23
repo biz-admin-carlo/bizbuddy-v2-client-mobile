@@ -19,7 +19,7 @@
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.32</string>
+    <string>1.0.33</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleURLTypes</key>
@@ -39,7 +39,7 @@
       </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>36</string>
+    <string>37</string>
     <key>LSApplicationQueriesSchemes</key>
     <array>
       <string>mailto</string>
@@ -56,15 +56,15 @@
       <true/>
     </dict>
     <key>NSCameraUsageDescription</key>
-    <string>BizBuddy uses the camera so you can take a face photo when you clock in or clock out. The photo is stamped with the time and place of the capture.</string>
+    <string>BizBuddy uses the camera so you can take a face photo when you clock in or clock out.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to use Face ID</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your location</string>
+    <string>BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.</string>
     <key>NSLocationAlwaysUsageDescription</key>
-    <string>We require your location to verify work shift activities even when the app is not active.</string>
+    <string>BizBuddy records your location during an open shift, at the interval your company set, including while the app is in the background. Recording stops when you clock out.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>BizBuddy requires location access to accurately track time-in, time-out, and breaks. We only use your location at the time of punching in or out.</string>
+    <string>BizBuddy records your location during an open shift, at the interval your company set, including while you are using the app. Recording stops when you clock out.</string>
     <key>NSUserActivityTypes</key>
     <array>
       <string>$(PRODUCT_BUNDLE_IDENTIFIER).expo.index_route</string>
@@ -73,10 +73,6 @@
     <string>BizBuddy sends notifications to remind you about work schedules, break times, and important updates.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
-    <key>UIBackgroundModes</key>
-    <array>
-      <string>location</string>
-    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
       <key>UIApplicationSupportsMultipleScenes</key>
@@ -94,6 +90,11 @@
         </array>
       </dict>
     </dict>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>location</string>
+      <string>fetch</string>
+    </array>
     <key>UILaunchStoryboardName</key>
     <string>SplashScreen</string>
     <key>UIRequiredDeviceCapabilities</key>

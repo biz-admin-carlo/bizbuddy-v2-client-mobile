@@ -58,6 +58,7 @@ import {
 import { parseApproversPayload } from "../../../utils/approversPayload";
 import { getTokenCompanyId, getTokenUserId } from "../../../utils/jwtTokenUtils";
 import {
+  confirmBreadcrumbDisclosure,
   readBreadcrumbPermission,
   requestBreadcrumbPermission,
 } from "../../../utils/breadcrumbPermission";
@@ -1324,7 +1325,13 @@ export default function TimekeepingPunch() {
   const ensureBreadcrumbClockInAllowed = async () => {
     if (Platform.OS === "web" || !breadcrumbsEnabledRef.current) return true;
     let gate = await readBreadcrumbPermission();
-    if (!gate.ok) gate = await requestBreadcrumbPermission();
+    if (!gate.ok && gate.reason === "permission") {
+      const agreed = await confirmBreadcrumbDisclosure(
+        breadcrumbIntervalMinutesRef.current,
+      );
+      if (!agreed) return false;
+      gate = await requestBreadcrumbPermission();
+    }
     if (!gate.ok) {
       Alert.alert(
         "Location required",
@@ -2005,6 +2012,12 @@ export default function TimekeepingPunch() {
       if (sheetShownRef.current) closeModal();
     } catch (err) {
       const message = err?.response?.data?.message;
+      devLog("Time-in failed:", {
+        message: err?.message,
+        code: err?.code,
+        status: err?.response?.status,
+        data: err?.response?.data,
+      });
       const activeLog = await adoptActiveTimelog();
       if (activeLog) {
         devLog("Time-in already recorded:", message || err?.message);

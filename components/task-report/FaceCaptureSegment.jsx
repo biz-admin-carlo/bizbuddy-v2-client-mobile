@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Image, Linking, Text, TouchableOpacity, View } from "react-native";
 import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
+import Svg, { Path } from "react-native-svg";
 import { buildInscription } from "../../utils/taskReportWatermark";
 import {
   deletePunchPhoto,
@@ -39,6 +40,77 @@ function CameraUnavailable() {
   );
 }
 
+const CAMERA_HEIGHT = 280;
+
+const HEAD_AND_SHOULDERS = [
+  "M 20 285",
+  "C 20 240, 60 225, 118 215",
+  "L 122 196",
+  "C 92 180, 80 140, 80 110",
+  "C 80 60, 112 30, 150 30",
+  "C 188 30, 220 60, 220 110",
+  "C 220 140, 208 180, 178 196",
+  "L 182 215",
+  "C 240 225, 280 240, 280 285",
+].join(" ");
+
+function HeadOutline() {
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 1,
+        elevation: 1,
+      }}
+    >
+      <Svg
+        width="100%"
+        height="100%"
+        viewBox={`0 0 300 ${CAMERA_HEIGHT}`}
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <Path
+          d={HEAD_AND_SHOULDERS}
+          fill="none"
+          stroke="rgba(255,255,255,0.9)"
+          strokeWidth={3}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </Svg>
+    </View>
+  );
+}
+
+const INFO_POINTS = [
+  "It confirms that you are the person clocking in or out.",
+  "Your location, date, and time are printed on the photo.",
+  "Only your company's supervisors and admins can see it.",
+  "It is stored privately and deleted after 90 days.",
+  "It is a photo only. The app does not scan or recognize faces.",
+];
+
+function FacePhotoInfo() {
+  return (
+    <View className="bg-blue-50 rounded-2xl p-4 mb-3 border border-blue-100">
+      <Text className="text-sm font-semibold text-blue-950 mb-2">
+        Why a face photo?
+      </Text>
+      {INFO_POINTS.map((point) => (
+        <View key={point} className="flex-row mb-1">
+          <Text className="text-sm text-blue-950 mr-2">•</Text>
+          <Text className="text-sm text-blue-950 flex-1">{point}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 export default function FaceCaptureSegment(props) {
   if (!CameraView || !useCameraPermissions) return <CameraUnavailable />;
   return <FaceCaptureReady {...props} />;
@@ -52,6 +124,7 @@ function FaceCaptureReady({ timeZone, onChange, action = "out" }) {
   const [shot, setShot] = useState(null);
   const [blockReason, setBlockReason] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
   const verb = action === "in" ? "clock in" : "clock out";
 
   useEffect(() => () => deletePunchPhoto(rawUriRef.current), []);
@@ -171,10 +244,23 @@ function FaceCaptureReady({ timeZone, onChange, action = "out" }) {
         <View className="w-8 h-8 rounded-full bg-blue-100 items-center justify-center mr-3">
           <Ionicons name="camera-outline" size={18} color="#3b82f6" />
         </View>
-        <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+        <Text className="text-sm font-semibold text-slate-500 uppercase tracking-wide flex-1">
           Face check
         </Text>
+        <TouchableOpacity
+          onPress={() => setShowInfo((v) => !v)}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel={showInfo ? "Hide why a face photo is needed" : "Why a face photo is needed"}
+        >
+          <Ionicons
+            name={showInfo ? "information-circle" : "information-circle-outline"}
+            size={24}
+            color="#3b82f6"
+          />
+        </TouchableOpacity>
       </View>
+      {showInfo ? <FacePhotoInfo /> : null}
       {shot ? (
         <View
           ref={shotRef}
@@ -183,7 +269,7 @@ function FaceCaptureReady({ timeZone, onChange, action = "out" }) {
         >
           <Image
             source={{ uri: shot.uri }}
-            style={{ width: "100%", height: 280 }}
+            style={{ width: "100%", height: CAMERA_HEIGHT }}
           />
           <Text
             style={{
@@ -203,13 +289,20 @@ function FaceCaptureReady({ timeZone, onChange, action = "out" }) {
           </Text>
         </View>
       ) : (
-        <CameraView ref={cameraRef} facing="front" style={{ height: 280 }} />
+        <View style={{ height: CAMERA_HEIGHT }}>
+          <CameraView ref={cameraRef} facing="front" style={{ flex: 1 }} />
+          <HeadOutline />
+        </View>
       )}
       {blockReason ? (
         <Text className="text-sm text-red-600 mt-2">{blockReason}</Text>
+      ) : shot ? (
+        <Text className="text-sm text-slate-600 mt-2">
+          Check that your face is clear. Location, date, and time are printed on it.
+        </Text>
       ) : (
         <Text className="text-sm text-slate-600 mt-2">
-          A face photo is required. Location, date, and time are printed on it.
+          Fit your face inside the outline, then tap Take photo.
         </Text>
       )}
       {shot ? (

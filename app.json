@@ -2,7 +2,7 @@
   "expo": {
     "name": "BizBuddy",
     "slug": "biz-buddy-slug",
-    "version": "1.0.32",
+    "version": "1.0.33",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "myapp",
@@ -12,7 +12,7 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": true,
       "bundleIdentifier": "com.bizsolutions.bizbuddy",
-      "buildNumber": "36",
+      "buildNumber": "37",
       "infoPlist": {
         "LSApplicationQueriesSchemes": ["mailto"],
         "NSLocationWhenInUseUsageDescription": "BizBuddy records your location during an open shift, at the interval your company set, including while you are using the app. Recording stops when you clock out.",
@@ -29,7 +29,8 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.bizsolutions.mybizbuddy",
-      "versionCode": 43,
+      "versionCode": 44,
+      "blockedPermissions": ["android.permission.RECORD_AUDIO"],
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
@@ -72,7 +73,9 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "BizBuddy uses the camera so you can take a face photo when you clock in or clock out."
+          "cameraPermission": "BizBuddy uses the camera so you can take a face photo when you clock in or clock out.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ]
     ],
@@ -87,7 +90,7 @@
         "projectId": "8b8bca85-6495-417d-9c3c-278ca99b9da8"
       }
     },
-    "runtimeVersion": "1.0.32",
+    "runtimeVersion": "1.0.33",
     "owner": "miguelalviar"
   }
 }
